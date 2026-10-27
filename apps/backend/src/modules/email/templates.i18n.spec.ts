@@ -232,16 +232,16 @@ describe("every template", () => {
     // translated. Checked on a phrase from each template rather than
     // the brand name, which stays Latin on purpose.
     const englishTells = [
-      "Welcome aboard",
+      "Welcome to Neoxify",
       "Reset your password",
       "Data running low",
-      "Subscription expiring soon",
+      "Your plan ends soon",
       "Your invite worked",
       "Your free time is ready",
       "Support replied",
       "Thanks for your payment",
       "This invoice is still unpaid",
-      "Your subscription is ready",
+      "Your plan is ready",
       "You're receiving this because",
     ];
     for (const tell of englishTells) {

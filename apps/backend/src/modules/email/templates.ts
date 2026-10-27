@@ -347,30 +347,30 @@ function statPill(s: Style, value: string, label: string): string {
 const EN = {
   chrome: {
     accountNotice: "You're receiving this because you have a Neoxify account.",
-    ignoreNotice: "If something here looks wrong, you can safely ignore this email.",
+    ignoreNotice: "If this email looks wrong to you, you can ignore it.",
   },
 
   verification: {
-    subject: "Welcome to Neoxify -- verify your email",
-    preheader: (code: string) => `Your verification code is ${code}.`,
-    heading: "Welcome aboard ⚡",
-    intro: "Your Neoxify account is created. One step left -- enter this code in the app to activate it:",
-    orClick: "Or just click here:",
-    button: "Verify my email",
+    subject: "Confirm your Neoxify email",
+    preheader: (code: string) => `Your confirmation code is ${code}.`,
+    heading: "Welcome to Neoxify",
+    intro: "Your Neoxify account is ready. Enter this code in the app to activate it:",
+    orClick: "Or use this button:",
+    button: "Confirm my email",
     expiry: "This code expires in 24 hours. If you didn't create a Neoxify account, you can ignore this email.",
     text: (code: string, link: string) =>
-      `Welcome to Neoxify. Your verification code: ${code} (expires in 24 hours). Or open: ${link}`,
+      `Welcome to Neoxify. Your confirmation code: ${code} (expires in 24 hours). Or open: ${link}`,
   },
 
   passwordReset: {
     subject: "Reset your Neoxify password",
     preheader: (code: string) => `Your password reset code is ${code}.`,
     heading: "Reset your password",
-    intro: "A password reset was requested for your account. Enter this code in the app to continue:",
+    intro: "Someone asked to reset the password for your account. Enter this code in the app to continue:",
     expiry:
-      "This code expires in 30 minutes. If you didn't request this, you can safely ignore this email -- your password won't change.",
+      "This code expires in 30 minutes. If you didn't ask for this, ignore this email. Your password won't change.",
     text: (code: string) =>
-      `A password reset was requested for your Neoxify account. Your code: ${code} (expires in 30 minutes). If you didn't request this, ignore this email.`,
+      `Someone asked to reset the password for your Neoxify account. Your code: ${code} (expires in 30 minutes). If you didn't ask for this, ignore this email.`,
   },
 
   lowData: {
@@ -378,22 +378,22 @@ const EN = {
     preheader: (gb: string) => `About ${gb} GB left on your current plan.`,
     heading: "Data running low",
     pillValue: (gb: string) => `${gb} GB`,
-    pillLabel: "remaining this period",
-    body: "Once your data cap is reached, your VPN connection will be paused until you renew or upgrade.",
+    pillLabel: "left this period",
+    body: "When your data runs out, your VPN connection pauses until you renew or upgrade your plan.",
     text: (gb: string) =>
-      `You have about ${gb} GB of data remaining on your current plan. Once your data cap is reached, your VPN connection will be paused until you renew or upgrade.`,
+      `You have about ${gb} GB of data left on your current plan. When your data runs out, your VPN connection pauses until you renew or upgrade your plan.`,
   },
 
   expiringSoon: {
-    subject: "Your Neoxify subscription is expiring soon",
+    subject: "Your Neoxify plan ends soon",
     preheader: (days: number) =>
-      `Your subscription expires in about ${days} ${days === 1 ? "day" : "days"}.`,
-    heading: "Subscription expiring soon",
+      `Your plan ends in about ${days} ${days === 1 ? "day" : "days"}.`,
+    heading: "Your plan ends soon",
     pillValue: (days: number) => `${days} ${days === 1 ? "day" : "days"}`,
-    pillLabel: "until expiry",
-    body: "Renew before it expires to keep your VPN connection active without interruption.",
+    pillLabel: "left",
+    body: "Renew before then so your VPN keeps working without a break.",
     text: (days: number) =>
-      `Your subscription expires in about ${days} day(s). Renew before it expires to keep your VPN connection active without interruption.`,
+      `Your plan ends in about ${days} day(s). Renew before then so your VPN keeps working without a break.`,
   },
 
   referralJoined: {
@@ -401,7 +401,7 @@ const EN = {
     preheader: (masked: string) => `${masked} just activated their account.`,
     heading: "Your invite worked",
     pillLabel: "just activated their account",
-    keepInviting: "Keep inviting friends to earn free months of Neoxify.",
+    keepInviting: "Invite more friends to get free months of Neoxify.",
     monthsToGo: (months: number) =>
       `You're ${months} paid ${months === 1 ? "month" : "months"} away from your next free month.`,
     text: (masked: string, months: number | null) =>
@@ -421,7 +421,7 @@ const EN = {
      * with everything else rather than left in English by the one place
      * that supplies it. */
     fallbackPlanName: "your plan",
-    body: "Thanks for spreading the word. It's already on your account -- open Neoxify and connect as usual.",
+    body: "Thanks for inviting your friends. The free time is already on your account. Open Neoxify and connect as usual.",
     text: (days: number, planName: string) =>
       `You have earned ${days} free days of Neoxify on ${planName}, thanks to the friends you invited. It is already active on your account.`,
   },
@@ -433,7 +433,7 @@ const EN = {
 
   supportReply: {
     heading: "Support replied",
-    footer: "Reply from inside the Neoxify app to continue the conversation.",
+    footer: "Reply from the Neoxify app to continue the conversation.",
   },
 
   invoiceIssued: {
@@ -441,7 +441,7 @@ const EN = {
     preheader: (amount: string, planName: string) => `${amount} for ${planName}.`,
     heading: "Thanks for your payment",
     body: (amount: string, planName: string) =>
-      `We've received ${amount} for your ${planName} subscription. It's active now.`,
+      `We received ${amount} for your ${planName} plan. It's active now.`,
     button: "View invoice",
     keep: "Keep this for your records. You can view or print your invoices any time from the app.",
     text: (amount: string, planName: string, invoiceNumber: string, documentUrl?: string) =>
@@ -458,17 +458,17 @@ const EN = {
       `We haven't received ${amount} for invoice ${invoiceNumber} yet.`,
     button: "View invoice",
     settling:
-      "If you've already paid, it may still be confirming -- crypto payments can take a while, and this will clear on its own. Otherwise, reach out and we'll help.",
+      "If you've already paid, the payment may still be confirming. Crypto payments can take a while, and this clears by itself. If you haven't paid, contact us and we'll help.",
     text: (amount: string, invoiceNumber: string, documentUrl?: string) =>
       `Invoice ${invoiceNumber} for ${amount} is unpaid.${documentUrl ? ` View it: ${documentUrl}` : ""}`,
   },
 
   voucher: {
-    subject: (planName: string) => `Your Neoxify ${planName} subscription is ready`,
+    subject: (planName: string) => `Your Neoxify ${planName} plan is ready`,
     preheader: (planName: string, code: string) => `Activate your ${planName} plan with code ${code}.`,
-    heading: "Your subscription is ready",
+    heading: "Your plan is ready",
     body: (planName: string) =>
-      `You've been given a <strong>${planName}</strong> plan on Neoxify. Activate it with the code below — no payment needed.`,
+      `You've been given a <strong>${planName}</strong> plan on Neoxify. Activate it with the code below. No payment is needed.`,
     button: "Activate my plan",
     thenInstall: "Then install the app and sign in with the same email:",
     noLinks: "Download the app from neoxify.net to get started.",
@@ -481,7 +481,7 @@ const EN = {
     neverExpires: "This code does not expire.",
     byHand: "If the button doesn't work, go to neoxify.net/account and enter the code by hand.",
     text: (planName: string, code: string, activationUrl: string, expiry: string) =>
-      `Your Neoxify ${planName} subscription is ready.\n\n` +
+      `Your Neoxify ${planName} plan is ready.\n\n` +
       `Activation code: ${code}\n` +
       `Activate here: ${activationUrl}\n\n` +
       `${expiry}\n`,
@@ -498,91 +498,90 @@ type Strings = typeof EN;
  * ignore this" constructions are the ones a Persian speaker would
  * actually use rather than a literal rendering of the English idiom.
  *
- * "Neoxify" is left in Latin script throughout, matching the Persian
- * dictionary in the clients: it is the name printed on the app the
- * reader is being told to open, and a transliteration would not match
- * anything they can see.
+ * The name is written نئوکسیفای in Persian prose, as the clients' Persian
+ * dictionary writes it, so a sentence does not switch script mid-way. The
+ * wordmark in the header stays Latin: it is what is printed on the app.
  *
  * Numbers in prose are Persian-Indic (see `num()`); codes, invoice
  * numbers, money and dates are not (see `bigCode()` and `ltr()`).
  */
 const FA: Strings = {
   chrome: {
-    accountNotice: "این ایمیل را دریافت کرده‌اید چون در Neoxify حساب کاربری دارید.",
-    ignoreNotice: "اگر چیزی در آن درست به نظر نمی‌رسد، می‌توانید بدون نگرانی نادیده‌اش بگیرید.",
+    accountNotice: "این ایمیل را گرفته‌اید چون در نئوکسیفای حساب کاربری دارید.",
+    ignoreNotice: "اگر این ایمیل به نظرتان اشتباه است، آن را نادیده بگیرید.",
   },
 
   verification: {
-    subject: "به Neoxify خوش آمدید — ایمیلتان را تأیید کنید",
+    subject: "ایمیل نئوکسیفای خود را تأیید کنید",
     preheader: (code: string) => `کد تأیید شما ${ltr(code)} است.`,
-    heading: "خوش آمدید ⚡",
-    intro: "حساب Neoxify شما ساخته شد. یک قدم مانده — این کد را در برنامه وارد کنید تا فعال شود:",
-    orClick: "یا روی این دکمه بزنید:",
+    heading: "به نئوکسیفای خوش آمدید",
+    intro: "حساب نئوکسیفای شما آماده است. برای فعال کردنش، این کد را در برنامه وارد کنید:",
+    orClick: "یا از این دکمه استفاده کنید:",
     button: "تأیید ایمیل",
-    expiry: "این کد تا ۲۴ ساعت اعتبار دارد. اگر شما حساب Neoxify نساخته‌اید، این ایمیل را نادیده بگیرید.",
+    expiry: "این کد تا ۲۴ ساعت اعتبار دارد. اگر شما حساب نئوکسیفای نساخته‌اید، این ایمیل را نادیده بگیرید.",
     text: (code: string, link: string) =>
-      `به Neoxify خوش آمدید. کد تأیید شما: ${code} (تا ۲۴ ساعت اعتبار دارد). یا این نشانی را باز کنید: ${link}`,
+      `به نئوکسیفای خوش آمدید. کد تأیید شما: ${code} (تا ۲۴ ساعت اعتبار دارد). یا این لینک را باز کنید: ${link}`,
   },
 
   passwordReset: {
-    subject: "بازنشانی رمز عبور Neoxify",
+    subject: "بازنشانی رمز عبور نئوکسیفای",
     preheader: (code: string) => `کد بازنشانی رمز عبور شما ${ltr(code)} است.`,
     heading: "بازنشانی رمز عبور",
-    intro: "برای حساب شما درخواست بازنشانی رمز عبور ثبت شده است. برای ادامه، این کد را در برنامه وارد کنید:",
+    intro: "درخواست بازنشانی رمز عبور حساب شما ثبت شد. برای ادامه، این کد را در برنامه وارد کنید:",
     expiry:
-      "این کد تا ۳۰ دقیقه اعتبار دارد. اگر شما چنین درخواستی نداده‌اید، می‌توانید این ایمیل را نادیده بگیرید — رمز عبورتان تغییر نمی‌کند.",
+      "این کد تا ۳۰ دقیقه اعتبار دارد. اگر شما این درخواست را نداده‌اید، این ایمیل را نادیده بگیرید. رمز عبورتان عوض نمی‌شود.",
     text: (code: string) =>
-      `برای حساب Neoxify شما درخواست بازنشانی رمز عبور ثبت شد. کد شما: ${code} (تا ۳۰ دقیقه اعتبار دارد). اگر شما چنین درخواستی نداده‌اید، این ایمیل را نادیده بگیرید.`,
+      `درخواست بازنشانی رمز عبور حساب نئوکسیفای شما ثبت شد. کد شما: ${code} (تا ۳۰ دقیقه اعتبار دارد). اگر شما این درخواست را نداده‌اید، این ایمیل را نادیده بگیرید.`,
   },
 
   lowData: {
-    subject: "حجم Neoxify شما رو به پایان است",
+    subject: "حجم نئوکسیفای شما رو به تمام شدن است",
     preheader: (gb: string) => `حدود ${ltr(gb)} گیگابایت از پلن فعلی شما مانده است.`,
-    heading: "حجم رو به پایان",
+    heading: "حجم رو به تمام شدن",
     pillValue: (gb: string) => `${gb} گیگابایت`,
-    pillLabel: "باقی‌مانده در این دوره",
-    body: "با تمام‌شدن حجم، اتصال VPN شما تا زمان تمدید یا ارتقای پلن متوقف می‌شود.",
+    pillLabel: "مانده در این دوره",
+    body: "وقتی حجم تمام شود، اتصال وی‌پی‌ان شما تا تمدید یا ارتقای پلن متوقف می‌شود.",
     text: (gb: string) =>
-      `حدود ${gb} گیگابایت از حجم پلن فعلی شما باقی مانده است. با تمام‌شدن حجم، اتصال VPN شما تا زمان تمدید یا ارتقای پلن متوقف می‌شود.`,
+      `حدود ${gb} گیگابایت از حجم پلن فعلی شما مانده است. وقتی حجم تمام شود، اتصال وی‌پی‌ان شما تا تمدید یا ارتقای پلن متوقف می‌شود.`,
   },
 
   expiringSoon: {
-    subject: "اشتراک Neoxify شما به‌زودی تمام می‌شود",
+    subject: "پلن نئوکسیفای شما به‌زودی تمام می‌شود",
     // Persian does not inflect the noun after a number, so the English
     // day/days branch collapses to one form here.
-    preheader: (days: number) => `اشتراک شما تا حدود ${ltr(num("fa", days))} روز دیگر تمام می‌شود.`,
-    heading: "اشتراک رو به پایان",
+    preheader: (days: number) => `پلن شما حدود ${ltr(num("fa", days))} روز دیگر تمام می‌شود.`,
+    heading: "پلن شما به‌زودی تمام می‌شود",
     pillValue: (days: number) => `${num("fa", days)} روز`,
-    pillLabel: "تا پایان اشتراک",
-    body: "پیش از پایان اشتراک آن را تمدید کنید تا اتصالتان بدون وقفه برقرار بماند.",
+    pillLabel: "مانده",
+    body: "پیش از تمام شدن پلن، آن را تمدید کنید تا وی‌پی‌ان شما بدون وقفه کار کند.",
     text: (days: number) =>
-      `اشتراک شما تا حدود ${num("fa", days)} روز دیگر تمام می‌شود. پیش از آن تمدید کنید تا اتصالتان بدون وقفه برقرار بماند.`,
+      `پلن شما حدود ${num("fa", days)} روز دیگر تمام می‌شود. پیش از آن تمدیدش کنید تا وی‌پی‌ان شما بدون وقفه کار کند.`,
   },
 
   referralJoined: {
-    subject: "کسی با دعوت شما به Neoxify پیوست",
+    subject: "یک نفر با دعوت شما در نئوکسیفای ثبت‌نام کرد",
     preheader: (masked: string) => `${ltr(masked)} حسابش را فعال کرد.`,
-    heading: "دعوتتان نتیجه داد",
+    heading: "دعوت شما نتیجه داد",
     pillLabel: "حسابش را فعال کرد",
-    keepInviting: "برای گرفتن ماه‌های رایگان Neoxify، دوستان بیشتری دعوت کنید.",
+    keepInviting: "دوستان بیشتری دعوت کنید تا ماه‌های رایگان نئوکسیفای بگیرید.",
     monthsToGo: (months: number) =>
-      `تا ماه رایگان بعدی‌تان ${ltr(num("fa", months))} ماه اشتراک پولی فاصله دارید.`,
+      `تا ماه رایگان بعدی، ${ltr(num("fa", months))} ماه خرید دیگر لازم است.`,
     text: (masked: string, months: number | null) =>
-      `${masked} با دعوت شما حساب Neoxify خود را فعال کرد.${
-        months === null ? "" : ` تا ماه رایگان بعدی‌تان ${num("fa", months)} ماه اشتراک پولی فاصله دارید.`
+      `${masked} با دعوت شما حساب نئوکسیفای خود را فعال کرد.${
+        months === null ? "" : ` تا ماه رایگان بعدی، ${num("fa", months)} ماه خرید دیگر لازم است.`
       }`,
   },
 
   referralReward: {
-    subject: "زمان رایگان Neoxify برای شما ثبت شد",
+    subject: "زمان رایگان نئوکسیفای برای شما ثبت شد",
     preheader: (days: number) => `${ltr(num("fa", days))} روز رایگان به حسابتان اضافه شد.`,
     heading: "زمان رایگان شما آماده است",
     pillValue: (days: number) => `${num("fa", days)} روز`,
     pillLabel: (planName: string) => `رایگان روی ${planName}`,
     fallbackPlanName: "پلن شما",
-    body: "ممنون که Neoxify را به دیگران معرفی کردید. این زمان هم‌اکنون روی حسابتان فعال است — برنامه را باز کنید و مثل همیشه وصل شوید.",
+    body: "ممنون که دوستانتان را دعوت کردید. این زمان رایگان همین حالا روی حسابتان فعال است. نئوکسیفای را باز کنید و مثل همیشه وصل شوید.",
     text: (days: number, planName: string) =>
-      `به لطف دوستانی که دعوت کردید، ${num("fa", days)} روز استفاده‌ی رایگان از Neoxify روی پلن ${planName} برای شما ثبت شد و هم‌اکنون روی حسابتان فعال است.`,
+      `به خاطر دوستانی که دعوت کردید، ${num("fa", days)} روز استفادهٔ رایگان از نئوکسیفای روی ${planName} برای شما ثبت شد و همین حالا روی حسابتان فعال است.`,
   },
 
   announcement: {
@@ -591,27 +590,27 @@ const FA: Strings = {
     // to send back a Persian word we do not look for would make the
     // instruction wrong rather than translated.
     footer:
-      "این یک اطلاعیه از Neoxify است. برای متوقف‌کردن دریافت آن‌ها، به این ایمیل پاسخ دهید و بنویسید Unsubscribe.",
+      "این یک اطلاعیه از نئوکسیفای است. اگر نمی‌خواهید این ایمیل‌ها را بگیرید، به همین ایمیل جواب بدهید و بنویسید Unsubscribe.",
     textFooter:
-      "این یک اطلاعیه از Neoxify است. برای متوقف‌کردن دریافت آن‌ها، به این ایمیل پاسخ دهید و بنویسید Unsubscribe.",
+      "این یک اطلاعیه از نئوکسیفای است. اگر نمی‌خواهید این ایمیل‌ها را بگیرید، به همین ایمیل جواب بدهید و بنویسید Unsubscribe.",
   },
 
   supportReply: {
-    heading: "پشتیبانی پاسخ داد",
-    footer: "برای ادامه‌ی گفتگو، از داخل برنامه‌ی Neoxify پاسخ دهید.",
+    heading: "پشتیبانی جواب داد",
+    footer: "برای ادامهٔ گفت‌وگو، از داخل برنامهٔ نئوکسیفای جواب بدهید.",
   },
 
   invoiceIssued: {
-    subject: (invoiceNumber: string) => `رسید پرداخت Neoxify (${invoiceNumber})`,
+    subject: (invoiceNumber: string) => `رسید پرداخت نئوکسیفای (${invoiceNumber})`,
     preheader: (amount: string, planName: string) => `${ltr(amount)} بابت ${planName}.`,
-    heading: "از پرداخت شما سپاسگزاریم",
+    heading: "ممنون از پرداخت شما",
     body: (amount: string, planName: string) =>
-      `${ltr(amount)} بابت اشتراک ${planName} شما دریافت شد و اشتراک هم‌اکنون فعال است.`,
-    button: "مشاهده‌ی فاکتور",
-    keep: "این را برای سوابق خود نگه دارید. هر وقت بخواهید می‌توانید فاکتورهایتان را از داخل برنامه ببینید یا چاپ کنید.",
+      `${ltr(amount)} بابت پلن ${planName} شما دریافت شد و پلن همین حالا فعال است.`,
+    button: "دیدن فاکتور",
+    keep: "این ایمیل را برای سوابق خود نگه دارید. هر وقت بخواهید می‌توانید فاکتورها را در برنامه ببینید یا چاپ کنید.",
     text: (amount: string, planName: string, invoiceNumber: string, documentUrl?: string) =>
-      `پرداخت دریافت شد: ${amount} بابت ${planName}. شماره‌ی فاکتور ${invoiceNumber}.${
-        documentUrl ? ` مشاهده: ${documentUrl}` : ""
+      `پرداخت دریافت شد: ${amount} بابت ${planName}. شمارهٔ فاکتور ${invoiceNumber}.${
+        documentUrl ? ` دیدن فاکتور: ${documentUrl}` : ""
       }`,
   },
 
@@ -621,32 +620,32 @@ const FA: Strings = {
     heading: "این فاکتور هنوز پرداخت نشده",
     body: (amount: string, invoiceNumber: string) =>
       `${ltr(amount)} بابت فاکتور ${ltr(invoiceNumber)} هنوز به دست ما نرسیده است.`,
-    button: "مشاهده‌ی فاکتور",
+    button: "دیدن فاکتور",
     settling:
-      "اگر پرداخت کرده‌اید، ممکن است هنوز در حال تأیید باشد — پرداخت‌های رمزارزی گاهی طول می‌کشند و این مورد خودبه‌خود تسویه می‌شود. در غیر این صورت به ما پیام بدهید تا کمکتان کنیم.",
+      "اگر پرداخت کرده‌اید، ممکن است هنوز در حال تأیید باشد. پرداخت با رمزارز گاهی طول می‌کشد و این فاکتور خودش تسویه می‌شود. اگر پرداخت نکرده‌اید، به ما پیام بدهید تا کمکتان کنیم.",
     text: (amount: string, invoiceNumber: string, documentUrl?: string) =>
       `فاکتور ${invoiceNumber} به مبلغ ${amount} پرداخت نشده است.${
-        documentUrl ? ` مشاهده: ${documentUrl}` : ""
+        documentUrl ? ` دیدن فاکتور: ${documentUrl}` : ""
       }`,
   },
 
   voucher: {
-    subject: (planName: string) => `اشتراک ${planName} شما در Neoxify آماده است`,
+    subject: (planName: string) => `پلن ${planName} شما در نئوکسیفای آماده است`,
     preheader: (planName: string, code: string) =>
       `پلن ${planName} خود را با کد ${ltr(code)} فعال کنید.`,
-    heading: "اشتراک شما آماده است",
+    heading: "پلن شما آماده است",
     body: (planName: string) =>
-      `یک پلن <strong>${planName}</strong> در Neoxify به شما داده شده است. با کد زیر فعالش کنید — نیازی به پرداخت نیست.`,
-    button: "فعال‌سازی اشتراک",
-    thenInstall: "سپس برنامه را نصب کنید و با همین ایمیل وارد شوید:",
-    noLinks: "برای شروع، برنامه را از neoxify.net دریافت کنید.",
-    installerSub: "نصب‌کننده",
+      `یک پلن <strong>${planName}</strong> در نئوکسیفای به شما داده شده است. با کد زیر فعالش کنید. نیازی به پرداخت نیست.`,
+    button: "فعال کردن پلن",
+    thenInstall: "بعد برنامه را نصب کنید و با همین ایمیل وارد شوید:",
+    noLinks: "برای شروع، برنامه را از neoxify.net دانلود کنید.",
+    installerSub: "فایل نصب",
     apkSub: "فایل APK",
-    expiresOn: (date: string) => `این کد در تاریخ ${date} منقضی می‌شود.`,
+    expiresOn: (date: string) => `این کد تا تاریخ ${date} اعتبار دارد.`,
     neverExpires: "این کد تاریخ انقضا ندارد.",
-    byHand: "اگر دکمه کار نکرد، به neoxify.net/account بروید و کد را دستی وارد کنید.",
+    byHand: "اگر دکمه کار نکرد، به neoxify.net/account بروید و کد را خودتان وارد کنید.",
     text: (planName: string, code: string, activationUrl: string, expiry: string) =>
-      `اشتراک ${planName} شما در Neoxify آماده است.\n\n` +
+      `پلن ${planName} شما در نئوکسیفای آماده است.\n\n` +
       `کد فعال‌سازی: ${code}\n` +
       `فعال‌سازی: ${activationUrl}\n\n` +
       `${expiry}\n`,
