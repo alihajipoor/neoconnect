@@ -7,7 +7,7 @@ import {
   lastGoodFor,
   rememberLastGood,
 } from "@shared/lib/failover";
-import { recordAttempt, type ConnectHistory } from "@shared/lib/connect-history";
+import { recordAttempt, recordSpeed, type ConnectHistory } from "@shared/lib/connect-history";
 import {
   loadConnectHistory,
   loadLastGood,
@@ -133,6 +133,7 @@ import {
 } from "@shared/lib/attempts";
 import {
   checkDataMoves,
+  rememberedKbps,
   describeSlow,
   keepsSlow,
   noSlowRungs,
@@ -2458,8 +2459,11 @@ export function Dashboard({
       seed: installSeed(),
     });
     let historyNow = history;
-    const remember = (routeId: string, protocol: ProtocolUser["protocol"], ok: boolean) => {
+    const remember = (routeId: string, protocol: ProtocolUser["protocol"], ok: boolean, kbps: number | null = null) => {
       historyNow = recordAttempt(historyNow, networkId, routeId, protocol, ok);
+      // What the data check measured, so the next connect here can prefer
+      // the faster server (`speedFor`).
+      if (kbps !== null) historyNow = recordSpeed(historyNow, networkId, routeId, protocol, kbps);
       void saveConnectHistory(historyNow);
     };
 
@@ -2785,8 +2789,10 @@ export function Dashboard({
         // slow fallback, which lands anyway and says so.
         let tooSlow: Parameters<typeof describeSlow>[0] | null = null;
         let keptSlow = false;
+        let measured: Awaited<ReturnType<typeof checkDataMoves>> | null = null;
         if (outcome === "connected" && verdict.state === "throughTunnel") {
           const moved = await checkDataMoves(verdict.from);
+          measured = moved;
           if (sessionGeneration() !== sessionAtStart) {
             await forgetProfiles().catch(() => disconnect()).catch(() => undefined);
             return "failed";
@@ -2835,7 +2841,7 @@ export function Dashboard({
           const proven = outcome === "connected";
           // The slow fallback carried, but leading with it next time would
           // only cost a check to find it slow again.
-          remember(candidate.routeId, candidate.protocol, proven && !keptSlow);
+          remember(candidate.routeId, candidate.protocol, proven && !keptSlow, rememberedKbps(measured));
           if (proven && !keptSlow) {
             void saveLastGood(rememberLastGood(lastGood, networkId, candidate.routeId));
           }
@@ -2893,7 +2899,7 @@ export function Dashboard({
         if (tooSlow !== null) {
           attempts.push(`${label}: up but ${describeSlow(tooSlow)}`);
           dials.push({ routeId: candidate.routeId, carried: false });
-          remember(candidate.routeId, candidate.protocol, false);
+          remember(candidate.routeId, candidate.protocol, false, rememberedKbps(tooSlow));
         } else if (rejectionIsEvidence(verdict)) {
           attempts.push(`${label}: up but not carrying traffic`);
           dials.push({ routeId: candidate.routeId, carried: false });

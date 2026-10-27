@@ -1,4 +1,4 @@
-import { scoreFor, type ConnectHistory } from "./connect-history";
+import { scoreFor, speedFor, type ConnectHistory } from "./connect-history";
 import { reachabilityKey, reachabilityOf, type ReachabilityMap } from "./reachability";
 import type { IspTag, Protocol, ProtocolUser } from "./types";
 
@@ -171,11 +171,41 @@ export function orderCandidates(
       .filter((answer) => answer !== "unknown");
     return asked.length > 0 && asked.every((answer) => answer === "unreachable");
   };
+  // How fast each combination went the last time it was measured here
+  // (`speedFor`), in bands a factor of two wide: one short check is a
+  // rough figure, and finer bands would swap two servers back and forth
+  // on noise.
+  const speed = (u: ProtocolUser): number | null =>
+    history ? speedFor(history, network ?? null, u.routeId, u.protocol, now) : null;
+  const band = (kbps: number): number => Math.floor(Math.log2(Math.max(kbps, 1)));
+  const bySpeed = (a: ProtocolUser, b: ProtocolUser): number => {
+    const [x, y] = [speed(a), speed(b)];
+    return x === null || y === null ? 0 : band(y) - band(x);
+  };
+  const fastestOn = (routeId: string): number | null => {
+    const known = users
+      .filter((u) => u.routeId === routeId)
+      .map(speed)
+      .filter((kbps): kbps is number => kbps !== null);
+    return known.length > 0 ? Math.max(...known) : null;
+  };
+
   // What worked here last time leads only while it still answers. A
   // server that has since been cut off kept leading every connect on that
   // network, each one paying for its failure before reaching anything
-  // that worked.
-  const lastGoodLeads = Boolean(lastGoodRouteId) && !refused(lastGoodRouteId as string);
+  // that worked. Nor once another server has been measured here at more
+  // than twice its speed, and has been working: the customer asked for
+  // the fastest that works, not the first that did.
+  const lastGoodSpeed = lastGoodRouteId ? fastestOn(lastGoodRouteId) : null;
+  const outpaced =
+    lastGoodSpeed !== null &&
+    users.some((u) => {
+      if (u.routeId === lastGoodRouteId) return false;
+      const kbps = speed(u);
+      const score = history ? scoreFor(history, network ?? null, u.routeId, u.protocol, now) : null;
+      return kbps !== null && kbps > 2 * lastGoodSpeed && score !== null && score >= 0.5;
+    });
+  const lastGoodLeads = Boolean(lastGoodRouteId) && !refused(lastGoodRouteId as string) && !outpaced;
   const pinnedCountry = new Set(pinnedRouteId ? (pinnedCountryRouteIds ?? []) : []);
 
   const priority = (u: ProtocolUser): number => {
@@ -293,6 +323,7 @@ export function orderCandidates(
       priority(a) - priority(b) ||
       liveness(a) - liveness(b) ||
       byEvidence(a, b) ||
+      bySpeed(a, b) ||
       fromOthers(a) - fromOthers(b) ||
       rank(a.protocol) - rank(b.protocol) ||
       wsLast(a) - wsLast(b) ||

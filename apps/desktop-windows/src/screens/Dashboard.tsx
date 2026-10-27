@@ -54,7 +54,7 @@ import {
 } from "../lib/uplink-watch";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { installSeed, orderCandidates, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
-import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
+import { recordAttempt, recordSpeed, type ConnectHistory } from "../lib/connect-history";
 import { probeCandidates } from "../lib/reachability";
 import {
   loadChosenRoute,
@@ -98,12 +98,14 @@ import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
 import {
   checkDataMoves,
+  rememberedKbps,
   describeSlow,
   keepsSlow,
   noSlowRungs,
   noteSlow,
   passOverSlow,
   slowFallback,
+  type DataVerdict,
 } from "../lib/data-check";
 import {
   failoverNotice,
@@ -4121,6 +4123,9 @@ export function Dashboard({
           let tooSlow = false;
           // The slow fallback, landed: the notice says it is slow.
           let landedSlow = false;
+          // What the data check measured, remembered with the attempt so
+          // the next connect here can prefer the faster server.
+          let measured: DataVerdict | null = null;
 
           if (customMode) {
             // The service's own words when it fails, not a generic
@@ -4252,6 +4257,7 @@ export function Dashboard({
             // the slow fallback, which lands anyway and says so.
             if (verdict === "connected" && egress.state === "throughTunnel") {
               const moved = await checkDataMoves(egress.from);
+              measured = moved;
               if (moved.state === "slow") {
                 if (keepsSlow(slow, candidate)) {
                   landedSlow = true;
@@ -4387,13 +4393,15 @@ export function Dashboard({
             // same reason it is excluded above: an engine that started
             // and proved nothing is not evidence that it works.
             {
-              const recorded = recordAttempt(
+              let recorded = recordAttempt(
                 history,
                 networkId,
                 candidate.routeId,
                 candidate.protocol,
                 verdict === "connected" && !landedSlow,
               );
+              const kbps = rememberedKbps(measured);
+              if (kbps !== null) recorded = recordSpeed(recorded, networkId, candidate.routeId, candidate.protocol, kbps);
               setHistory(recorded);
               void saveConnectHistory(recorded);
             }

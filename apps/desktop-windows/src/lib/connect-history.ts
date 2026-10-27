@@ -22,8 +22,10 @@ import type { Protocol } from "./types";
  * a server in the list still leads; this decides what comes after.
  */
 
-/** One attempt, as thin as it can be: when, and whether it worked. */
-export type Attempt = { at: number; ok: boolean };
+/** One attempt, as thin as it can be: when, and whether it worked --
+ * and, where the data check measured it (`data-check.ts`), how fast its
+ * slower direction went, in kilobits a second. */
+export type Attempt = { at: number; ok: boolean; kbps?: number };
 
 /** Keyed `network|routeId|protocol`. Newest last. */
 export type ConnectHistory = Record<string, Attempt[]>;
@@ -153,6 +155,43 @@ export function latestAttempt(
   let newest = attempts[0];
   for (const attempt of attempts) if (attempt.at >= newest.at) newest = attempt;
   return newest;
+}
+
+/** Stamps the speed the data check measured onto this combination's
+ * newest attempt -- the one just recorded for the same rung. */
+export function recordSpeed(
+  history: ConnectHistory,
+  network: string | null,
+  routeId: string,
+  protocol: Protocol,
+  kbps: number,
+): ConnectHistory {
+  const key = keyFor(network, routeId, protocol);
+  const attempts = history[key];
+  if (!attempts || attempts.length === 0 || !(kbps >= 0)) return history;
+  const stamped = attempts.map((attempt, i) => (i === attempts.length - 1 ? { ...attempt, kbps: Math.round(kbps) } : attempt));
+  return { ...history, [key]: stamped };
+}
+
+/** How long a measured speed says anything about a network. */
+export const SPEED_FRESH_MS = 2 * HALF_LIFE_MS;
+
+/** The newest measured speed for this combination, or `null` when none
+ * was measured in the last `SPEED_FRESH_MS`. */
+export function speedFor(
+  history: ConnectHistory,
+  network: string | null,
+  routeId: string,
+  protocol: Protocol,
+  now: number = Date.now(),
+): number | null {
+  const attempts = history[keyFor(network, routeId, protocol)] ?? [];
+  let newest: Attempt | null = null;
+  for (const attempt of attempts) {
+    if (attempt.kbps === undefined || now - attempt.at > SPEED_FRESH_MS) continue;
+    if (newest === null || attempt.at >= newest.at) newest = attempt;
+  }
+  return newest?.kbps ?? null;
 }
 
 /** Forgets everything recorded against one network.

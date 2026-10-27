@@ -106,6 +106,14 @@ export function noSlowRungs(): SlowRungs {
   return { routes: new Set(), best: null, redialling: null };
 }
 
+/** The speed a rung is remembered by (`recordSpeed`): its slower
+ * direction, which is what the customer feels. Null when nothing was
+ * measured. */
+export function rememberedKbps(verdict: DataVerdict | null): number | null {
+  if (verdict === null || verdict.state === "unmeasured") return null;
+  return Math.min(verdict.downKbps, verdict.upKbps);
+}
+
 /** Upload first -- the direction that is held -- then download. */
 function faster(a: { downKbps: number; upKbps: number }, b: { downKbps: number; upKbps: number }): boolean {
   return a.upKbps !== b.upKbps ? a.upKbps > b.upKbps : a.downKbps > b.downKbps;

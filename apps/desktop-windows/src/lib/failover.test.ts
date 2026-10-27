@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { recordAttempt, type ConnectHistory } from "./connect-history";
+import { recordAttempt, recordSpeed, speedFor, type ConnectHistory } from "./connect-history";
 import { reachabilityKey, type ReachabilityMap } from "./reachability";
 import { orderCandidates, lastGoodFor, rememberLastGood } from "./failover";
 import type { Protocol, ProtocolUser } from "./types";
@@ -369,5 +369,67 @@ describe("ties, pins and a remembered server that stopped answering", () => {
     // Not when nothing about it could be probed: UDP is never asked.
     const wg = [user("uk", "WIREGUARD"), user("de", "WIREGUARD")];
     expect(ids(orderCandidates(wg, { lastGoodRouteId: "uk", reachability: {} }))[0]).toBe("uk");
+  });
+});
+
+/** The data check measures each rung it lands on; the next connect on that
+ * network prefers what went fastest, by a clear margin, among what works. */
+describe("ordering by measured speed", () => {
+  const NET = "net-a";
+  const NOW = 1_800_000_000_000;
+  const reality = (routeId: string) => user(routeId, "XRAY_VLESS_REALITY");
+  const measured = (entries: Array<[string, number]>): ConnectHistory => {
+    let history: ConnectHistory = {};
+    for (const [routeId, kbps] of entries) {
+      history = recordAttempt(history, NET, routeId, "XRAY_VLESS_REALITY", true, NOW - 60_000);
+      history = recordSpeed(history, NET, routeId, "XRAY_VLESS_REALITY", kbps);
+    }
+    return history;
+  };
+
+  it("puts the faster of two working servers first, by a factor of two or more", () => {
+    const history = measured([
+      ["uk", 800],
+      ["de", 9_000],
+    ]);
+    const order = ids(orderCandidates([reality("uk"), reality("de")], { history, network: NET, now: NOW }));
+    expect(order[0]).toBe("de");
+  });
+
+  it("does not swap two servers over noise", () => {
+    const history = measured([
+      ["de", 5_000],
+      ["uk", 6_000],
+    ]);
+    const order = ids(orderCandidates([reality("uk"), reality("de")], { history, network: NET, now: NOW, seed: "s" }));
+    expect(order).toEqual(ids(orderCandidates([reality("uk"), reality("de")], { network: NET, now: NOW, seed: "s" })));
+  });
+
+  it("lets a much faster working server lead over what worked last time", () => {
+    const history = measured([
+      ["uk", 400],
+      ["de", 9_000],
+    ]);
+    const order = ids(
+      orderCandidates([reality("uk"), reality("de")], { history, network: NET, now: NOW, lastGoodRouteId: "uk" }),
+    );
+    expect(order[0]).toBe("de");
+  });
+
+  it("keeps what worked last time when nothing measured is much faster", () => {
+    const history = measured([
+      ["uk", 4_000],
+      ["de", 6_000],
+    ]);
+    const order = ids(
+      orderCandidates([reality("uk"), reality("de")], { history, network: NET, now: NOW, lastGoodRouteId: "uk" }),
+    );
+    expect(order[0]).toBe("uk");
+  });
+
+  it("forgets a speed after a day", () => {
+    const history = measured([["de", 9_000]]);
+    expect(speedFor(history, NET, "de", "XRAY_VLESS_REALITY", NOW)).toBe(9_000);
+    expect(speedFor(history, NET, "de", "XRAY_VLESS_REALITY", NOW + 25 * 3_600_000)).toBeNull();
   });
 });
