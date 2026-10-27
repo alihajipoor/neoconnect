@@ -91,7 +91,7 @@ describe("the approved strings", () => {
   });
 
   it("mention the backup server having failed only in the string for a relay that was dialled", () => {
-    const tried = (Object.keys(en) as (keyof typeof en)[]).filter((key) => /including the backup server/i.test(en[key]));
+    const tried = (Object.keys(en) as (keyof typeof en)[]).filter((key) => /even through the backup server/i.test(en[key]));
     expect(tried).toEqual(["api.unreachableWithBackup"]);
     const words = read("./failure-text.ts");
     expect(words).toMatch(/if \(failure\.relayTried && failure\.error !== STOPPED_ANSWERING\) return t\("api\.unreachableWithBackup"\)/);

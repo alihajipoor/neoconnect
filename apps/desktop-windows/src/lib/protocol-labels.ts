@@ -57,9 +57,9 @@ export function customerProtocolLabel(
  * name. Without it the labels are just different jargon. */
 export const CUSTOMER_PROTOCOL_HINTS: Record<Protocol, string> = {
   XRAY_VLESS_REALITY: "Hardest to block. Best on restricted networks.",
-  XRAY_VLESS_TLS: "Looks exactly like a normal HTTPS website.",
+  XRAY_VLESS_TLS: "Looks like a normal HTTPS website.",
   XRAY_VMESS: "Older stealth option, kept for compatibility.",
-  XRAY_TROJAN: "Also looks like a website. Older method than Stealth HTTPS.",
+  XRAY_TROJAN: "Also looks like a website. An older method than Stealth HTTPS.",
   SHADOWSOCKS: "No handshake to detect. Good when stealth ports are blocked.",
   WIREGUARD: "Fastest. Best when nothing is blocking you.",
   OPENVPN: "Slower, but works almost everywhere.",

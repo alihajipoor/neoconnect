@@ -40,7 +40,7 @@ describe("the refusal card", () => {
   it("says the limit and where Neoxify is in use, since when", () => {
     const copy = describeSlotNotice({ kind: "refused", refusal: { limit: 1, holders: [PC] } }, ctx("en"));
     expect(copy.lines[0]).toBe("Your plan allows 1 device at a time.");
-    expect(copy.lines[1]).toMatch(/^Neoxify is in use on a Windows PC since 10:32\.$/);
+    expect(copy.lines[1]).toMatch(/^Neoxify has been in use on a Windows PC since 10:32\.$/);
     expect(copy.useHere).toEqual({ label: "Use on this device instead", takeover: ["pc"] });
     expect(copy.dismiss).toBe("Cancel");
   });
@@ -148,7 +148,7 @@ describe("the other notices", () => {
 
   it("names the limit as a possibility when the API could not be asked, and offers nothing to press", () => {
     const copy = describeSlotNotice({ kind: "unchecked", limit: 1, noAnswer: true }, ctx("en"));
-    expect(copy.lines[0]).toMatch(/^We couldn't reach Neoxify to check\./);
+    expect(copy.lines[0]).toMatch(/^Couldn't reach Neoxify to check\./);
     expect(copy.lines[0]).toContain("may be the reason");
     expect(copy.useHere).toBeNull();
     expect(copy.dismiss).toBeNull();
@@ -160,7 +160,7 @@ describe("the other notices", () => {
   it("never says Neoxify could not be reached when it answered without confirming", () => {
     const en = describeSlotNotice({ kind: "unchecked", limit: 2, noAnswer: false }, ctx("en"));
     expect(en.lines).toEqual([
-      "Neoxify couldn't confirm this device's place on your plan right now. If Neoxify is in use on another of your devices, your plan's limit of 2 at a time may be the reason.",
+      "Neoxify couldn't confirm this device's place on your plan right now. If you're using Neoxify on another device, your plan's limit of 2 at a time may be the reason.",
     ]);
     expect(en.lines[0]).not.toMatch(/reach/);
     expect(en.useHere).toBeNull();
@@ -178,9 +178,9 @@ describe("names and times", () => {
    * name in the app's language, else "another device". */
   it("names each platform in English and in Persian when there is no label", () => {
     const cases = [
-      ["windows", "a Windows PC", "یک رایانهٔ ویندوزی"],
+      ["windows", "a Windows PC", "یک کامپیوتر ویندوزی"],
       ["macos", "a Mac", "یک مک"],
-      ["linux", "a Linux PC", "یک رایانهٔ لینوکسی"],
+      ["linux", "a Linux PC", "یک کامپیوتر لینوکسی"],
       ["android", "an Android phone", "یک گوشی اندروید"],
       ["ios", "an iPhone", "یک آیفون"],
     ];

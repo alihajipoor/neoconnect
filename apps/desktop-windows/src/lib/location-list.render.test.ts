@@ -121,7 +121,7 @@ describe("the redesigned server list", () => {
       expect(html).toContain('dir="ltr">۱۰۷ ms</span>');
       expect(html).not.toContain("107 ms");
       // The counts behind "worked for others here" too.
-      expect(html).toContain("۹ نفر از ۱۱ نفر، ۲۴ ساعت گذشته");
+      expect(html).toContain("۹ نفر از ۱۱ نفر در ۲۴ ساعت گذشته");
     } finally {
       vi.unstubAllGlobals();
     }

@@ -90,7 +90,7 @@ describe("a request nothing answered", () => {
     expect(failureText(failure, fa)).toBe(DICTIONARIES.fa["api.unreachable"]);
     expect(failureText(failure, fa)).toMatch(/[؀-ۿ]/);
     expect(failureText(failure, fa)).not.toMatch(/Could not reach/);
-    expect(failureText(failure, en)).toBe("Could not reach Neoxify. Check your internet connection.");
+    expect(failureText(failure, en)).toBe("Couldn't reach Neoxify. Check your internet connection.");
   });
 
   it("says Neoxify stopped responding when it had answered moments before", async () => {
@@ -156,7 +156,7 @@ describe("a request something answered", () => {
     const failure = await failureOf(apiRequest("/customer/subscriptions"));
 
     expect(failure.status).toBe(502);
-    expect(failureText(failure, en)).toBe("The server answered with an error (502). Please try again in a moment.");
+    expect(failureText(failure, en)).toBe("The server answered with an error (502). Try again in a moment.");
     expect(failureText(failure, fa)).toBe(DICTIONARIES.fa["api.serverError"].replace("{status}", "502"));
     expect(failureText(failure, en)).not.toMatch(/could not reach/i);
     expect(failureText(failure, fa)).not.toBe(DICTIONARIES.fa["api.unreachable"]);

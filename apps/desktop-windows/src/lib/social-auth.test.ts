@@ -35,7 +35,7 @@ describe("readCallback", () => {
 
   it("falls back to a generic message when the server sent no detail", () => {
     expect(() => readCallback("neoconnect://social-callback?error=failed")).toThrow(
-      /did not work/,
+      /didn't work/,
     );
   });
 
@@ -45,18 +45,18 @@ describe("readCallback", () => {
     // render Nest's JSON error page inside the sign-in browser, whose
     // only exit is a dismissal the app then reported as nothing at all.
     expect(() => readCallback("neoconnect://social-callback?error=unavailable")).toThrow(
-      /not available right now/,
+      /isn't available right now/,
     );
   });
 
   it("refuses a callback that carries nothing at all", () => {
     // Neither a handoff nor an error. Something is wrong and the button
     // must not silently do nothing.
-    expect(() => readCallback("neoconnect://social-callback")).toThrow(/did not work/);
+    expect(() => readCallback("neoconnect://social-callback")).toThrow(/didn't work/);
   });
 
   it("does not mistake an empty handoff for a session", () => {
-    expect(() => readCallback("neoconnect://social-callback?handoff=")).toThrow(/did not work/);
+    expect(() => readCallback("neoconnect://social-callback?handoff=")).toThrow(/didn't work/);
   });
 });
 
