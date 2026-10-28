@@ -31,9 +31,9 @@ const build = () => {
   // 192.0.2.0/24 on AS64501, both customers' networks.
   const identity = {
     verify: (token?: string) => (token === "signed-for-64500" ? 64500 : null),
-    isOwnAddress: async (ip: string) => ip.startsWith("203.0.113."),
-    identify: async (ip: string) =>
-      ip.startsWith("198.51.100.") ? { asn: 64500 } : ip.startsWith("192.0.2.") ? { asn: 64501 } : null,
+    isOwnAddress: (ip: string) => Promise.resolve(ip.startsWith("203.0.113.")),
+    identify: (ip: string) =>
+      Promise.resolve(ip.startsWith("198.51.100.") ? { asn: 64500 } : ip.startsWith("192.0.2.") ? { asn: 64501 } : null),
   };
   const service = new ClientAttemptsService(
     { clientAttempt: { create, deleteMany, updateMany, findMany, groupBy } } as unknown as PrismaService,
