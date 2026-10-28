@@ -212,8 +212,16 @@ export class ConcurrencyService {
       counted.set(count.externalUserId, Math.max(counted.get(count.externalUserId) ?? 0, count.distinctSources));
     }
     const active = new Set([...counted].filter(([, n]) => n > 0).map(([id]) => id));
+    // Active means the device SENT something. Bytes towards it are not
+    // enough: a WireGuard peer whose device has gone keeps receiving the
+    // server's handshake attempts, about 900 bytes every 30 s, for as long
+    // as the server keeps trying. On 2026-10-28, 1,083 of the last hour's
+    // 1,084 WireGuard usage rows were exactly that -- download, no upload
+    // -- and two customers had a working device held because a PC they
+    // had left counted as a second active device. A live WireGuard device
+    // sends a keepalive every 25 s; an Xray one sends whatever it carries.
     for (const delta of deltas) {
-      if (bytes(delta.bytesUp) + bytes(delta.bytesDown) > 0n) active.add(delta.externalUserId);
+      if (bytes(delta.bytesUp) > 0n) active.add(delta.externalUserId);
     }
     if (active.size === 0) return;
 
