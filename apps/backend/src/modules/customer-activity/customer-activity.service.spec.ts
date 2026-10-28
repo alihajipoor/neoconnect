@@ -24,9 +24,9 @@ function build() {
     },
     node: {
       findMany: jest.fn().mockResolvedValue([
-        { id: "node-1", name: "alpha" },
-        { id: "node-2", name: "beta" },
-        { id: "node-3", name: "gamma" },
+        { id: "node-1", name: "alpha", publicIp: "203.0.113.1" },
+        { id: "node-2", name: "beta", publicIp: "203.0.113.2" },
+        { id: "node-3", name: "gamma", publicIp: "203.0.113.3" },
       ]),
     },
     usageRecord: {
@@ -102,6 +102,7 @@ describe("CustomerActivityService.activity", () => {
       appVersion: "0.9.56",
       network: { asn: 58224, name: "TCI" },
       ip: "198.51.100.20",
+      throughServer: null,
       protocol: "Stealth",
       reason: "every server tried",
       sessionSeconds: null,
@@ -115,6 +116,16 @@ describe("CustomerActivityService.activity", () => {
     expect(attempts[1]).toMatchObject({ at: new Date(NOW - 5 * MIN).toISOString(), network: null, ip: null, rungs: [] });
     // A network the table has no name for still says its number.
     expect(attempts[2].network).toEqual({ asn: 64500, name: null });
+  });
+
+  /** A success report goes out through the tunnel it has just opened, so
+   * it arrives from the server: 555 of 616 in three days (2026-10-28). The
+   * panel showed the server's address as the customer's. */
+  it("names the server a report came through instead of giving its address as the customer's", async () => {
+    const { service, prisma } = build();
+    prisma.clientAttempt.findMany.mockResolvedValue([attempt({ id: "att-through", ip: "203.0.113.2" })]);
+    const { attempts } = await service.activity("cust-1", {}, NOW);
+    expect(attempts[0]).toMatchObject({ ip: null, throughServer: "beta" });
   });
 
   it("bounds the attempts it reads", async () => {

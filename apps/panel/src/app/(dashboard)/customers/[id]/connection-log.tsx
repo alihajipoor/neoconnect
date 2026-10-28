@@ -160,7 +160,13 @@ function AttemptRow({ attempt }: { attempt: CustomerAttempt }) {
                 </div>
                 <div>
                   <Label>From address</Label>
-                  <p className="font-mono text-xs">{attempt.ip ?? "—"}</p>
+                  {attempt.throughServer ? (
+                    // Sent through the tunnel it reports on: the address
+                    // the server saw was its own, so there is none to show.
+                    <p className="text-xs text-muted-foreground">Sent through the VPN, via {attempt.throughServer}</p>
+                  ) : (
+                    <p className="font-mono text-xs">{attempt.ip ?? "—"}</p>
+                  )}
                 </div>
                 {attempt.sessionSeconds !== null && (
                   <div>

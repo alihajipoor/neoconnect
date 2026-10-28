@@ -73,7 +73,14 @@ export interface AttemptRow {
   platform: string;
   appVersion: string;
   network: { asn: number; name: string | null } | null;
+  /** The address the report came from -- null when that was one of our
+   * own servers (see throughServer). */
   ip: string | null;
+  /** The server the report came through, when it was sent through the
+   * VPN: a connect's success report goes out through the tunnel it has
+   * just opened, so the address it arrives from is the server's, not the
+   * customer's. Null when it came straight from the customer. */
+  throughServer: string | null;
   protocol: string | null;
   reason: string | null;
   sessionSeconds: number | null;
@@ -215,6 +222,12 @@ export class CustomerActivityService {
     const lastSeenAt = heard.length ? new Date(Math.max(...heard)).toISOString() : null;
 
     const newest = live[0];
+    // Our servers' addresses, to recognise a report that came through one
+    // of them. Read here rather than cached: a server's address changes
+    // when it is replaced.
+    const servers = await this.prisma.node.findMany({ select: { name: true, publicIp: true } });
+    const serverAt = new Map(servers.map((n) => [n.publicIp, n.name]));
+
     return {
       now: {
         lastSeenAt,
@@ -248,7 +261,8 @@ export class CustomerActivityService {
         platform: a.platform,
         appVersion: a.appVersion,
         network: a.asn === null ? null : { asn: a.asn, name: this.asn.orgOf(a.asn) || null },
-        ip: a.ip,
+        ip: a.ip !== null && serverAt.has(a.ip) ? null : a.ip,
+        throughServer: a.ip !== null ? (serverAt.get(a.ip) ?? null) : null,
         protocol: a.protocol,
         reason: a.reason,
         sessionSeconds: a.sessionSeconds,
@@ -315,6 +329,11 @@ export class CustomerActivityService {
         nodeId: { in: nodes.map((n) => n.id) },
         reportedAt: { gte: new Date(since - REPORTED_AT_SLACK_MS) },
         periodEnd: { gte: new Date(since) },
+        // Only rows where the device sent something. A WireGuard peer
+        // whose device has gone keeps receiving the server's handshake
+        // attempts -- download, no upload -- and every such customer read
+        // as "live" (ConcurrencyService says the same for the device limit).
+        bytesUp: { gt: 0 },
       },
       _sum: { bytesUp: true, bytesDown: true },
       _max: { periodEnd: true },
@@ -370,7 +389,9 @@ export class CustomerActivityService {
     const newest = await Promise.all(
       subscriptionIds.map((subscriptionId) =>
         this.prisma.usageRecord.findFirst({
-          where: { subscriptionId },
+          // Sent by the device, as in liveRows: the server's handshake
+          // attempts to a WireGuard peer that has gone are not "seen".
+          where: { subscriptionId, bytesUp: { gt: 0 } },
           orderBy: { reportedAt: "desc" },
           select: { reportedAt: true },
         }),

@@ -273,6 +273,26 @@ describe("ConcurrencyService (device-limit backstop)", () => {
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
 
+  /** 2026-10-28: a WireGuard peer whose device has gone still receives the
+   * server's handshake attempts, so its usage rows show download and no
+   * upload. Counted as activity, it held the customer's working device. */
+  it("does not count a device the server is only sending to", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway } = build({
+      limit: 1,
+      rows: [row("pc", { sessionId: PC, protocol: "WIREGUARD" }), row("phone", { sessionId: PHONE, nodeId: "node-2" })],
+    });
+
+    for (let i = 0; i < 6; i++) {
+      await service.handleReport("node-1", {
+        deltas: [{ externalUserId: "ext-pc", protocol: "WIREGUARD", bytesUp: "0", bytesDown: "888" }],
+      });
+      await tick(service, { "node-2": [{ ext: "ext-phone", bytes: 500 }] });
+    }
+
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+  });
+
   /** The agent labels a WebSocket inbound's count "<protocol>|<transport>"
    * (dispatch.go), so the tail-carrying "XRAY_VLESS_TLS|WS" was not in the
    * ignore set and its 60 s tail counted a WS customer who had left as
