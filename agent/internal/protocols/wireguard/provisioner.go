@@ -40,6 +40,10 @@ type Provisioner struct {
 	// How the per-peer counters are read: `wg show <iface> transfer`.
 	// Injected so the restart case below can be tested without a kernel.
 	readTransfer func(ctx context.Context) ([]byte, error)
+	// How the peer table is read for Sessions: `wg show <iface> dump`.
+	// Injected for the same reason, so who counts as connected and where
+	// they connect from can be tested against a canned table.
+	readDump func() ([]byte, error)
 
 	mu       sync.Mutex
 	lastSeen map[string][2]uint64 // pubkey -> cumulative [rx, tx] at last poll
@@ -72,6 +76,9 @@ func New(iface string) *Provisioner {
 	}
 	p.readTransfer = func(ctx context.Context) ([]byte, error) {
 		return exec.CommandContext(ctx, "wg", "show", p.iface, "transfer").Output()
+	}
+	p.readDump = func() ([]byte, error) {
+		return exec.Command("wg", "show", p.iface, "dump").Output()
 	}
 	return p
 }

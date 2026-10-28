@@ -83,6 +83,7 @@ function build(users: string[]) {
     {} as never,
     {} as never,
     {} as never,
+    {} as never,
   );
   /** What ProtocolUsersService.remove does: DELETE_USER first, then the
    * row goes. */

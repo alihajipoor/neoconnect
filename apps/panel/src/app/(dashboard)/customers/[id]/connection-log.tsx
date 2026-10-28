@@ -163,13 +163,7 @@ function AttemptRow({ attempt }: { attempt: CustomerAttempt }) {
                 </div>
                 <div>
                   <Label>From address</Label>
-                  {attempt.throughServer ? (
-                    // Sent through the tunnel it reports on: the address
-                    // the server saw was its own, so there is none to show.
-                    <p className="text-xs text-muted-foreground">Sent through the VPN, via {attempt.throughServer}</p>
-                  ) : (
-                    <p className="font-mono text-xs">{attempt.ip ?? "—"}</p>
-                  )}
+                  <FromAddress attempt={attempt} />
                 </div>
                 {attempt.sessionSeconds !== null && (
                   <div>
@@ -219,6 +213,32 @@ function rungTone(result: string): "slow" | "dead" | null {
   if (text.includes("not carrying")) return "dead";
   if (text.includes("too slow")) return "slow";
   return null;
+}
+
+/** Where the report came from. Never a bare blank: when there is no
+ * address, it says why.
+ *
+ * A report sent through the tunnel it is about arrives from our server.
+ * The server the customer connected to normally supplies their own
+ * address within a minute or so, and the row then shows it like any
+ * other; one still naming a server is one where that could not be done
+ * -- a node too old to send addresses, a report the app sent late, or
+ * two devices where saying which sent it would be a guess. */
+function FromAddress({ attempt }: { attempt: CustomerAttempt }) {
+  if (attempt.ip) return <p className="font-mono text-xs">{attempt.ip}</p>;
+  const [text, note] = attempt.throughServer
+    ? ["Not known", `the app's report came through ${attempt.throughServer}`]
+    : attempt.noAddress === "erased"
+      ? ["Erased", "addresses are kept for 14 days"]
+      : attempt.noAddress === "relay"
+        ? ["Not kept", "sent over the backup route"]
+        : ["Not known", null];
+  return (
+    <p className="text-xs">
+      {text}
+      {note && <span className="ml-1.5 text-muted-foreground">{note}</span>}
+    </p>
+  );
 }
 
 function NetworkName({ network }: { network: CustomerAttempt["network"] }) {

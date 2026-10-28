@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/neoxify/neoxify-hub/agent/internal/protocols/common"
 )
 
 // realSample is `swanctl --list-sas --raw` exactly as a live IKEv2 node
@@ -248,34 +250,82 @@ func TestAnIkeRekeyDoesNotBillTheSessionAgain(t *testing.T) {
 func TestSessionsCountedByDistinctAddress(t *testing.T) {
 	p, f := withFake(t, active(t))
 
-	counts, err := p.SessionCounts()
+	counts, err := p.Sessions()
 	if err != nil {
-		t.Fatalf("SessionCounts: %v", err)
+		t.Fatalf("Sessions: %v", err)
 	}
-	if counts["nx-user1"] != 1 || counts["nx-user2"] != 1 || len(counts) != 2 {
+	if counts["nx-user1"].Count != 1 || counts["nx-user2"].Count != 1 || len(counts) != 2 {
 		t.Fatalf("expected one session each for two customers, got %v", counts)
 	}
 
 	// The same customer from two addresses: two devices, which is what
 	// the limit is meant to see.
 	f.listSAs = strings.Replace(active(t), "nx-user2", "nx-user1", 1)
-	counts, err = p.SessionCounts()
+	counts, err = p.Sessions()
 	if err != nil {
-		t.Fatalf("SessionCounts: %v", err)
+		t.Fatalf("Sessions: %v", err)
 	}
-	if counts["nx-user1"] != 2 {
+	if counts["nx-user1"].Count != 2 {
 		t.Fatalf("expected 2 distinct sources, got %v", counts)
 	}
 
 	// The same address twice is one device rekeying or roaming, not two
 	// connections. Counting it would disconnect somebody who did nothing.
 	f.listSAs = strings.Replace(f.listSAs, "198.51.100.2", "198.51.100.1", 1)
-	counts, err = p.SessionCounts()
+	counts, err = p.Sessions()
 	if err != nil {
-		t.Fatalf("SessionCounts: %v", err)
+		t.Fatalf("Sessions: %v", err)
 	}
-	if counts["nx-user1"] != 1 {
+	if counts["nx-user1"].Count != 1 {
 		t.Fatalf("expected one distinct source, got %v", counts)
+	}
+}
+
+// Where each customer is connected from: the live SAs' remote hosts,
+// newest packet first, each aged by its SA's use-in. The counts beside
+// them are the ones TestSessionsCountedByDistinctAddress pins.
+func TestSessionsSayWhereFromAndHowRecently(t *testing.T) {
+	// One customer on both SAs, the second sending more recently.
+	both := strings.Replace(filled(t), "nx-user2", "nx-user1", 1)
+	both = strings.Replace(both, "use-in=75342", "use-in=40", 1)
+	both = strings.Replace(both, "use-in=78684", "use-in=7", 1)
+	p, f := withFake(t, both)
+
+	got, err := p.Sessions()
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	want := []common.SourceAddress{{Address: "198.51.100.2", SecondsAgo: 7}, {Address: "198.51.100.1", SecondsAgo: 40}}
+	if got["nx-user1"].Count != 2 || fmt.Sprint(got["nx-user1"].Sources) != fmt.Sprint(want) {
+		t.Fatalf("expected two sources, newest first %v, got %+v", want, got["nx-user1"])
+	}
+
+	// The same address on both: one source, at its newest sighting.
+	f.listSAs = strings.Replace(both, "198.51.100.2", "198.51.100.1", 1)
+	got, err = p.Sessions()
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	want = []common.SourceAddress{{Address: "198.51.100.1", SecondsAgo: 7}}
+	if got["nx-user1"].Count != 1 || fmt.Sprint(got["nx-user1"].Sources) != fmt.Sprint(want) {
+		t.Fatalf("expected one source %v, got %+v", want, got["nx-user1"])
+	}
+
+	// strongSwan prints an IPv6 remote host bare, and it is reported so.
+	f.listSAs = strings.Replace(active(t), "remote-host=198.51.100.1", "remote-host=2001:db8::1", 1)
+	got, err = p.Sessions()
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	want = []common.SourceAddress{{Address: "2001:db8::1", SecondsAgo: 5}}
+	if got["nx-user1"].Count != 1 || fmt.Sprint(got["nx-user1"].Sources) != fmt.Sprint(want) {
+		t.Fatalf("expected the IPv6 source %v, got %+v", want, got["nx-user1"])
+	}
+
+	// A dead SA is neither a device nor an address.
+	f.listSAs = filled(t)
+	if got, _ := p.Sessions(); len(got) != 0 {
+		t.Fatalf("a silent SA reported an address: %+v", got)
 	}
 }
 
@@ -303,9 +353,9 @@ func TestDeadSessionsAreNotDevices(t *testing.T) {
 	// holding device slots for phones that had died and PCs that had gone
 	// to sleep.
 	p, _ := withFake(t, filled(t))
-	counts, err := p.SessionCounts()
+	counts, err := p.Sessions()
 	if err != nil {
-		t.Fatalf("SessionCounts: %v", err)
+		t.Fatalf("Sessions: %v", err)
 	}
 	if len(counts) != 0 {
 		t.Fatalf("sessions silent for 21 hours were counted as devices: %v", counts)
@@ -313,11 +363,11 @@ func TestDeadSessionsAreNotDevices(t *testing.T) {
 
 	// Just inside and just outside the window.
 	p, f := withFake(t, strings.Replace(filled(t), "use-in=75342", "use-in=180", 1))
-	if counts, _ := p.SessionCounts(); counts["nx-user1"] != 1 || len(counts) != 1 {
+	if counts, _ := p.Sessions(); counts["nx-user1"].Count != 1 || len(counts) != 1 {
 		t.Fatalf("a packet three minutes ago is a session in use, got %v", counts)
 	}
 	f.listSAs = strings.Replace(filled(t), "use-in=75342", "use-in=181", 1)
-	if counts, _ := p.SessionCounts(); len(counts) != 0 {
+	if counts, _ := p.Sessions(); len(counts) != 0 {
 		t.Fatalf("nothing for over three minutes is not, got %v", counts)
 	}
 }
@@ -330,11 +380,11 @@ func TestAHalfOpenSAIsNotADevice(t *testing.T) {
 	halfOpen = strings.Replace(halfOpen, "remote-eap-id=nx-user1 ", "", 1)
 	halfOpen = strings.Replace(halfOpen, "remote-id=<id>", "remote-id=nx-user2", 1)
 	p, _ := withFake(t, halfOpen)
-	counts, err := p.SessionCounts()
+	counts, err := p.Sessions()
 	if err != nil {
-		t.Fatalf("SessionCounts: %v", err)
+		t.Fatalf("Sessions: %v", err)
 	}
-	if counts["nx-user2"] != 1 || len(counts) != 1 {
+	if counts["nx-user2"].Count != 1 || len(counts) != 1 {
 		t.Fatalf("expected only the established session, got %v", counts)
 	}
 }
@@ -357,8 +407,8 @@ func TestUnreadableOutputIsLoud(t *testing.T) {
 	if _, err := p.StatsSince(context.Background()); err == nil {
 		t.Fatal("expected an error when listed SAs cannot be read")
 	}
-	if _, err := p.SessionCounts(); err == nil {
-		t.Fatal("expected SessionCounts to report unreadable SAs too")
+	if _, err := p.Sessions(); err == nil {
+		t.Fatal("expected Sessions to report unreadable SAs too")
 	}
 }
 

@@ -859,8 +859,12 @@ export interface CustomerAttempt {
   /** Null when the report came through one of our servers. */
   ip: string | null;
   /** The server the report came through, when it was sent through the
-   * VPN; its address is the server's, not the customer's. */
+   * VPN and the customer's own address could not be found for it; its
+   * address is the server's, not the customer's. */
   throughServer?: string | null;
+  /** Why `ip` is null, where that is known: erased after the retention
+   * window, or a report over the backup route, which never keeps one. */
+  noAddress?: "erased" | "relay" | null;
   /** The server a successful connect landed on. */
   server?: string | null;
   protocol: string | null;

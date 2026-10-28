@@ -45,6 +45,7 @@ describe("AgentGatewayService re-asserts every provisioned user on a node", () =
       {} as never,
       {} as never,
       {} as never,
+      {} as never,
     );
     jest.spyOn(service["logger"], "log").mockImplementation(() => undefined);
     const enqueue = jest.spyOn(service, "enqueueCommand").mockResolvedValue(undefined as never);

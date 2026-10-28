@@ -96,8 +96,13 @@ func (r *reportingProvisioner) StatsSince(context.Context) ([]common.UsageDelta,
 	return []common.UsageDelta{{ExternalUserID: "u-1", BytesUp: 1, BytesDown: 2}}, nil
 }
 
-func (r *reportingProvisioner) SessionCounts() (map[string]int, error) {
-	return map[string]int{"u-1": 1}, nil
+// Two devices and one address: the engine counted an address the list
+// folded into another or capped away, which the count must survive.
+func (r *reportingProvisioner) Sessions() (map[string]common.SessionReport, error) {
+	return map[string]common.SessionReport{"u-1": {
+		Count:   2,
+		Sources: []common.SourceAddress{{Address: "203.0.113.9", SecondsAgo: 4}},
+	}}, nil
 }
 
 // The transport is the agent's own lookup key, not a protocol. What the
@@ -115,6 +120,13 @@ func TestReportsCarryTheProtocolNotTheTransport(t *testing.T) {
 	}
 	if counts[0].Protocol != "XRAY_VLESS_TLS" {
 		t.Fatalf("session count labelled %q, want the protocol alone", counts[0].Protocol)
+	}
+
+	// The addresses ride along untouched, and the count is the engine's
+	// own, not the length of the list beside it.
+	if counts[0].DistinctSources != 2 || len(counts[0].Sources) != 1 ||
+		counts[0].Sources[0] != (common.SourceAddress{Address: "203.0.113.9", SecondsAgo: 4}) {
+		t.Fatalf("count or sources not carried through: %+v", counts[0])
 	}
 
 	deltas, errs := d.CollectStats(context.Background())

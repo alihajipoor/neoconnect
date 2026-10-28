@@ -31,9 +31,9 @@ func TestStatsSinceIsSilentWhereIkev2IsNotServed(t *testing.T) {
 		t.Fatalf("expected no deltas, got %d", len(deltas))
 	}
 
-	counts, err := p.SessionCounts()
+	counts, err := p.Sessions()
 	if err != nil {
-		t.Fatalf("expected no error from SessionCounts, got %v", err)
+		t.Fatalf("expected no error from Sessions, got %v", err)
 	}
 	if len(counts) != 0 {
 		t.Fatalf("expected no session counts, got %d", len(counts))
@@ -52,8 +52,8 @@ func TestStatsSinceStaysLoudWhenUsersExistButStrongSwanIsGone(t *testing.T) {
 	if _, err := p.StatsSince(context.Background()); err == nil {
 		t.Fatal("expected StatsSince to report the missing engine when users are provisioned")
 	}
-	if _, err := p.SessionCounts(); err == nil {
-		t.Fatal("expected SessionCounts to report the missing engine when users are provisioned")
+	if _, err := p.Sessions(); err == nil {
+		t.Fatal("expected Sessions to report the missing engine when users are provisioned")
 	}
 }
 

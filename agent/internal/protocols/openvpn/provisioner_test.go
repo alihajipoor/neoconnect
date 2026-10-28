@@ -185,3 +185,48 @@ func TestACNIsNeverAPathOutOfTheCcdDirectory(t *testing.T) {
 		}
 	}
 }
+
+// One session per connected common name, as before the addresses, and
+// now where each is connected from: CLIENT_LIST's Real Address, without
+// the port, and IPv6 as OpenVPN prints it, with no port at all.
+func TestSessionsCountEachClientAndSayWhereFrom(t *testing.T) {
+	addr, mgmt := startFakeMgmt(t)
+	p := New(addr, t.TempDir())
+
+	reply := status([][3]any{
+		{"cn-1", uint64(1), uint64(2)},
+		{"cn-2", uint64(3), uint64(4)},
+	}, false)
+	reply += "CLIENT_LIST,cn-v6,2001:db8::9,10.77.0.9,,5,6,2026-10-06 10:00:00,1791367200,UNDEF,7,7,AES-256-GCM\r\n" +
+		// Counted, as it always was, though its address is not one.
+		"CLIENT_LIST,cn-odd,not-an-address,10.77.0.10,,5,6,2026-10-06 10:00:00,1791367200,UNDEF,8,8,AES-256-GCM\r\n" +
+		// A truncated read and a nameless client are not sessions.
+		"CLIENT_LIST,cn-cut\r\n" +
+		"CLIENT_LIST,,203.0.113.99:51000,10.77.0.11\r\n" +
+		"GLOBAL_STATS,Max bcast/mcast queue length,0\r\nEND\r\n"
+	mgmt.set(reply)
+
+	got, err := p.Sessions()
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	want := map[string]string{"cn-1": "203.0.113.5", "cn-2": "203.0.113.6", "cn-v6": "2001:db8::9", "cn-odd": ""}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d sessions, got %+v", len(want), got)
+	}
+	for cn, address := range want {
+		report := got[cn]
+		if report.Count != 1 {
+			t.Errorf("%s: count %d, want 1", cn, report.Count)
+		}
+		if address == "" {
+			if len(report.Sources) != 0 {
+				t.Errorf("%s: an address that is not one must be dropped, got %+v", cn, report.Sources)
+			}
+			continue
+		}
+		if len(report.Sources) != 1 || report.Sources[0] != (common.SourceAddress{Address: address}) {
+			t.Errorf("%s: got %+v, want %s connected now", cn, report.Sources, address)
+		}
+	}
+}

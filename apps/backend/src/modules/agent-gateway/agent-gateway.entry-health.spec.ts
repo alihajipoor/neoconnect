@@ -67,7 +67,7 @@ describe("relay route entry health", () => {
       },
     };
     const registry = { connectedNodeIds: jest.fn().mockReturnValue(["ir1"]) };
-    const service = new AgentGatewayService(prisma as never, {} as never, registry as never, {} as never, {} as never, {} as never);
+    const service = new AgentGatewayService(prisma as never, {} as never, registry as never, {} as never, {} as never, {} as never, {} as never);
 
     const written: { nodeId: string; id: string; type: string }[] = [];
     (service as unknown as Record<string, unknown>).writeCommand = (nodeId: string, id: string, type: string) => {

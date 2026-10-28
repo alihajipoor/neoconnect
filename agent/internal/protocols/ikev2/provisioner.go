@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -332,9 +333,9 @@ func counterDelta(prev, cur uint64) uint64 {
 	return cur
 }
 
-// SessionCounts reports how many distinct places each user is connected
-// from, which is what the account-wide connection limit is evaluated
-// against.
+// Sessions reports how many distinct places each user is connected from,
+// which is what the account-wide connection limit is evaluated against,
+// and those places themselves, for the connection log.
 //
 // strongSwan will happily run the same EAP identity from several places
 // at once; without this, one credential could be shared across any number
@@ -357,7 +358,10 @@ func counterDelta(prev, cur uint64) uint64 {
 // and pushing the customer's next device into a device-limit refusal.
 // Found by the second 2026-10-06 review, before the parser that made the
 // count possible had shipped.
-func (p *Provisioner) SessionCounts() (map[string]int, error) {
+//
+// The addresses are the same live SAs' remote hosts, each aged by its
+// SA's freshest use-in: when a packet from the client last arrived.
+func (p *Provisioner) Sessions() (map[string]common.SessionReport, error) {
 	if p.notServingIkev2() {
 		return nil, nil
 	}
@@ -366,6 +370,7 @@ func (p *Provisioner) SessionCounts() (map[string]int, error) {
 		return nil, err
 	}
 	hosts := map[string]map[string]bool{}
+	sightings := map[string][]common.SourceAddress{}
 	for _, sa := range sas {
 		if sa.user == "" || sa.remoteHost == "" || !sa.live() {
 			continue
@@ -374,12 +379,16 @@ func (p *Provisioner) SessionCounts() (map[string]int, error) {
 			hosts[sa.user] = map[string]bool{}
 		}
 		hosts[sa.user][sa.remoteHost] = true
+		sightings[sa.user] = append(sightings[sa.user], common.SourceAddress{Address: sa.remoteHost, SecondsAgo: sa.lastIn()})
 	}
-	counts := make(map[string]int, len(hosts))
+	reports := make(map[string]common.SessionReport, len(hosts))
 	for user, set := range hosts {
-		counts[user] = len(set)
+		reports[user] = common.SessionReport{
+			Count:   len(set),
+			Sources: common.RecentSources(sightings[user]),
+		}
 	}
-	return counts, nil
+	return reports, nil
 }
 
 // inboundFreshFor is how recently, in seconds, a packet must have
@@ -409,6 +418,23 @@ func (sa saInfo) live() bool {
 		}
 	}
 	return false
+}
+
+// lastIn is how many seconds ago a packet last arrived from the client on
+// any of this SA's CHILD_SAs. Only asked of a live SA, which always has
+// one; 0 for an SA with none, the "connected now" every engine falls back
+// to.
+func (sa saInfo) lastIn() uint32 {
+	newest := int64(-1)
+	for _, child := range sa.children {
+		if child.useIn >= 0 && (newest < 0 || child.useIn < newest) {
+			newest = child.useIn
+		}
+	}
+	if newest < 0 {
+		return 0
+	}
+	return uint32(min(newest, math.MaxUint32))
 }
 
 type saBytes struct{ in, out uint64 }

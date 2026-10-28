@@ -217,8 +217,14 @@ func (d *Dispatcher) CollectStats(ctx context.Context) ([]common.UsageDelta, []e
 // two devices no longer share one, and the plan's device limit is judged
 // per device in the backend (ConcurrencyService, which also discounts
 // WireGuard's three-minute handshake tail) and by device slots.
+//
+// One call returns both the count and the addresses behind it, so an
+// engine reads its status once per poll -- two reads could see two
+// different sets of clients -- and so the count is still computed by
+// exactly the code that computed it before the addresses existed. See
+// common.SessionReport for why neither is derived from the other.
 type SessionReporter interface {
-	SessionCounts() (map[string]int, error)
+	Sessions() (map[string]common.SessionReport, error)
 }
 
 // SessionCount pairs a user with how many distinct sources they're
@@ -227,6 +233,9 @@ type SessionCount struct {
 	ExternalUserID  string
 	Protocol        string
 	DistinctSources uint32
+	// Where those sessions come from, for the connection log. Capped and
+	// normalised, so never a count: DistinctSources is the count.
+	Sources []common.SourceAddress
 }
 
 // CollectSessionCounts asks every provisioner that can report
@@ -241,16 +250,17 @@ func (d *Dispatcher) CollectSessionCounts() ([]SessionCount, []error) {
 		if !ok {
 			continue
 		}
-		perUser, err := reporter.SessionCounts()
+		perUser, err := reporter.Sessions()
 		if err != nil {
-			errs = append(errs, fmt.Errorf("%s SessionCounts: %w", protocol, err))
+			errs = append(errs, fmt.Errorf("%s Sessions: %w", protocol, err))
 			continue
 		}
-		for user, n := range perUser {
+		for user, report := range perUser {
 			counts = append(counts, SessionCount{
 				ExternalUserID:  user,
 				Protocol:        wireProtocol(protocol),
-				DistinctSources: uint32(n),
+				DistinctSources: uint32(report.Count),
+				Sources:         report.Sources,
 			})
 		}
 	}

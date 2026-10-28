@@ -101,6 +101,34 @@ message SessionCount {
   // roaming between networks briefly shows two, which is why the server
   // requires this to persist before acting on it.
   uint32 distinct_sources = 3;
+  // The addresses behind that count, most recently seen first, at most 8.
+  //
+  // For the connection log's "From address". An app reports a successful
+  // connect through the tunnel it has just opened, so the backend sees
+  // one of our own servers as the sender and nothing of the customer;
+  // the node is the one place that saw where the customer really came
+  // from. Sent by the node rather than the app because every app version
+  // already in customers' hands then gets it too.
+  //
+  // The backend holds these in memory only long enough to match them to
+  // that report: the one that matches is written into that report's row,
+  // and the list itself is never kept as a history of where anyone has
+  // been. The count above is still what the device limit acts on: this
+  // list is capped and normalised, so its length is not a count and must
+  // never be read as one. Empty from any agent older than this field.
+  repeated SourceAddress sources = 4;
+}
+
+// One place a user is connected from, as the node's engine saw it.
+message SourceAddress {
+  // A bare IP in canonical form: no port, IPv6 without brackets.
+  string address = 1;
+  // How long before this report the engine last saw the address,
+  // measured on the node's own clock. Relative rather than a timestamp so
+  // a node whose clock has drifted cannot place a sighting at the wrong
+  // moment on the backend's. 0 from an engine that only knows "connected
+  // now".
+  uint32 seconds_ago = 2;
 }
 
 message UsageDelta {

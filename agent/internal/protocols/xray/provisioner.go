@@ -113,12 +113,12 @@ func New(apiAddr, inboundTag, accessLogPath string) (*Provisioner, error) {
 	}, nil
 }
 
-// SessionCounts reports how many distinct client addresses each user is
-// active from. Empty when access logging isn't enabled on this node --
-// absent counts mean "unknown" to the server, never "zero", so a node
-// without logging can't cause anyone to be disconnected.
-func (p *Provisioner) SessionCounts() (map[string]int, error) {
-	return p.sessions.Counts()
+// Sessions reports how many distinct client addresses each user is
+// active from, and which. Empty when access logging isn't enabled on this
+// node -- absent counts mean "unknown" to the server, never "zero", so a
+// node without logging can't cause anyone to be disconnected.
+func (p *Provisioner) Sessions() (map[string]common.SessionReport, error) {
+	return p.sessions.Sessions()
 }
 
 // ForInbound returns a provisioner for another inbound running in the

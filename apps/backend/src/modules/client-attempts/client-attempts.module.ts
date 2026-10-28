@@ -3,6 +3,7 @@ import { JwtModule } from "@nestjs/jwt";
 import { ClientAttemptsController } from "./client-attempts.controller";
 import { ClientAttemptsService } from "./client-attempts.service";
 import { NetworkIdentityModule } from "../network-identity/network-identity.module";
+import { SourceAddressesModule } from "../source-addresses/source-addresses.module";
 
 @Module({
   // Registered bare, with the secret passed per-verify in the
@@ -10,7 +11,9 @@ import { NetworkIdentityModule } from "../network-identity/network-identity.modu
   // reads a customer token, so there is nothing here to sign with and no
   // default secret worth binding -- unlike CustomerAuthModule, which
   // issues tokens and configures one.
-  imports: [JwtModule.register({}), NetworkIdentityModule],
+  // SourceAddressesModule: the customer's address for a report that came
+  // through the VPN, from the server they connected to.
+  imports: [JwtModule.register({}), NetworkIdentityModule, SourceAddressesModule],
   controllers: [ClientAttemptsController],
   providers: [ClientAttemptsService],
   exports: [ClientAttemptsService],

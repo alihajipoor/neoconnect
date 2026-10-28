@@ -3,6 +3,7 @@ import { ClientAttemptKind, ClientAttemptOutcome, Prisma } from "@prisma/client"
 import { PrismaService } from "../../prisma/prisma.service";
 import { ReportAttemptDto } from "./dto/report-attempt.dto";
 import { NetworkIdentityService } from "../network-identity/network-identity.service";
+import { SourceAddressesService } from "../source-addresses/source-addresses.service";
 
 /** How long a report is kept.
  *
@@ -93,6 +94,7 @@ export class ClientAttemptsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly identity: NetworkIdentityService,
+    private readonly sources: SourceAddressesService,
   ) {}
 
   /** The address to keep for a report: the request's, unless the request
@@ -135,6 +137,11 @@ export class ClientAttemptsService {
   ): Promise<void> {
     const attested = this.identity.verify(dto.network);
     const ip = await this.addressFor(dto, context.ip, attested);
+    // Kept only if it is in the past and inside the retention window.
+    // A queued report is by definition older than its arrival; a
+    // future date or an ancient one is a broken clock or a bored
+    // stranger, and either way is worse than no answer.
+    const occurredAt = plausibleOccurredAt(dto.occurredAt);
     const data = (customerId: string | null) => ({
       kind: dto.kind,
       outcome: dto.outcome,
@@ -149,11 +156,7 @@ export class ClientAttemptsService {
         ? (dto.attempts.slice(0, MAX_RUNGS) as unknown as Prisma.InputJsonValue)
         : Prisma.JsonNull,
       ip,
-      // Kept only if it is in the past and inside the retention window.
-      // A queued report is by definition older than its arrival; a
-      // future date or an ancient one is a broken clock or a bored
-      // stranger, and either way is worse than no answer.
-      occurredAt: plausibleOccurredAt(dto.occurredAt),
+      occurredAt,
       // Only what the server's own signature vouches for. The request's
       // address is deliberately not looked up as a fallback: most of
       // these arrive through the tunnel, from a node, and the attestation
@@ -165,8 +168,12 @@ export class ClientAttemptsService {
       sessionSeconds: dto.kind === ClientAttemptKind.SESSION ? (dto.sessionSeconds ?? null) : null,
     });
 
+    let row: { id: string; createdAt: Date; asn: number | null };
     try {
-      await this.prisma.clientAttempt.create({ data: data(context.customerId ?? null) });
+      row = await this.prisma.clientAttempt.create({
+        data: data(context.customerId ?? null),
+        select: { id: true, createdAt: true, asn: true },
+      });
     } catch (err) {
       // A token can outlive the customer it names -- deleted from the
       // panel while an access token is still inside its 15 minutes -- and
@@ -182,6 +189,31 @@ export class ClientAttemptsService {
         }
       }
       this.logger.warn(`Could not record a client attempt: ${(err as Error).message}`);
+      return;
+    }
+
+    // Stored with one of our servers' addresses: a report sent through
+    // the tunnel it is about, from an app that did not say where it was
+    // before connecting -- which no released app does yet. The server
+    // the customer dialled saw their real address, and its next reports
+    // can supply it (SourceAddressesService). Only for a signed-in
+    // customer's report on a route, because those say whose credentials
+    // to look for and on which server. Never over the relay, which keeps
+    // no address at all (I5) -- and whose rows have none to replace.
+    if (context.customerId && dto.routeId && !context.via && ip !== null && ip === context.ip) {
+      try {
+        await this.sources.expect({
+          id: row.id,
+          createdAt: row.createdAt,
+          occurredAt,
+          ip,
+          asn: row.asn,
+          customerId: context.customerId,
+          routeId: dto.routeId,
+        });
+      } catch {
+        // It does not throw; and if it ever did, the report is stored.
+      }
     }
   }
 

@@ -33,6 +33,21 @@ export interface SessionCountMessage {
   externalUserId: string;
   protocol: string;
   distinctSources: number;
+  /** The addresses behind the count, most recently seen first, at most 8:
+   * a bare canonical IP each, and how many seconds before the report the
+   * node last saw it, on the node's own clock (0 for an engine that only
+   * knows "connected now"). Read by SourceAddressesService to put the
+   * customer's address on a report that arrived through the VPN; the
+   * device limit goes on counting `distinctSources`.
+   *
+   * Optional, and that is load-bearing: no agent before this field sends
+   * it, and they must go on working. */
+  sources?: SourceAddressMessage[];
+}
+
+export interface SourceAddressMessage {
+  address: string;
+  secondsAgo: number;
 }
 
 export interface StatsBatchMessage {

@@ -8,6 +8,7 @@ import {
 import type { PrismaService } from "../../prisma/prisma.service";
 import type { ReportAttemptDto } from "./dto/report-attempt.dto";
 import type { NetworkIdentityService } from "../network-identity/network-identity.service";
+import type { SourceAddressesService } from "../source-addresses/source-addresses.service";
 
 const report = (over: Partial<ReportAttemptDto> = {}): ReportAttemptDto => ({
   kind: ClientAttemptKind.CONNECT,
@@ -20,7 +21,8 @@ const report = (over: Partial<ReportAttemptDto> = {}): ReportAttemptDto => ({
 /** Builds a service over a fake Prisma, returning the mocks so a test can
  * assert on what reached the database. */
 const build = () => {
-  const create = jest.fn().mockResolvedValue({});
+  const created = new Date("2026-10-28T12:00:00Z");
+  const create = jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: "row-1", createdAt: created, asn: data.asn }));
   const deleteMany = jest.fn().mockResolvedValue({ count: 0 });
   const updateMany = jest.fn().mockResolvedValue({ count: 0 });
   const findMany = jest.fn().mockResolvedValue([]);
@@ -35,11 +37,13 @@ const build = () => {
     identify: (ip: string) =>
       Promise.resolve(ip.startsWith("198.51.100.") ? { asn: 64500 } : ip.startsWith("192.0.2.") ? { asn: 64501 } : null),
   };
+  const expectAddress = jest.fn().mockResolvedValue(undefined);
   const service = new ClientAttemptsService(
     { clientAttempt: { create, deleteMany, updateMany, findMany, groupBy } } as unknown as PrismaService,
     identity as unknown as NetworkIdentityService,
+    { expect: expectAddress } as unknown as SourceAddressesService,
   );
-  return { service, create, deleteMany, updateMany, findMany, groupBy };
+  return { service, create, deleteMany, updateMany, findMany, groupBy, expectAddress, created };
 };
 
 /** The per-ISP tags count people by network, so the network on a row has
@@ -314,5 +318,79 @@ describe("ClientAttemptsService.record address", () => {
 
   it("keeps no address for a report over the relay, whatever the app says", async () => {
     expect(await ipOf({ network: "signed-for-64500", clientIp: "198.51.100.7" }, undefined)).toBeNull();
+  });
+});
+
+/** For the rows the app could not give an address for -- every success
+ * report from a release before `clientIp` -- the server the customer
+ * connected to is asked instead (SourceAddressesService). */
+describe("ClientAttemptsService.record asks the server for the customer's address", () => {
+  const through = { ip: "203.0.113.5", customerId: "cust-1" };
+
+  it("for a customer's report on a route that was stored with a server's address", async () => {
+    const { service, expectAddress, created } = build();
+    // When it happened goes along, so a report flushed late from the app's
+    // queue is not matched against where the customer is now.
+    const occurredAt = new Date(Date.now() - 3_000);
+    await service.record(
+      report({ outcome: ClientAttemptOutcome.SUCCESS, routeId: "route-1", occurredAt: occurredAt.toISOString() }),
+      through,
+    );
+    expect(expectAddress).toHaveBeenCalledWith({
+      id: "row-1",
+      createdAt: created,
+      occurredAt,
+      ip: "203.0.113.5",
+      asn: null,
+      customerId: "cust-1",
+      routeId: "route-1",
+    });
+  });
+
+  /** It decides on the row as written: a network the attestation vouched
+   * for is passed on so that it is not overwritten. */
+  it("passes on the network the row was written with", async () => {
+    const { service, expectAddress } = build();
+    await service.record(report({ routeId: "route-1", network: "signed-for-64500" }), through);
+    expect(expectAddress.mock.calls[0][0].asn).toBe(64500);
+  });
+
+  it("not when the app's own address was kept", async () => {
+    const { service, expectAddress, create } = build();
+    await service.record(
+      report({ routeId: "route-1", network: "signed-for-64500", clientIp: "198.51.100.7" }),
+      through,
+    );
+    expect(create.mock.calls[0][0].data.ip).toBe("198.51.100.7");
+    expect(expectAddress).not.toHaveBeenCalled();
+  });
+
+  it("not without a customer or a route to say whose credentials to look for", async () => {
+    const { service, expectAddress } = build();
+    await service.record(report({ routeId: "route-1" }), { ip: "203.0.113.5" });
+    await service.record(report({}), through);
+    expect(expectAddress).not.toHaveBeenCalled();
+  });
+
+  it("not over the relay, which keeps no address", async () => {
+    const { service, expectAddress } = build();
+    await service.record(report({ routeId: "route-1" }), { via: "relay", asn: 64501, customerId: "cust-1" });
+    expect(expectAddress).not.toHaveBeenCalled();
+  });
+
+  it("not when the row was never written", async () => {
+    const { service, expectAddress, create } = build();
+    create.mockRejectedValue(new Error("database is on fire"));
+    await service.record(report({ routeId: "route-1" }), through);
+    expect(expectAddress).not.toHaveBeenCalled();
+  });
+
+  /** The report is stored either way; nothing after that may turn it
+   * into an error for an app that is reporting a problem. */
+  it("still never throws to the caller", async () => {
+    const { service, expectAddress, create } = build();
+    expectAddress.mockRejectedValue(new Error("unexpected"));
+    await expect(service.record(report({ routeId: "route-1" }), through)).resolves.toBeUndefined();
+    expect(create).toHaveBeenCalledTimes(1);
   });
 });
