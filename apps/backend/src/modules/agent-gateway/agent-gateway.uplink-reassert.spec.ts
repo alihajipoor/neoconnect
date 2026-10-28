@@ -83,6 +83,7 @@ describe("relay uplink survives an exit-node engine restart", () => {
       {} as never,
       {} as never,
       {} as never,
+      {} as never,
     );
 
     const acks: { commandId: string; success: boolean; error: string }[] = [];

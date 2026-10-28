@@ -3,10 +3,11 @@ package wireguard
 import (
 	"bufio"
 	"bytes"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/neoxify/neoxify-hub/agent/internal/protocols/common"
 )
 
 /*
@@ -37,14 +38,19 @@ that sum to come out right.
  */
 const handshakeFreshFor = 3 * time.Minute
 
-// SessionCounts reports peers that look genuinely connected, one per
-// public key.
+// Sessions reports peers that look genuinely connected, one per public
+// key, each with the endpoint it is connected from.
 //
 // One per peer rather than a count of addresses: a peer has exactly one
 // endpoint, and the roaming case that needs care on IKEv2 cannot arise
 // here -- when a device moves network, WireGuard updates the endpoint on
 // the same peer rather than creating a second one.
-func (p *Provisioner) SessionCounts() (map[string]int, error) {
+//
+// The endpoint's age is the latest handshake's, the last moment wg
+// records hearing from the peer. Any packet since can have moved the
+// endpoint or refreshed it without leaving a time behind, so the age is
+// an upper bound: never fresher than the truth.
+func (p *Provisioner) Sessions() (map[string]common.SessionReport, error) {
 	// The case the comment below used to describe and not handle: a node
 	// that simply does not offer WireGuard reports nothing instead of an
 	// error every poll. See notServingWireguard for why the interface,
@@ -52,7 +58,7 @@ func (p *Provisioner) SessionCounts() (map[string]int, error) {
 	if p.notServingWireguard() {
 		return nil, nil
 	}
-	out, err := exec.Command("wg", "show", p.iface, "dump").Output()
+	out, err := p.readDump()
 	if err != nil {
 		// WireGuard IS set up here, so a failure now is real and stays an
 		// error: "unknown" is the honest answer, and the caller logs it
@@ -61,7 +67,7 @@ func (p *Provisioner) SessionCounts() (map[string]int, error) {
 		return nil, err
 	}
 
-	counts := map[string]int{}
+	reports := map[string]common.SessionReport{}
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	// The first line of `dump` describes the interface itself (private
 	// key, public key, listen port, fwmark) rather than a peer.
@@ -92,7 +98,13 @@ func (p *Provisioner) SessionCounts() (map[string]int, error) {
 		if now-last > int64(handshakeFreshFor.Seconds()) {
 			continue
 		}
-		counts[pubKey] = 1
+		reports[pubKey] = common.SessionReport{
+			Count: 1,
+			Sources: common.RecentSources([]common.SourceAddress{{
+				Address:    endpoint,
+				SecondsAgo: common.Ago(time.Duration(now-last) * time.Second),
+			}}),
+		}
 	}
-	return counts, nil
+	return reports, nil
 }

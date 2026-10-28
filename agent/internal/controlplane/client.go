@@ -425,23 +425,35 @@ func statsLoop(ctx context.Context, snd *sender, dispatcher *dispatch.Dispatcher
 					BytesDown:      d.BytesDown,
 				}
 			}
-			pbSessions := make([]*pb.SessionCount, len(sessions))
-			for i, s := range sessions {
-				pbSessions[i] = &pb.SessionCount{
-					ExternalUserId:  s.ExternalUserID,
-					Protocol:        s.Protocol,
-					DistinctSources: s.DistinctSources,
-				}
-			}
 			if err := snd.send(ctx, &pb.AgentMessage{
 				Payload: &pb.AgentMessage_StatsBatch{
-					StatsBatch: &pb.StatsBatch{Deltas: pbDeltas, Sessions: pbSessions},
+					StatsBatch: &pb.StatsBatch{Deltas: pbDeltas, Sessions: sessionsToPB(sessions)},
 				},
 			}, sendTimeout); err != nil {
 				return fmt.Errorf("send stats batch: %w", err)
 			}
 		}
 	}
+}
+
+// sessionsToPB puts each engine's session report on the wire: the count
+// the device limit acts on, exactly as the engine gave it, and the
+// addresses behind it for the connection log's "From address".
+func sessionsToPB(sessions []dispatch.SessionCount) []*pb.SessionCount {
+	out := make([]*pb.SessionCount, len(sessions))
+	for i, s := range sessions {
+		sources := make([]*pb.SourceAddress, len(s.Sources))
+		for j, src := range s.Sources {
+			sources[j] = &pb.SourceAddress{Address: src.Address, SecondsAgo: src.SecondsAgo}
+		}
+		out[i] = &pb.SessionCount{
+			ExternalUserId:  s.ExternalUserID,
+			Protocol:        s.Protocol,
+			DistinctSources: s.DistinctSources,
+			Sources:         sources,
+		}
+	}
+	return out
 }
 
 func receiveLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, snd *sender, dispatcher *dispatch.Dispatcher) error {

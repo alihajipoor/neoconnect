@@ -29,6 +29,7 @@ describe("AgentGatewayService records which credentials a node has confirmed", (
       {} as never,
       {} as never,
       {} as never,
+      {} as never,
     );
     const ack = (a: Ack, from = "node-1") =>
       (service as unknown as { handleCommandAck(n: string, a: Ack): Promise<void> }).handleCommandAck(from, a);

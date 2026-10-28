@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/neoxify/neoxify-hub/agent/internal/protocols/common"
 )
 
 // Xray offers no way to ask how many connections a user currently has --
@@ -72,13 +74,16 @@ func NewSessionCounter(path string, window time.Duration) *SessionCounter {
 	}
 }
 
-// Counts reads whatever has been appended since the last call and returns
-// the number of distinct recent sources per user.
+// Sessions reads whatever has been appended since the last call and
+// returns, per user, the number of distinct recent sources and the
+// sources themselves.
 //
 // Reading incrementally matters: an access log on a busy node grows
 // quickly, and re-reading it every 30 seconds would be the most expensive
-// thing the agent does.
-func (c *SessionCounter) Counts() (map[string]int, error) {
+// thing the agent does. It is also why the count and the addresses come
+// out of one call: the log is consumed as it is read, so a second reader
+// would find nothing left.
+func (c *SessionCounter) Sessions() (map[string]common.SessionReport, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -152,9 +157,14 @@ func (c *SessionCounter) record(line string) {
 
 // tally drops anything older than the window and counts what's left,
 // so a user who moved networks an hour ago isn't still counted at both.
-func (c *SessionCounter) tally() map[string]int {
-	cutoff := time.Now().Add(-c.window)
-	counts := make(map[string]int, len(c.seen))
+//
+// The count is the number of raw source strings left, exactly as before
+// the addresses were reported; the address list is built beside it from
+// the same survivors and changes nothing about it.
+func (c *SessionCounter) tally() map[string]common.SessionReport {
+	now := time.Now()
+	cutoff := now.Add(-c.window)
+	reports := make(map[string]common.SessionReport, len(c.seen))
 
 	for user, sources := range c.seen {
 		for addr, at := range sources {
@@ -166,7 +176,16 @@ func (c *SessionCounter) tally() map[string]int {
 			delete(c.seen, user)
 			continue
 		}
-		counts[user] = len(sources)
+		// The log's own timestamp, so an address that went quiet forty
+		// seconds ago says so rather than claiming to be connected now.
+		sightings := make([]common.SourceAddress, 0, len(sources))
+		for addr, at := range sources {
+			sightings = append(sightings, common.SourceAddress{Address: addr, SecondsAgo: common.Ago(now.Sub(at))})
+		}
+		reports[user] = common.SessionReport{
+			Count:   len(sources),
+			Sources: common.RecentSources(sightings),
+		}
 	}
-	return counts
+	return reports
 }

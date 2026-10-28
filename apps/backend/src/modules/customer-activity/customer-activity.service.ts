@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AsnLookupService } from "../network-identity/asn-lookup.service";
 import { CustomerAuthService } from "../customer-auth/customer-auth.service";
+import { RETENTION_DAYS } from "../client-attempts/client-attempts.service";
 
 /** "Connected now" means a usage record ending inside this window: the
  * nodes report traffic about every 30 seconds while it flows, so ten
@@ -79,8 +80,19 @@ export interface AttemptRow {
   /** The server the report came through, when it was sent through the
    * VPN: a connect's success report goes out through the tunnel it has
    * just opened, so the address it arrives from is the server's, not the
-   * customer's. Null when it came straight from the customer. */
+   * customer's. Null when it came straight from the customer.
+   *
+   * Since the nodes report the addresses they see, such a row is given
+   * the customer's own address shortly after it arrives
+   * (SourceAddressesService), and this is null from then on. Still set
+   * means that has not happened yet, or could not be done: an agent too
+   * old to send addresses, a report the app sent late, or two devices
+   * where saying which one sent it would be a guess. */
   throughServer: string | null;
+  /** Why `ip` is null, where that is known: "erased" past the retention
+   * window, "relay" for a report over the backup route, which never keeps
+   * one. So the panel can say so instead of showing a blank. */
+  noAddress: "erased" | "relay" | null;
   /** The server a successful connect landed on, from the route it reported
    * (a relay as "entry -> exit"); null when it named none or the route is
    * gone. */
@@ -201,6 +213,7 @@ export class CustomerActivityService {
           appVersion: true,
           asn: true,
           ip: true,
+          via: true,
           protocol: true,
           reason: true,
           sessionSeconds: true,
@@ -270,6 +283,14 @@ export class CustomerActivityService {
         network: a.asn === null ? null : { asn: a.asn, name: this.asn.orgOf(a.asn) || null },
         ip: a.ip !== null && serverAt.has(a.ip) ? null : a.ip,
         throughServer: a.ip !== null ? (serverAt.get(a.ip) ?? null) : null,
+        noAddress:
+          a.ip !== null
+            ? null
+            : a.via === "relay"
+              ? "relay"
+              : a.createdAt.getTime() < now - RETENTION_DAYS * 86_400_000
+                ? "erased"
+                : null,
         server: a.routeId ? (landedOn.get(a.routeId) ?? null) : null,
         protocol: a.protocol,
         reason: a.reason,

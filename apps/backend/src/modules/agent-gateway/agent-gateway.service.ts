@@ -9,6 +9,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { NodesService } from "../nodes/nodes.service";
 import { UsageService } from "../usage/usage.service";
 import { ConcurrencyService } from "../usage/concurrency.service";
+import { SourceAddressesService } from "../source-addresses/source-addresses.service";
 import { decryptCredentials } from "../protocol-users/credentials-crypto";
 import { liveCredentialWhere } from "../protocol-users/live-credentials";
 import { rateLimitFor } from "../protocol-users/rate-limit";
@@ -162,6 +163,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     private readonly usageService: UsageService,
     @Inject(forwardRef(() => ConcurrencyService))
     private readonly concurrencyService: ConcurrencyService,
+    private readonly sourceAddresses: SourceAddressesService,
   ) {}
 
   onModuleInit() {
@@ -488,6 +490,9 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
               refuseUnauthenticated("statsBatch");
               return;
             }
+            // Taken before anything slow: the sources' ages are relative to
+            // when the node sent this, and arrival is the nearest we know.
+            const receivedAt = Date.now();
             await this.usageService.recordDeltas(nodeId, msg.statsBatch?.deltas ?? []);
             // The device limit rides along with usage: same poll. Which
             // devices are active comes from the usage deltas as much as
@@ -499,6 +504,10 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
               sessions: msg.statsBatch?.sessions ?? [],
               deltas: msg.statsBatch?.deltas ?? [],
             });
+            // And the addresses behind those counts, for the customers
+            // whose connect report came through the VPN and so arrived
+            // from a server's address. Never throws either.
+            await this.sourceAddresses.observe(nodeId, msg.statsBatch?.sessions ?? [], receivedAt);
           }
           // stateSnapshot: no handling yet -- full reconciliation is later work.
         } catch (err) {

@@ -59,6 +59,7 @@ const attempt = (over: Record<string, unknown> = {}) => ({
   appVersion: "0.9.56",
   asn: 58224,
   ip: "198.51.100.20",
+  via: null,
   protocol: "Stealth",
   reason: "every server tried",
   sessionSeconds: null,
@@ -103,6 +104,7 @@ describe("CustomerActivityService.activity", () => {
       network: { asn: 58224, name: "TCI" },
       ip: "198.51.100.20",
       throughServer: null,
+      noAddress: null,
       server: null,
       protocol: "Stealth",
       reason: "every server tried",
@@ -127,6 +129,20 @@ describe("CustomerActivityService.activity", () => {
     prisma.clientAttempt.findMany.mockResolvedValue([attempt({ id: "att-through", ip: "203.0.113.2" })]);
     const { attempts } = await service.activity("cust-1", {}, NOW);
     expect(attempts[0]).toMatchObject({ ip: null, throughServer: "beta" });
+  });
+
+  /** A blank "From address" reads as a fault. Where the reason is known,
+   * the panel says it. */
+  it("says why a row has no address, where that is known", async () => {
+    const { service, prisma } = build();
+    prisma.clientAttempt.findMany.mockResolvedValue([
+      attempt({ id: "att-old", ip: null, createdAt: new Date(NOW - 15 * 86_400_000) }),
+      attempt({ id: "att-relay", ip: null, via: "relay" }),
+      attempt({ id: "att-none", ip: null }),
+      attempt({ id: "att-kept", createdAt: new Date(NOW - 15 * 86_400_000) }),
+    ]);
+    const { attempts } = await service.activity("cust-1", {}, NOW);
+    expect(attempts.map((a) => a.noAddress)).toEqual(["erased", "relay", null, null]);
   });
 
   it("bounds the attempts it reads", async () => {

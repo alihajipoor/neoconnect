@@ -28,6 +28,18 @@ import (
 	"github.com/neoxify/neoxify-hub/agent/internal/version"
 )
 
+// Every engine reports sessions, and the dispatcher only finds that out
+// with a type assertion at run time. An engine whose method stopped
+// matching SessionReporter would build, run, and quietly report nobody --
+// and the device limit, which is enforcing, would lose sight of that
+// protocol. These make that a build failure instead.
+var (
+	_ dispatch.SessionReporter = (*xray.Provisioner)(nil)
+	_ dispatch.SessionReporter = (*wireguard.Provisioner)(nil)
+	_ dispatch.SessionReporter = (*openvpn.Provisioner)(nil)
+	_ dispatch.SessionReporter = (*ikev2.Provisioner)(nil)
+)
+
 func main() {
 	showVersion := flag.Bool("version", false, "print the agent build version and exit. The same string the agent reports to the control plane as agentVersion, so this is how you confirm a node actually took a rollout without waiting for it to reconnect")
 	enrollInit := flag.Bool("enroll-init", false, "trade a one-time enrollment token for this node's identity, then exit")

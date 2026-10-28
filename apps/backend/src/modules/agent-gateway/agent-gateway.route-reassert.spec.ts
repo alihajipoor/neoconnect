@@ -59,6 +59,7 @@ describe("AgentGatewayService route re-assertion", () => {
       {} as never,
       {} as never,
       {} as never,
+      {} as never,
     );
 
     // writeCommand pushes straight onto the live stream; there is no

@@ -19,7 +19,7 @@ describe("AgentGatewayService stream close", () => {
     };
     const prisma = { node: { findMany: jest.fn().mockResolvedValue([]) } };
     const service = new AgentGatewayService(
-      prisma as never, {} as never, {} as never, {} as never, {} as never, {} as never,
+      prisma as never, {} as never, {} as never, {} as never, {} as never, {} as never, {} as never,
     );
     (service as unknown as { registry: unknown }).registry = registry;
     (service as unknown as { nodesService: unknown }).nodesService = nodesService;

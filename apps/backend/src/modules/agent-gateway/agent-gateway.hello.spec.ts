@@ -54,6 +54,7 @@ describe("AgentGatewayService stream authentication", () => {
       {} as never,
       { recordDeltas: jest.fn().mockResolvedValue(undefined) } as never,
       { handleReport: jest.fn().mockResolvedValue(undefined) } as never,
+      {} as never,
     );
     jest.spyOn(service["logger"], "log").mockImplementation(() => undefined);
     jest.spyOn(service["logger"], "warn").mockImplementation(() => undefined);
