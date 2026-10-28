@@ -37,7 +37,7 @@ vi.mock("./api", () => ({
 /** The session held right now: whoever is signed in, or nobody. */
 const session: { current: { accessToken: string; refreshToken: string } | null } = { current: null };
 vi.mock("./session", () => ({ getTokens: async () => session.current }));
-vi.mock("./network-identity", () => ({ currentAttestation: () => null }));
+vi.mock("./network-identity", () => ({ currentAttestation: () => null, currentClientIp: () => null }));
 
 type Attempts = typeof import("./attempts");
 let attempts: Attempts;

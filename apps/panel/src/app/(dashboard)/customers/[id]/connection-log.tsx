@@ -118,6 +118,9 @@ function AttemptRow({ attempt }: { attempt: CustomerAttempt }) {
         </TableCell>
         <TableCell className="text-sm whitespace-nowrap">
           {attempt.protocol ? protocolLabel(attempt.protocol) : <span className="text-muted-foreground">—</span>}
+          {/* The server it landed on, beside the protocol: which one it
+              was is half of what a support question needs. */}
+          {attempt.server && <span className="ml-1.5 text-xs text-muted-foreground">on {attempt.server}</span>}
           {attempt.sessionSeconds !== null && (
             <span className="ml-1.5 text-xs text-muted-foreground">up {duration(attempt.sessionSeconds)}</span>
           )}

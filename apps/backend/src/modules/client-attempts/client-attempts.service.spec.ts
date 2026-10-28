@@ -27,7 +27,14 @@ const build = () => {
   const groupBy = jest.fn().mockResolvedValue([]);
   // Vouches for exactly one token, as the real attestor vouches only for
   // its own signatures.
-  const identity = { verify: (token?: string) => (token === "signed-for-64500" ? 64500 : null) };
+  // 203.0.113.0/24 are our servers; 198.51.100.0/24 is on AS64500 and
+  // 192.0.2.0/24 on AS64501, both customers' networks.
+  const identity = {
+    verify: (token?: string) => (token === "signed-for-64500" ? 64500 : null),
+    isOwnAddress: (ip: string) => Promise.resolve(ip.startsWith("203.0.113.")),
+    identify: (ip: string) =>
+      Promise.resolve(ip.startsWith("198.51.100.") ? { asn: 64500 } : ip.startsWith("192.0.2.") ? { asn: 64501 } : null),
+  };
   const service = new ClientAttemptsService(
     { clientAttempt: { create, deleteMany, updateMany, findMany, groupBy } } as unknown as PrismaService,
     identity as unknown as NetworkIdentityService,
@@ -274,5 +281,38 @@ describe("ClientAttemptsService.prune", () => {
     const window = RETENTION_DAYS * 86_400_000;
     expect(cutoff).toBeGreaterThanOrEqual(before - window);
     expect(cutoff).toBeLessThanOrEqual(after - window);
+  });
+});
+
+/** A connect's success report goes out through the tunnel it is about, so
+ * the request arrives from our server: 555 of 616 in three days
+ * (2026-10-28) carried a server's address as the customer's. The app now
+ * says where it was before connecting, and that is kept only when it
+ * checks out. */
+describe("ClientAttemptsService.record address", () => {
+  const ipOf = async (fields: Record<string, unknown>, requestIp: string | undefined) => {
+    const { service, create } = build();
+    await service.record(report(fields), { ip: requestIp });
+    return create.mock.calls[0][0].data.ip;
+  };
+
+  it("keeps the app's own address for a report that came through our server, on the attested network", async () => {
+    expect(await ipOf({ network: "signed-for-64500", clientIp: "198.51.100.7" }, "203.0.113.5")).toBe("198.51.100.7");
+  });
+
+  it("keeps the request's address when the claimed one is on another network", async () => {
+    expect(await ipOf({ network: "signed-for-64500", clientIp: "192.0.2.9" }, "203.0.113.5")).toBe("203.0.113.5");
+  });
+
+  it("keeps the request's address when it did not come through our server", async () => {
+    expect(await ipOf({ network: "signed-for-64500", clientIp: "198.51.100.7" }, "198.51.100.8")).toBe("198.51.100.8");
+  });
+
+  it("keeps the request's address with no attestation to check against", async () => {
+    expect(await ipOf({ clientIp: "198.51.100.7" }, "203.0.113.5")).toBe("203.0.113.5");
+  });
+
+  it("keeps no address for a report over the relay, whatever the app says", async () => {
+    expect(await ipOf({ network: "signed-for-64500", clientIp: "198.51.100.7" }, undefined)).toBeNull();
   });
 });
