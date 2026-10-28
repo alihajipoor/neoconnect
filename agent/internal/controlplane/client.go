@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
-	"math"
 	"net/url"
 	"time"
 
@@ -20,7 +19,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
-	"github.com/neoxify/neoxify-hub/agent/internal/accesslog"
 	"github.com/neoxify/neoxify-hub/agent/internal/config"
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane/pb"
 	"github.com/neoxify/neoxify-hub/agent/internal/dispatch"
@@ -67,29 +65,12 @@ const (
 	// backstop for a peer that is alive, answering pings, and still not
 	// reading -- which keepalive alone does not detect.
 	sendTimeout = 30 * time.Second
-
-	// maxDestinationsPerMessage splits one window's site history across
-	// several DestinationBatch messages. A full window (20,000 rows) in
-	// one message would be a couple of megabytes queued in front of the
-	// heartbeat on the single writer; in pieces of this size the
-	// heartbeat and stats writes get their turn in between, and each
-	// piece stays well inside the backend's default 4 MB receive limit.
-	maxDestinationsPerMessage = 2000
 )
-
-// SiteSource is the access-log reporter as the stream sees it: finished
-// windows to send, and somewhere to say which of them were not sent.
-// An interface so the loop can be tested without a log file.
-type SiteSource interface {
-	Batches() <-chan accesslog.Batch
-	Lost(lines uint64)
-}
 
 // Run connects to the control plane and keeps the AgentSync stream alive,
 // reconnecting with exponential backoff on any failure. Blocks until ctx
-// is cancelled. sites is nil when the site history is turned off on this
-// node.
-func Run(ctx context.Context, cfg *config.Config, dispatcher *dispatch.Dispatcher, prober *realityprobe.Prober, sites SiteSource) error {
+// is cancelled.
+func Run(ctx context.Context, cfg *config.Config, dispatcher *dispatch.Dispatcher, prober *realityprobe.Prober) error {
 	target, creds, err := dialTarget(cfg)
 	if err != nil {
 		return err
@@ -124,7 +105,7 @@ func Run(ctx context.Context, cfg *config.Config, dispatcher *dispatch.Dispatche
 		}
 
 		started := time.Now()
-		err := runStream(ctx, client, cfg.NodeID, signingKey, dispatcher, prober, sites)
+		err := runStream(ctx, client, cfg.NodeID, signingKey, dispatcher, prober)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -242,7 +223,6 @@ func runStream(
 	key ed25519.PrivateKey,
 	dispatcher *dispatch.Dispatcher,
 	prober *realityprobe.Prober,
-	sites SiteSource,
 ) error {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -254,8 +234,8 @@ func runStream(
 
 	// The writer starts before the hello, because the hello is itself a
 	// stream write and goes through the same queue as everything else.
-	// errCh has room for all five so none can block on the way out.
-	errCh := make(chan error, 5)
+	// errCh has room for all four so none can block on the way out.
+	errCh := make(chan error, 4)
 	snd := &sender{reqs: make(chan writeReq)}
 	go func() { errCh <- writerLoop(streamCtx, stream, snd.reqs) }()
 
@@ -267,9 +247,6 @@ func runStream(
 	go func() { errCh <- heartbeatLoop(streamCtx, snd, prober) }()
 	go func() { errCh <- statsLoop(streamCtx, snd, dispatcher) }()
 	go func() { errCh <- receiveLoop(streamCtx, stream, snd, dispatcher) }()
-	if sites != nil {
-		go func() { errCh <- destinationLoop(streamCtx, snd, sites) }()
-	}
 
 	err = <-errCh
 	cancel()
@@ -465,97 +442,6 @@ func statsLoop(ctx context.Context, snd *sender, dispatcher *dispatch.Dispatcher
 			}
 		}
 	}
-}
-
-// destinationLoop sends the site history's finished windows as they
-// appear. It never ends the stream on its own account: the site history
-// is the least important thing on it, and a stream torn down because a
-// window could not be sent would cost the heartbeat and command handling
-// that matter more. A window that fails is counted as lost, so the next
-// one says its lines are missing, and the loop waits for the next.
-//
-// If the failure was the stream itself, the other loops find that out
-// within one heartbeat and tear it down; this one then returns with
-// streamCtx. Windows finished in between wait in the reporter's queue
-// for the next stream.
-func destinationLoop(ctx context.Context, snd *sender, sites SiteSource) error {
-	for {
-		var b accesslog.Batch
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case b = <-sites.Batches():
-		}
-
-		msgs := destinationMessages(b, maxDestinationsPerMessage)
-		for i, m := range msgs {
-			if err := snd.send(ctx, m, sendTimeout); err != nil {
-				var lost uint64
-				for _, unsent := range msgs[i:] {
-					lost += destinationLines(unsent.GetDestinationBatch())
-				}
-				sites.Lost(lost)
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				log.Printf("send site history: %v (%d lines counted as dropped)", err, lost)
-				break
-			}
-		}
-	}
-}
-
-// destinationMessages turns one window into DestinationBatch messages of
-// at most `per` rows each. Every piece carries the window's bounds, so
-// each stands on its own at the backend; dropped rides on the first
-// piece only, so a backend that adds them up counts it once. A window
-// with nothing but dropped lines still sends one, empty, piece: the
-// panel is owed the news that lines went uncounted.
-func destinationMessages(b accesslog.Batch, per int) []*pb.AgentMessage {
-	n := len(b.Destinations)
-	pieces := (n + per - 1) / per
-	if pieces == 0 {
-		pieces = 1
-	}
-	msgs := make([]*pb.AgentMessage, 0, pieces)
-	for p := 0; p < pieces; p++ {
-		lo := p * per
-		hi := min(lo+per, n)
-		rows := make([]*pb.DestinationCount, 0, hi-lo)
-		for _, d := range b.Destinations[lo:hi] {
-			rows = append(rows, &pb.DestinationCount{
-				ExternalUserId: d.User,
-				InboundTag:     d.InboundTag,
-				Network:        d.Network,
-				Host:           d.Host,
-				Port:           d.Port,
-				Count:          d.Count,
-				FirstSeen:      d.FirstSeen.Unix(),
-				LastSeen:       d.LastSeen.Unix(),
-			})
-		}
-		batch := &pb.DestinationBatch{
-			WindowStart:  b.WindowStart.Unix(),
-			WindowEnd:    b.WindowEnd.Unix(),
-			Destinations: rows,
-		}
-		if p == 0 {
-			batch.Dropped = uint32(min(b.Dropped, math.MaxUint32))
-		}
-		msgs = append(msgs, &pb.AgentMessage{
-			Payload: &pb.AgentMessage_DestinationBatch{DestinationBatch: batch},
-		})
-	}
-	return msgs
-}
-
-// destinationLines is how many log lines one message accounts for.
-func destinationLines(b *pb.DestinationBatch) uint64 {
-	n := uint64(b.GetDropped())
-	for _, d := range b.GetDestinations() {
-		n += uint64(d.GetCount())
-	}
-	return n
 }
 
 func receiveLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, snd *sender, dispatcher *dispatch.Dispatcher) error {

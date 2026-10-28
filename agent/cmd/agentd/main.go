@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/neoxify/neoxify-hub/agent/internal/accesslog"
 	"github.com/neoxify/neoxify-hub/agent/internal/config"
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane"
 	"github.com/neoxify/neoxify-hub/agent/internal/dispatch"
@@ -44,8 +43,7 @@ func main() {
 	xrayVlessTlsTag := flag.String("xray-vless-tls-inbound-tag", "vless-tls-in", "tag of the VLESS+TLS inbound in Xray's config. Registered unconditionally for the same reason as the Trojan tag above")
 	xrayShadowsocksTag := flag.String("xray-shadowsocks-inbound-tag", "shadowsocks-in", "tag of the Shadowsocks 2022 inbound in Xray's config. Registered unconditionally for the same reason as the Trojan tag above")
 	xrayVlessWsTag := flag.String("xray-vless-ws-inbound-tag", "vless-ws-in", "tag of the VLESS+TLS-over-WebSocket inbound in Xray's config. Same account shape as the TCP VLESS inbound -- only the stream differs -- so it is registered as the WS transport of XRAY_VLESS_TLS, and a node without that inbound simply nacks any WS command with Xray's own error")
-	xrayAccessLog := flag.String("xray-access-log", "/var/log/xray/access.log", "Xray's access log, read to count how many places each user is connected from -- concurrency is not exposed by Xray's API -- and, unless --site-log is off, which destinations each user's connections opened. Harmless if absent: neither is reported")
-	siteLog := flag.String("site-log", os.Getenv("NEOXIFY_SITE_LOG"), "on or off: report to the control plane the destinations each user's Xray connections opened, read from --xray-access-log, for the panel's seven-day site history. On unless set to off; defaults to the NEOXIFY_SITE_LOG environment variable, so a systemd drop-in can turn it off without editing the unit's command line")
+	xrayAccessLog := flag.String("xray-access-log", "/var/log/xray/access.log", "Xray's access log, read to count how many places each user is connected from -- concurrency is not exposed by Xray's API. Harmless if absent: counts are simply not reported")
 	wgInterface := flag.String("wg-interface", "wg0", "name of the WireGuard interface this node manages")
 	relayTunInboundTag := flag.String("relay-tun-inbound-tag", "relay-tun-in", "tag of the dormant tun inbound in a relay node's Xray config (see installer/assets/xray-relay-config.json.template)")
 	relayTunInterface := flag.String("relay-tun-interface", "relay-tun", "OS network interface name of that same tun inbound, used for ip route/rule when bridging WireGuard/OpenVPN entries into a Route's exit outbound")
@@ -142,26 +140,7 @@ func main() {
 	prober := realityprobe.New(*xrayConfigPath, 10*time.Minute)
 	go prober.Run(ctx)
 
-	// The site history (owner's decision, 2026-10-28; disclosed on the
-	// privacy page). Started here, before the first dial, so that it
-	// counts from when the agent started rather than from when the panel
-	// first answered -- and so its position at the end of the access log
-	// is fixed now, not after a reconnect that may take minutes.
-	//
-	// The interface stays nil when it is off. Assigning a nil *Reporter
-	// to it instead would make a non-nil interface, and the stream would
-	// start a loop that reads from a reporter that does not exist.
-	var sites controlplane.SiteSource
-	if accesslog.Enabled(*siteLog) {
-		reporter := accesslog.New(accesslog.Options{Path: *xrayAccessLog})
-		go reporter.Run(ctx)
-		sites = reporter
-		log.Printf("site history on: reading %s from its current end", *xrayAccessLog)
-	} else {
-		log.Printf("site history off on this node (--site-log / NEOXIFY_SITE_LOG)")
-	}
-
-	if err := controlplane.Run(ctx, cfg, dispatcher, prober, sites); err != nil && ctx.Err() == nil {
+	if err := controlplane.Run(ctx, cfg, dispatcher, prober); err != nil && ctx.Err() == nil {
 		log.Fatalf("agent sync loop exited: %v", err)
 	}
 }

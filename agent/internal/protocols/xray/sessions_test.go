@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -155,5 +156,38 @@ func TestIgnoresLinesWithoutAUser(t *testing.T) {
 	}
 	if len(counts) != 0 {
 		t.Errorf("expected no counts from unattributed lines, got %v", counts)
+	}
+}
+
+// What the live nodes write (2026-10-28): microseconds after the seconds,
+// and Shadowsocks' source without a "tcp:" in front. The pattern matched
+// neither, so no Xray user ever had a device count.
+func TestCountsTheLinesLiveNodesWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "access.log")
+	now := time.Now()
+	stamp := now.Format("2006/01/02 15:04:05") + ".560474"
+	lines := []string{
+		stamp + " from tcp:203.0.113.9:51234 accepted tcp:example.com:443 [vless-in >> direct] email: user-vless",
+		stamp + " from 203.0.113.10:4411 accepted 198.51.100.63:443 [shadowsocks-in >> direct] email: user-ss",
+		stamp + " from 203.0.113.11:4412 accepted 198.51.100.64:443 [shadowsocks-in >> direct] email: user-ss",
+		stamp + " from tcp:[2001:db8::7]:5000 accepted tcp:example.com:443 [trojan-in >> direct] email: user-v6",
+		stamp + " from 203.0.113.12:1 rejected proxy/trojan: not trojan protocol",
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := NewSessionCounter(path, time.Hour).Counts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"user-vless": 1, "user-ss": 2, "user-v6": 1}
+	for user, n := range want {
+		if counts[user] != n {
+			t.Errorf("%s: got %d sources, want %d (all counts %v)", user, counts[user], n, counts)
+		}
+	}
+	if len(counts) != len(want) {
+		t.Errorf("unexpected users counted: %v", counts)
 	}
 }

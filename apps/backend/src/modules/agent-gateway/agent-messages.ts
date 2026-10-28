@@ -54,40 +54,12 @@ export interface HeartbeatMessage {
   realityDestReachable?: boolean;
 }
 
-/** Where one provisioned user's connections went in one window, as the
- * node's Xray access log recorded them (modules/site-visits).
- *
- * The int64 timestamps arrive as strings, like the byte counters above
- * (`longs: String`); port and count are uint32 and arrive as numbers.
- * With `defaults: true` an unset timestamp arrives as "0", which is read
- * as "not given" rather than as 1970. */
-export interface DestinationCountMessage {
-  externalUserId: string;
-  inboundTag: string;
-  network: string;
-  host: string;
-  port: number;
-  count: number;
-  firstSeen: string | number;
-  lastSeen: string | number;
-}
-
-export interface DestinationBatchMessage {
-  windowStart: string | number;
-  windowEnd: string | number;
-  destinations: DestinationCountMessage[];
-  /** Log lines the agent left uncounted because the window's cap on
-   * distinct destinations was reached. */
-  dropped: number;
-}
-
 export interface AgentMessageEnvelope {
-  payload: "hello" | "heartbeat" | "statsBatch" | "commandAck" | "stateSnapshot" | "destinationBatch";
+  payload: "hello" | "heartbeat" | "statsBatch" | "commandAck" | "stateSnapshot";
   hello?: HelloMessage;
   heartbeat?: HeartbeatMessage;
   commandAck?: CommandAckMessage;
   statsBatch?: StatsBatchMessage;
-  destinationBatch?: DestinationBatchMessage;
 }
 
 export interface ControlMessageEnvelope {

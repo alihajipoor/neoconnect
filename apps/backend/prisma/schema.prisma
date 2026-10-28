@@ -395,7 +395,6 @@ model Customer {
   voucherRedemptions VoucherRedemption[]
   supportTickets     SupportTicket[]
   clientAttempts     ClientAttempt[]
-  siteVisits SiteVisit[]
   gamingToken        GamingResolverToken?
   sessions           CustomerSession[]
 
@@ -677,7 +676,6 @@ model Node {
 
   reachabilityChecks NodeReachabilityCheck[]
   insideChecks       InsideProbeCheck[]
-  siteVisits         SiteVisit[]
   reachabilityAlerts NodeReachabilityAlert[]
   blockIncidents     BlockIncident[]
 
@@ -2190,35 +2188,4 @@ model InsideProbeCheck {
   @@index([nodeId, checkedAt])
   @@index([checkedAt])
   @@map("inside_probe_checks")
-}
-
-/// Where a customer's connections went: one row per user, server and
-/// destination per window an agent reported (DestinationBatch in
-/// packages/proto/agent.proto). Kept seven days (modules/site-visits).
-/// The owner's decision of 2026-10-28, disclosed on the privacy page.
-/// Destinations are as Xray logged them -- mostly addresses, since the
-/// servers do not sniff names -- and only Xray connections appear.
-model SiteVisit {
-  id             String   @id @default(uuid())
-  customerId     String
-  nodeId         String
-  /// The provisioned user the line named (Xray client email).
-  externalUserId String
-  /// The protocol of that provisioned user, when it was found.
-  protocol       String?
-  inboundTag     String
-  network        String
-  host           String
-  port           Int
-  count          Int
-  firstSeen      DateTime
-  lastSeen       DateTime
-  createdAt      DateTime @default(now())
-
-  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  node     Node     @relation(fields: [nodeId], references: [id], onDelete: Cascade)
-
-  @@index([customerId, lastSeen])
-  @@index([lastSeen])
-  @@map("site_visits")
 }

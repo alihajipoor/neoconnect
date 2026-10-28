@@ -10,7 +10,6 @@ import { ReachabilityService } from "../reachability/reachability.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { RelayAuthService } from "../relay-auth/relay-auth.service";
 import { BlockWatchService } from "../block-watch/block-watch.service";
-import { SiteVisitsService } from "../site-visits/site-visits.service";
 import { SWEEPS_QUEUE, STALE_PENDING_AFTER_MS } from "./jobs.constants";
 
 @Processor(SWEEPS_QUEUE)
@@ -27,7 +26,6 @@ export class SweepsProcessor extends WorkerHost {
     private readonly protocolUsersService: ProtocolUsersService,
     private readonly relayAuthService: RelayAuthService,
     private readonly blockWatchService: BlockWatchService,
-    private readonly siteVisitsService: SiteVisitsService,
   ) {
     super();
   }
@@ -127,13 +125,6 @@ export class SweepsProcessor extends WorkerHost {
             `block watch: ${flagged.map((r) => `${r.nodeName}=${r.verdict ?? "outage"}[${r.firing.join("+")}]`).join(", ")}`,
           );
         }
-        break;
-      }
-      case "site-visit-retention": {
-        // Seven days of where customers' connections went, and not a day
-        // more: the privacy page says so, and this is what makes it true.
-        // The service logs the count itself when it deletes anything.
-        await this.siteVisitsService.prune();
         break;
       }
       default:

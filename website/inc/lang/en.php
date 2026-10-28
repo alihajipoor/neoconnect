@@ -799,11 +799,7 @@ return array(
     'home.answers.body' => 'Many VPN sites say these. Here\'s why we don\'t.',
     'home.answers.1.claim' => 'No logs',
     'home.answers.1.lead' => 'Our servers keep connection logs.',
-    // The short form of the privacy page's "What our servers record"
-    // (inc/content/privacy.php), and it has to agree with it. It lost "We
-    // don't use them to profile you" on 2026-10-28, when the servers began
-    // keeping a 7-day record of the sites each account connected to.
-    'home.answers.1.say' => 'Billing records how much data you use, in bytes. For most connection types, the servers also record which sites and addresses you connected to. We keep that record with your account for 7 days. We use it to fix problems and run the service, and we don\'t sell it.',
+    'home.answers.1.say' => 'Billing records how much data you use, as a number of bytes. The servers also keep the usual operational logs, and these can include connection records. We use them to run the service and fix problems. We don\'t use them to profile you, and we don\'t sell them.',
     'home.answers.2.claim' => 'Undetectable',
     'home.answers.2.lead' => 'No connection is undetectable.',
     'home.answers.2.say' => 'Our connection is hard to tell apart from an ordinary visit to a website. That\'s different from undetectable, and claiming it would give you false confidence.',

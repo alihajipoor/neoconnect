@@ -49,7 +49,6 @@ import { RelayAuthModule } from "./modules/relay-auth/relay-auth.module";
 import { AdminAuditModule } from "./modules/admin-audit/admin-audit.module";
 import { AccountActivityModule } from "./modules/account-activity/account-activity.module";
 import { CustomerActivityModule } from "./modules/customer-activity/customer-activity.module";
-import { SiteVisitsModule } from "./modules/site-visits/site-visits.module";
 
 @Module({
   imports: [
@@ -123,7 +122,6 @@ import { SiteVisitsModule } from "./modules/site-visits/site-visits.module";
     // Seven days of where each customer's connections went, from the
     // agents' DestinationBatch: GET /customers/:id/sites (owner only,
     // audited). Also imported by the agent gateway and the sweeps.
-    SiteVisitsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ClientThrottlerGuard }],
 })

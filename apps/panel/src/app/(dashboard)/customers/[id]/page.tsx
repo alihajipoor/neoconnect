@@ -6,7 +6,6 @@ import { apiFetch, apiFetchList } from "@/lib/api";
 import type {
   Customer,
   CustomerActivity,
-  CustomerSites,
   InvoiceListRow,
   Subscription,
   SubscriptionPlan,
@@ -21,15 +20,10 @@ import { RightNowCard } from "./right-now-card";
 import { DevicesCard } from "./devices-card";
 import { ConnectionLog } from "./connection-log";
 import { TrafficCard } from "./traffic-card";
-import { SITE_WINDOWS, SitesCard, type SitesState, type SiteWindow } from "./sites-card";
 
 /** How many of the newest attempts the connection log shows. Enough to
  * cover a bad evening of retries; older ones are on Client Attempts. */
 const ATTEMPTS_SHOWN = 50;
-
-/** Rows of site history per request. The search narrows it server-side,
- * so this only bounds how much one unfiltered view renders. */
-const SITES_TAKE = 200;
 
 /** Everything about one customer, in one place.
  *
@@ -46,14 +40,12 @@ export default async function CustomerDetailPage({
 }: {
   params: Promise<{ id: string }>;
   // take/skip page the invoice list: a long-standing customer on a
-  // monthly plan has more invoices than fit on one card. days/q are the
-  // site history's window and search, and their presence is what opens
-  // it (see SitesCard).
-  searchParams: Promise<{ take?: string; skip?: string; days?: string; q?: string }>;
+  // monthly plan has more invoices than fit on one card.
+  searchParams: Promise<{ take?: string; skip?: string }>;
 }) {
   const admin = await requireStaff();
   const { id } = await params;
-  const { take: takeParam, skip: skipParam, days: daysParam, q: qParam } = await searchParams;
+  const { take: takeParam, skip: skipParam } = await searchParams;
   // 20 rather than the API's default 100: this is a card inside a page,
   // not a table that owns the screen.
   const { take, skip } = pageWindow({ take: takeParam, skip: skipParam }, 20);
@@ -69,19 +61,7 @@ export default async function CustomerDetailPage({
   });
   if (skip > 0) invoiceQuery.set("skip", String(skip));
 
-  // Site history: SUPERADMIN only, and only once somebody opens it. The
-  // backend enforces the role and audit-logs every read; not calling it
-  // for anyone else keeps a support agent's profile views out of a log
-  // that is meant to record who looked at someone's browsing.
-  const canReadSites = admin.role === "SUPERADMIN";
-  const sitesOpen = canReadSites && daysParam !== undefined;
-  const days: SiteWindow = SITE_WINDOWS.find((w) => String(w) === daysParam) ?? 7;
-  // typeof, not ??: a repeated ?q= arrives as an array despite the type.
-  const q = (typeof qParam === "string" ? qParam : "").trim().slice(0, 200);
-  const sitesQuery = new URLSearchParams({ days: String(days), take: String(SITES_TAKE) });
-  if (q) sitesQuery.set("q", q);
-
-  const [subscriptions, plans, invoices, activity, sites] = await Promise.all([
+  const [subscriptions, plans, invoices, activity] = await Promise.all([
     // Not windowed on the API, and does not need to be: one customer's
     // subscriptions are bounded by the customer.
     apiFetch<Subscription[]>(`/subscriptions?customerId=${encodeURIComponent(id)}`).catch(() => []),
@@ -96,17 +76,6 @@ export default async function CustomerDetailPage({
     apiFetch<CustomerActivity>(
       `/customers/${encodeURIComponent(id)}/activity?attemptsTake=${ATTEMPTS_SHOWN}`,
     ).catch(() => null),
-    sitesOpen
-      ? apiFetch<CustomerSites>(`/customers/${encodeURIComponent(id)}/sites?${sitesQuery.toString()}`).then(
-          (data): SitesState | null => ({ kind: "loaded", data }),
-          // A 403 means this admin may not read it after all (the role in
-          // the panel's cookie is older than the one on the backend):
-          // show nothing, as for any other role. Anything else is a
-          // failure worth saying.
-          (error: unknown): SitesState | null =>
-            error instanceof Error && error.message.includes("(403)") ? null : { kind: "failed" },
-        )
-      : Promise.resolve<SitesState | null>(canReadSites ? { kind: "closed" } : null),
   ]);
 
   return (
@@ -188,8 +157,6 @@ export default async function CustomerDetailPage({
 
       <TrafficCard traffic={activity?.traffic ?? null} />
 
-      {sites && <SitesCard customerId={id} state={sites} days={days} q={q} />}
-
       {customer.recoveryCodeSetAt && <MoveAddressCard customerId={id} />}
 
       <Card>
@@ -230,8 +197,6 @@ export default async function CustomerDetailPage({
             take={take}
             skip={skip}
             basePath={`/customers/${id}`}
-            // Paging invoices must not close an open site history.
-            params={{ days: sitesOpen ? String(days) : undefined, q: sitesOpen ? q : undefined }}
           />
         </CardContent>
       </Card>

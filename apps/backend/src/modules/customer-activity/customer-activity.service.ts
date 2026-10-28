@@ -3,7 +3,6 @@ import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AsnLookupService } from "../network-identity/asn-lookup.service";
 import { CustomerAuthService } from "../customer-auth/customer-auth.service";
-import { boundedInt } from "../site-visits/site-visits.service";
 
 /** "Connected now" means a usage record ending inside this window: the
  * nodes report traffic about every 30 seconds while it flows, so ten
@@ -525,4 +524,13 @@ export function parseRungs(json: Prisma.JsonValue | null): ParsedRung[] {
     });
   }
   return rungs;
+}
+
+/** A whole number from a query parameter, clamped to [min, max]; the
+ * fallback when it is absent or not a number. */
+export function boundedInt(value: string | number | undefined, min: number, max: number, fallback: number): number {
+  if (value === undefined || value === "") return fallback;
+  const n = Math.trunc(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, min), max);
 }

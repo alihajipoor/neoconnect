@@ -21,36 +21,7 @@
  *     us, but PaymentTransaction.rawWebhookPayload stores the provider's
  *     confirmation, which can contain a name, country or card last four.
  *
- * Two more were taken out on 2026-10-28, the day they stopped being true:
- * "It doesn't record what you used it for" and "We don't use them to build
- * a profile of you". By the owner's decision of that day, the node agents
- * report which destinations each account's connections opened
- * (DestinationBatch in packages/proto/agent.proto), the backend keeps them
- * for 7 days in site_visits (the SiteVisit model), and staff read them on
- * the customer's page in the panel. A list of sites tied to an account is a
- * profile by any reader's meaning of the word, so the page now says what is
- * kept, for how long, and who can see it.
- *
- * "Most connection types" is deliberate. Only some of the engines feed that
- * record (the SiteVisit model says which), but public pages never name
- * protocols, ports, server hosts or the relay, so the page cannot say which
- * ones are left out. Do not let it drift into "every connection" either. If
- * all of them start reporting, change it then.
- *
- * "Only a few of us can open the list of sites, and each time someone does,
- * it's logged" holds because GET /customers/:id/sites is SUPERADMIN only
- * and writes an admin audit entry on every call. Widen that endpoint and
- * this sentence has to change with it.
- *
- * The numbers are the code's and must move with it: 7 days is the
- * site-visits sweep, 14 and 60 days are RETENTION_DAYS and
- * KEEP_WITHOUT_ADDRESS_DAYS in the backend's client-attempts module. Those
- * app reports (ClientAttempt) are older than the site record, but this page
- * never mentioned them until the same day.
- *
- * If you change any of this in the product, update this file to match. The
- * home page's "No logs" answer (home.answers.1.say in inc/lang) repeats the
- * short version and has to agree with it.
+ * If you change either of those in the product, update this file to match.
  *
  * Sections render in order: title, then each paragraph, then optional bullets.
  */
@@ -59,7 +30,7 @@ defined('NX') || exit;
 
 return array(
 
-    'updated' => '2026-10-28',
+    'updated' => '2026-10-22',
 
     'sections' => array(
 
@@ -99,7 +70,6 @@ return array(
                     'Your password, stored only as a cryptographic hash. We can\'t read it and can\'t tell you what it is.',
                     'A Telegram username, only if you choose to give one.',
                     'Your plan: which one, when it renews and how much data you\'ve used.',
-                    'The devices you sign in on: what kind each one is, the name the app shows for it, and when it was last used.',
                     'Support messages you send us from the app.',
                     'A referral code, and who invited you, if you joined through someone else\'s invitation.',
                 ),
@@ -108,7 +78,6 @@ return array(
                     'رمز عبور شما، فقط به شکل هش رمزنگاری‌شده. ما نمی‌توانیم آن را بخوانیم و نمی‌توانیم به شما بگوییم چیست.',
                     'نام کاربری تلگرام، فقط اگر خودتان وارد کنید.',
                     'پلن شما: کدام پلن، کی تمدید می‌شود و چقدر از حجمش را مصرف کرده‌اید.',
-                    'دستگاه‌هایی که با آن‌ها وارد حسابتان می‌شوید: نوع هر دستگاه، اسمی که برنامه برایش نشان می‌دهد و آخرین باری که از آن استفاده شده.',
                     'پیام‌هایی که از داخل برنامه برای پشتیبانی می‌فرستید.',
                     'کد دعوت، و اینکه چه کسی شما را دعوت کرده، اگر با دعوت کس دیگری عضو شده باشید.',
                 ),
@@ -140,20 +109,14 @@ return array(
             'body' => array(
                 'en' => array(
                     'This is the part people ask about most.',
-                    'Our billing system records how much data you use, in bytes, and on which server. That\'s how it applies your plan\'s limit.',
-                    'For most connection types, our servers also record which sites and addresses you connected to through the VPN. Each record is linked to your account. It shows the site or address, the server you used, how many times and when. Often it\'s only an IP address, with no site name. It doesn\'t show which pages you read on a site, or what you sent and received. We keep these records for 7 days, then delete them.',
-                    'The app also sends us a short report when you sign up, sign in or connect, whether it works or not. It says which servers and connection types the app tried and what happened. It also includes the app version, the kind of device, your internet provider and your IP address. If you\'re signed in, the report is linked to your account. We delete the IP address after 14 days and the rest of the report after 60 days.',
-                    'Like most network software, the servers also keep operational logs, and these can include connection records.',
-                    'We use all of this to fix connection problems and to keep an eye on how the service is running. Our support team sees it when they open your account. Only a few of us can open the list of sites, and each time someone does, it\'s logged. We don\'t sell any of it, and we don\'t give it to advertisers.',
+                    'Our billing system records how much data you use, as a number of bytes, to apply your plan\'s limit. It doesn\'t record what you used it for.',
+                    'The VPN servers also keep operational logs, as most network software does, and these can include connection records. We use them to run the service and find faults. We don\'t use them to build a profile of you, and we don\'t sell them or give them to advertisers.',
                     'If you need a stronger guarantee than this, ask us before you assume one.',
                 ),
                 'fa' => array(
                     'این بخشی است که بیشتر از همه درباره‌اش سؤال می‌شود.',
-                    'سیستم صورتحساب ما حجم مصرفی شما را به بایت ثبت می‌کند و اینکه روی کدام سرور مصرف شده است. سقف پلنتان از روی همین حساب می‌شود.',
-                    'در بیشتر روش‌های اتصال، سرورهای ما ثبت می‌کنند که از طریق وی‌پی‌ان به کدام سایت‌ها و آدرس‌ها وصل شده‌اید. هر مورد با حساب کاربری شما ثبت می‌شود و نشان می‌دهد چه سایت یا آدرسی بوده، از کدام سرور، چند بار و کی. خیلی وقت‌ها فقط آدرس IP است و اسم سایت را ندارد. اینکه چه صفحه‌هایی از یک سایت را دیده‌اید، یا چه چیزی فرستاده‌اید و گرفته‌اید، در آن نیست. این سوابق را ۷ روز نگه می‌داریم و بعد پاک می‌کنیم.',
-                    'برنامه هم وقتی ثبت‌نام می‌کنید، وارد حسابتان می‌شوید یا وصل می‌شوید، چه موفق شود چه نه، یک گزارش کوتاه برایمان می‌فرستد. در این گزارش آمده که برنامه کدام سرورها و روش‌های اتصال را امتحان کرده و نتیجه چه شده است. نسخه برنامه، نوع دستگاه، اپراتور اینترنتتان و آدرس IP شما هم در آن هست. اگر وارد حسابتان شده باشید، گزارش با حساب کاربری شما ثبت می‌شود. آدرس IP را بعد از ۱۴ روز پاک می‌کنیم و بقیه گزارش را بعد از ۶۰ روز.',
-                    'خود سرورها هم مثل بیشتر نرم‌افزارهای شبکه لاگ‌های عملیاتی نگه می‌دارند که ممکن است سوابق اتصال را هم شامل شود.',
-                    'از همه این‌ها برای رفع مشکلات اتصال و بررسی وضعیت سرویس استفاده می‌کنیم. تیم پشتیبانی ما وقتی حساب شما را باز می‌کند، این‌ها را می‌بیند. فهرست سایت‌ها را فقط چند نفر از ما می‌توانند باز کنند و هر بار که کسی این کار را بکند، ثبت می‌شود. هیچ‌کدام از این‌ها را نمی‌فروشیم و به تبلیغ‌کننده‌ها نمی‌دهیم.',
+                    'سیستم صورتحساب ما حجم مصرفی شما را به بایت ثبت می‌کند تا سقف پلنتان را اعمال کند. ثبت نمی‌کند آن حجم را صرف چه کاری کرده‌اید.',
+                    'خود سرورهای وی‌پی‌ان هم مثل بیشتر نرم‌افزارهای شبکه لاگ‌های عملیاتی نگه می‌دارند که ممکن است سوابق اتصال را هم شامل شود. از این لاگ‌ها برای اداره سرویس و پیدا کردن خطاها استفاده می‌کنیم. با آن‌ها درباره شما پرونده نمی‌سازیم و آن‌ها را به تبلیغ‌کننده‌ها نمی‌فروشیم یا نمی‌دهیم.',
                     'اگر به تضمینی بیشتر از این نیاز دارید، قبل از هر فرضی از ما بپرسید.',
                 ),
             ),
@@ -203,12 +166,10 @@ return array(
             'body' => array(
                 'en' => array(
                     'We keep account data while your account exists. We keep invoices and payment records longer, because accounting rules usually require it.',
-                    'We delete the record of sites and addresses you connected to after 7 days. We delete the IP address in the app\'s reports after 14 days, and the reports themselves after 60.',
                     'You can ask us for a copy of what we hold about you, ask us to correct it, or ask us to delete your account. Write to us from your account\'s email address and we\'ll take care of it.',
                 ),
                 'fa' => array(
                     'اطلاعات حساب را تا وقتی حسابتان وجود دارد نگه می‌داریم. فاکتورها و سوابق پرداخت را بیشتر نگه می‌داریم، چون قوانین حسابداری معمولاً این را لازم می‌دانند.',
-                    'سوابق سایت‌ها و آدرس‌هایی را که به آن‌ها وصل شده‌اید بعد از ۷ روز پاک می‌کنیم. آدرس IP را در گزارش‌های برنامه بعد از ۱۴ روز پاک می‌کنیم و خود گزارش‌ها را بعد از ۶۰ روز.',
                     'می‌توانید یک نسخه از اطلاعاتی که درباره‌تان داریم بخواهید، اصلاحش را بخواهید یا درخواست حذف حسابتان را بدهید. از ایمیل حسابتان برایمان بنویسید تا انجامش دهیم.',
                 ),
             ),

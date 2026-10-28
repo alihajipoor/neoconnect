@@ -881,32 +881,6 @@ export interface CustomerActivity {
   traffic: CustomerTrafficRow[];
 }
 
-/** One destination the customer's connections opened, summed over the
- * window. `host` is what the server logged: a name when the app asked by
- * name, an address otherwise. */
-export interface CustomerSite {
-  host: string;
-  port: number;
-  network: string;
-  /** The ASN's organisation, when `host` is an address. */
-  owner: string | null;
-  count: number;
-  firstSeen: string;
-  lastSeen: string;
-  servers: string[];
-  protocols: string[];
-}
-
-/** GET /customers/:id/sites -- SUPERADMIN only, and audit-logged. */
-export interface CustomerSites {
-  retentionDays: number;
-  /** A plain sentence on what is and is not recorded. Shown as-is, so the
-   * limits of the data are stated by the side that knows them. */
-  coverage: string;
-  total: number;
-  sites: CustomerSite[];
-}
-
 /** GET /monitor/live -- customers with traffic in the last 10 minutes. */
 export interface LiveMonitor {
   at: string;

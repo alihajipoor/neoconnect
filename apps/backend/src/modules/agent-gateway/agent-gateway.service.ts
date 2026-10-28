@@ -9,7 +9,6 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { NodesService } from "../nodes/nodes.service";
 import { UsageService } from "../usage/usage.service";
 import { ConcurrencyService } from "../usage/concurrency.service";
-import { SiteVisitsService } from "../site-visits/site-visits.service";
 import { decryptCredentials } from "../protocol-users/credentials-crypto";
 import { liveCredentialWhere } from "../protocol-users/live-credentials";
 import { rateLimitFor } from "../protocol-users/rate-limit";
@@ -163,10 +162,6 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     private readonly usageService: UsageService,
     @Inject(forwardRef(() => ConcurrencyService))
     private readonly concurrencyService: ConcurrencyService,
-    // Optional to the compiler only, so the specs that build this service
-    // by hand need not pass it. Nest still injects it: it carries no
-    // @Optional(), so a module that failed to provide it would not start.
-    private readonly siteVisits?: SiteVisitsService,
   ) {}
 
   onModuleInit() {
@@ -419,13 +414,11 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
 
   private handleAgentSync(call: AgentDuplexCall) {
     let nodeId: string | null = null;
-    // The check of a Hello, from the moment it arrives until its signature
-    // has been verified; null otherwise. A message that lands in that short
-    // window comes from an agent that has said who it is and is waiting
-    // for the answer, so it is not taken as a reason to close the stream.
-    // Most kinds are dropped; a DestinationBatch waits for the answer
-    // instead (see there).
-    let helloInFlight: Promise<unknown> | null = null;
+    // Set from the moment a Hello arrives until its signature has been
+    // checked. A message that lands in that short window comes from an
+    // agent that has said who it is and is waiting for the answer, so it
+    // is dropped rather than taken as a reason to close the stream.
+    let helloInFlight = false;
     let closed = false;
 
     /** No node behind this stream (yet). Drops the message while a Hello
@@ -438,29 +431,22 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       void (async () => {
         try {
           if (msg.payload === "hello") {
-            // The node is known as soon as the check passes, before anything
-            // slow. It used to be assigned only once the whole Hello had been
-            // handled -- replaying the outbox and re-asserting every
-            // credential and route, which on a busy relay back after days
-            // takes longer than the agent's 20 s heartbeat. That heartbeat
-            // then closed a correctly authenticated stream as "before a
-            // valid Hello", the close found no node to unregister, and each
-            // retry had a longer backlog than the last.
-            //
-            // Assigned inside the check's own promise rather than after this
-            // await, so that whatever else is waiting on helloInFlight finds
-            // nodeId set when it resumes, whichever of them runs first.
-            const check = this.authenticateHello(call, msg.hello!).then((authenticated) => {
-              nodeId = authenticated.id;
-              return authenticated;
-            });
-            helloInFlight = check;
+            helloInFlight = true;
             let node: { id: string; name: string };
             try {
-              node = await check;
+              node = await this.authenticateHello(call, msg.hello!);
             } finally {
-              if (helloInFlight === check) helloInFlight = null;
+              helloInFlight = false;
             }
+            // The node is known from here, before anything slow. It used to
+            // be assigned only once the whole Hello had been handled --
+            // replaying the outbox and re-asserting every credential and
+            // route, which on a busy relay back after days takes longer
+            // than the agent's 20 s heartbeat. That heartbeat then closed a
+            // correctly authenticated stream as "before a valid Hello",
+            // the close found no node to unregister, and each retry had a
+            // longer backlog than the last.
+            nodeId = node.id;
             await this.nodesService.setStatus(node.id, "ONLINE", { agentVersion: msg.hello!.agentVersion });
             // Closed while the status was being written: nothing to
             // register, and handleStreamClosed has already run.
@@ -513,30 +499,6 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
               sessions: msg.statsBatch?.sessions ?? [],
               deltas: msg.statsBatch?.deltas ?? [],
             });
-          } else if (msg.payload === "destinationBatch") {
-            // The agent sends the windows it queued while the stream was
-            // down as soon as its Hello is written, without waiting for the
-            // answer -- so they arrive while the Hello is still being
-            // checked. Dropped there like the other kinds, they were lost
-            // without trace: the agent's send had succeeded, so it never
-            // counted them as missing, and the queue that exists to carry
-            // history across a panel restart carried it straight into the
-            // bin. Heartbeats and stats never meet this, because each waits
-            // a full interval before its first send. So a batch waits for
-            // the check. If the Hello fails, the check has already closed
-            // the stream, and the batch goes with it.
-            if (!nodeId && helloInFlight) {
-              await helloInFlight.catch(() => undefined);
-              if (!nodeId) return;
-            }
-            if (!nodeId) {
-              refuseUnauthenticated("destinationBatch");
-              return;
-            }
-            // Site history (modules/site-visits). Scoped to the node the
-            // stream authenticated as, which is what makes a credential id
-            // in it mean one customer. record never throws.
-            await this.siteVisits?.record(nodeId, msg.destinationBatch);
           }
           // stateSnapshot: no handling yet -- full reconciliation is later work.
         } catch (err) {
