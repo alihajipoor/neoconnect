@@ -103,6 +103,7 @@ describe("CustomerActivityService.activity", () => {
       network: { asn: 58224, name: "TCI" },
       ip: "198.51.100.20",
       throughServer: null,
+      server: null,
       protocol: "Stealth",
       reason: "every server tried",
       sessionSeconds: null,

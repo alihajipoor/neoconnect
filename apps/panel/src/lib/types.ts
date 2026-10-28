@@ -861,6 +861,8 @@ export interface CustomerAttempt {
   /** The server the report came through, when it was sent through the
    * VPN; its address is the server's, not the customer's. */
   throughServer?: string | null;
+  /** The server a successful connect landed on. */
+  server?: string | null;
   protocol: string | null;
   reason: string | null;
   sessionSeconds: number | null;

@@ -95,6 +95,25 @@ export class ClientAttemptsService {
     private readonly identity: NetworkIdentityService,
   ) {}
 
+  /** The address to keep for a report: the request's, unless the request
+   * came from one of our own servers -- a report sent through the tunnel
+   * it is about, as every connect's success report is -- and the app said
+   * where it was before connecting. Then the app's own reading, but only
+   * when it is on the network the attestation vouches for: an address
+   * the client merely claims is not kept. Before this, 555 of 616 success
+   * reports in three days carried a server's address as the customer's. */
+  private async addressFor(dto: ReportAttemptDto, requestIp: string | undefined, attested: number | null): Promise<string | null> {
+    if (!requestIp) return null;
+    if (!dto.clientIp || attested === null) return requestIp;
+    try {
+      if (!(await this.identity.isOwnAddress(requestIp))) return requestIp;
+      const own = await this.identity.identify(dto.clientIp);
+      return own !== null && own.asn === attested ? dto.clientIp : requestIp;
+    } catch {
+      return requestIp;
+    }
+  }
+
   /** Records one report. Never throws to the caller.
    *
    * A client reporting a failure must not then fail because the report
@@ -114,6 +133,8 @@ export class ClientAttemptsService {
       asn?: number | null;
     },
   ): Promise<void> {
+    const attested = this.identity.verify(dto.network);
+    const ip = await this.addressFor(dto, context.ip, attested);
     const data = (customerId: string | null) => ({
       kind: dto.kind,
       outcome: dto.outcome,
@@ -127,7 +148,7 @@ export class ClientAttemptsService {
       attemptsJson: dto.attempts?.length
         ? (dto.attempts.slice(0, MAX_RUNGS) as unknown as Prisma.InputJsonValue)
         : Prisma.JsonNull,
-      ip: context.ip ?? null,
+      ip,
       // Kept only if it is in the past and inside the retention window.
       // A queued report is by definition older than its arrival; a
       // future date or an ancient one is a broken clock or a bored
@@ -139,7 +160,7 @@ export class ClientAttemptsService {
       // is the one reading taken before that.
       // Over the relay the server knows the network itself, from the
       // address it is not keeping.
-      asn: this.identity.verify(dto.network) ?? context.asn ?? null,
+      asn: attested ?? context.asn ?? null,
       via: context.via ?? null,
       sessionSeconds: dto.kind === ClientAttemptKind.SESSION ? (dto.sessionSeconds ?? null) : null,
     });

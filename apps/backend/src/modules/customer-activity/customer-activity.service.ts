@@ -81,6 +81,10 @@ export interface AttemptRow {
    * just opened, so the address it arrives from is the server's, not the
    * customer's. Null when it came straight from the customer. */
   throughServer: string | null;
+  /** The server a successful connect landed on, from the route it reported
+   * (a relay as "entry -> exit"); null when it named none or the route is
+   * gone. */
+  server: string | null;
   protocol: string | null;
   reason: string | null;
   sessionSeconds: number | null;
@@ -189,6 +193,7 @@ export class CustomerActivityService {
         orderBy: { createdAt: "desc" },
         take,
         select: {
+          routeId: true,
           id: true,
           kind: true,
           outcome: true,
@@ -227,6 +232,8 @@ export class CustomerActivityService {
     // when it is replaced.
     const servers = await this.prisma.node.findMany({ select: { name: true, publicIp: true } });
     const serverAt = new Map(servers.map((n) => [n.publicIp, n.name]));
+    // And the server each connect landed on, named as the rungs are.
+    const landedOn = await this.serverNames([...new Set(attempts.map((a) => a.routeId).filter((id): id is string => !!id))]);
 
     return {
       now: {
@@ -263,6 +270,7 @@ export class CustomerActivityService {
         network: a.asn === null ? null : { asn: a.asn, name: this.asn.orgOf(a.asn) || null },
         ip: a.ip !== null && serverAt.has(a.ip) ? null : a.ip,
         throughServer: a.ip !== null ? (serverAt.get(a.ip) ?? null) : null,
+        server: a.routeId ? (landedOn.get(a.routeId) ?? null) : null,
         protocol: a.protocol,
         reason: a.reason,
         sessionSeconds: a.sessionSeconds,

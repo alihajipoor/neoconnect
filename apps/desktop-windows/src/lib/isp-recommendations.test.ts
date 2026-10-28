@@ -277,3 +277,22 @@ describe("IspTagLine", () => {
     expect(html).not.toMatch(/text-(warning|success)|text-[11px]/);
   });
 });
+
+/** A connect's success report goes out through the tunnel, so the server
+ * only sees its own address; the device's own one, read before
+ * connecting, goes with the attestation from the same reading. */
+describe("the device's own address on a report", () => {
+  const report = { kind: "CONNECT", outcome: "SUCCESS" } as Parameters<typeof withNetwork>[0];
+
+  it("goes with the attestation it was read with", () => {
+    expect(withNetwork(report, "signed", "198.51.100.7")).toMatchObject({ network: "signed", clientIp: "198.51.100.7" });
+  });
+
+  it("is left off with no attestation, which an older server would refuse", () => {
+    expect(withNetwork(report, null, "198.51.100.7")).not.toHaveProperty("clientIp");
+  });
+
+  it("is left off when the reading had none", () => {
+    expect(withNetwork(report, "signed", null)).not.toHaveProperty("clientIp");
+  });
+});

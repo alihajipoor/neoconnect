@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { publicRequest, requestFailed } from "./api";
 import { API_ENDPOINT_MAX, clipTrace, LEGACY_API_ENDPOINT_MAX } from "./endpoint-trace";
 import { getTokens } from "./session";
-import { currentAttestation } from "./network-identity";
+import { currentAttestation, currentClientIp } from "./network-identity";
 
 /** Telling the panel how an attempt went, so a beta can be watched from
  * somewhere other than screenshots.
@@ -444,8 +444,15 @@ async function send(queued: QueuedReport): Promise<boolean> {
  * Without, the report is sent in the shape every server accepts, and a
  * SESSION report -- which says nothing useful without a network -- is
  * not sent at all. Returns null for "do not send". */
-export function withNetwork(report: AttemptReport, attestation = currentAttestation()): (AttemptReport & { network?: string }) | null {
-  if (attestation) return { ...report, network: attestation };
+export function withNetwork(
+  report: AttemptReport,
+  attestation = currentAttestation(),
+  clientIp = currentClientIp(),
+): (AttemptReport & { network?: string; clientIp?: string }) | null {
+  // The device's own address goes with the attestation it was read with,
+  // and only then: the server keeps it only on the attested network, and
+  // a server that issues attestations is new enough to accept the field.
+  if (attestation) return clientIp ? { ...report, network: attestation, clientIp } : { ...report, network: attestation };
   if (report.kind === "SESSION") return null;
   const { sessionSeconds: _unused, ...rest } = report;
   return {

@@ -6,6 +6,7 @@ import {
   IsDateString,
   IsEnum,
   IsInt,
+  IsIP,
   IsOptional,
   IsString,
   IsUUID,
@@ -151,6 +152,18 @@ export class ReportAttemptDto {
   @IsString()
   @MaxLength(80)
   network?: string;
+
+  /** The customer's own public address, as /health/ip told the app before
+   * its tunnel came up -- the same reading the attestation was issued
+   * with. A connect's success report goes out through the tunnel it has
+   * just opened, so the address the request arrives from is our server's.
+   * Kept only when the request did come from one of our servers and this
+   * address is on the network the attestation vouches for
+   * (ClientAttemptsService.record). */
+  @IsOptional()
+  @IsIP()
+  @MaxLength(45)
+  clientIp?: string;
 
   /** For a SESSION report: seconds the tunnel had been carrying traffic.
    * Capped at a week -- the client sends this once, ten minutes in, so

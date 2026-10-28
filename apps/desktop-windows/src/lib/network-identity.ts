@@ -27,6 +27,11 @@ export interface NetworkReading {
   /** Opaque, signed by the server, valid for about a day. Null from a
    * server that cannot sign (no secret configured). */
   attestation: string | null;
+  /** The device's own public address in the same reading, for the
+   * connection reports (`withNetwork`): a success report goes out through
+   * the tunnel, and the server would otherwise only see its own address.
+   * Optional so a reading saved by an older build still restores. */
+  ip?: string | null;
   /** When it was read, epoch ms. */
   at: number;
 }
@@ -80,6 +85,7 @@ export function rememberNetwork(body: Record<string, unknown>, now = Date.now())
           asn: body.asn,
           org: typeof body.asnOrg === "string" ? body.asnOrg : null,
           attestation: typeof body.network === "string" ? body.network : null,
+          ip: typeof body.ip === "string" && body.ip.length <= 45 ? body.ip : null,
           at: now,
         }
       : null;
@@ -175,6 +181,12 @@ export function currentNetwork(now = Date.now()): NetworkReading | null {
  * issues one. See `attempts.ts`. */
 export function currentAttestation(now = Date.now()): string | null {
   return currentNetwork(now)?.attestation ?? null;
+}
+
+/** The device's own public address from the same reading as the
+ * attestation, or null. */
+export function currentClientIp(now = Date.now()): string | null {
+  return currentNetwork(now)?.ip ?? null;
 }
 
 /** Headers for a route-list request. Empty when there is nothing to say,
