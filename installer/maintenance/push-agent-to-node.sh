@@ -32,7 +32,18 @@ KEY="${3:-}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=20)
 [[ -n "$KEY" ]] && SSH_OPTS+=(-i "$KEY")
 
-ASSET="agentd-linux-amd64"
+# The node's architecture, asked before anything is fetched. This used to
+# be amd64 unconditionally, which the checksum cannot catch -- a whole,
+# correct amd64 binary verifies fine and then cannot start on an arm64
+# node, leaving it with no agent. finland-2 is arm64 (found 2026-10-28,
+# before the v0.2.11 rollout reached it).
+case "$(ssh "${SSH_OPTS[@]}" "$DEST" uname -m)" in
+  x86_64 | amd64) ARCH=amd64 ;;
+  aarch64 | arm64) ARCH=arm64 ;;
+  *) echo "Unknown architecture on $DEST, not installing" >&2; exit 1 ;;
+esac
+ASSET="agentd-linux-$ARCH"
+echo "Node is linux/$ARCH."
 BASE="https://github.com/alihajipoor/neoxify-releases/releases/download/$TAG"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -48,10 +59,12 @@ echo "Copying to $DEST (this is the slow part over a filtered link)..."
 scp "${SSH_OPTS[@]}" "$TMP/$ASSET" "$TMP/sha256sums.txt" "$DEST:/tmp/"
 
 echo "Verifying on the node, then installing..."
-ssh "${SSH_OPTS[@]}" "$DEST" bash -s <<'REMOTE'
+# ASSET is one of the two names chosen above, never anything the node or
+# the release said, so passing it on the command line is safe.
+ssh "${SSH_OPTS[@]}" "$DEST" "ASSET=$ASSET bash -s" <<'REMOTE'
 set -euo pipefail
 cd /tmp
-grep 'agentd-linux-amd64' sha256sums.txt | sha256sum -c - || {
+grep "$ASSET" sha256sums.txt | sha256sum -c - || {
   echo "CHECKSUM FAILED ON THE NODE -- the copy is corrupt, not installing" >&2
   exit 1
 }
@@ -62,9 +75,9 @@ if [[ -x /usr/local/bin/agentd ]]; then
   cp -a /usr/local/bin/agentd \
     "/var/lib/neoxify/agentd-rollback/agentd-prev-$(sha256sum /usr/local/bin/agentd | cut -c1-12)"
 fi
-install -m 755 agentd-linux-amd64 /usr/local/bin/agentd
+install -m 755 "$ASSET" /usr/local/bin/agentd
 systemctl restart neoxify-agentd
-rm -f /tmp/agentd-linux-amd64 /tmp/sha256sums.txt
+rm -f "/tmp/$ASSET" /tmp/sha256sums.txt
 sleep 10
 echo "  version : $(/usr/local/bin/agentd --version)"
 echo "  service : $(systemctl is-active neoxify-agentd)"
