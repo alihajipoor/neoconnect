@@ -44,6 +44,10 @@ const RELAY_UNVERIFIED_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // and nothing else it reads changes faster. Runs whatever BLOCK_WATCH
 // says, and does nothing when it is off.
 const BLOCK_WATCH_INTERVAL_MS = 30 * 60 * 1000;
+// Hourly, so nothing outlives the seven days the privacy page promises by
+// more than an hour. Like the attempt log's, this is the only thing that
+// actually enforces that promise.
+const SITE_VISIT_INTERVAL_MS = 60 * 60 * 1000;
 
 /** Registers the two repeatable sweep jobs on startup. Adding a
  * repeatable job with the same jobId+repeat config is idempotent in
@@ -105,6 +109,11 @@ export class SweepsSchedulerService implements OnModuleInit {
       "block-watch",
       {},
       { repeat: { every: BLOCK_WATCH_INTERVAL_MS }, jobId: "block-watch-sweep" },
+    );
+    await this.queue.add(
+      "site-visit-retention",
+      {},
+      { repeat: { every: SITE_VISIT_INTERVAL_MS }, jobId: "site-visit-retention-sweep" },
     );
   }
 }

@@ -14,7 +14,12 @@ down from the panel on reconnect (see `docs/architecture.md`).
    `neoxify` database: admins, customers, subscriptions, nodes, protocol
    configs/users (credentials encrypted at rest via
    `CREDENTIALS_ENCRYPTION_KEY`, see `apps/backend/src/modules/protocol-users/credentials-crypto.ts`),
-   usage records, payment transactions, audit log.
+   usage records, payment transactions, audit log. **Except the rows of
+   `site_visits`** (`--exclude-table-data`): the privacy page promises
+   the record of which sites a customer reached is gone after 7 days,
+   and a 14-day backup would keep it for three weeks. A restore brings
+   the table back empty. Any manual dump -- the pre-deploy one included
+   -- should pass the same flag.
 2. **Agent-gateway TLS certs** — `/etc/neoxify/certs/{fullchain,privkey}.pem`
    (copies of the Let's Encrypt cert used for the gRPC gateway; nginx's own
    copy under `/etc/letsencrypt` is not included since certbot re-issues

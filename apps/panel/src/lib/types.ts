@@ -803,3 +803,119 @@ export interface BlockWatchOverview {
   open: BlockIncident[];
   closed: BlockIncident[];
 }
+
+// ------------------------------------------------------- customer activity
+//
+// What staff see on a customer's profile about their connections. Byte
+// counts are decimal strings for the same reason as everywhere else here:
+// they come out of BigInt columns and can pass Number.MAX_SAFE_INTEGER.
+
+/** "Connected" is inferred, not reported: a usage record for this
+ * customer that ended in the last 10 minutes and carried bytes. A
+ * connection that is up but idle, or younger than one usage report, does
+ * not count. */
+export interface CustomerConnectedNow {
+  nodeName: string;
+  protocol: string;
+  lastTrafficAt: string;
+  bytesLast10Min: string;
+}
+
+/** One signed-in device: a CustomerSession and what it last reported. */
+export interface CustomerDevice {
+  sessionId: string;
+  /** windows | macos | linux | android | ios; null on sessions from
+   * before apps sent it. */
+  platform: string | null;
+  label: string | null;
+  /** NORMAL or RELAY: which route the sign-in arrived by. */
+  channel: string | null;
+  createdAt: string;
+  lastUsedAt: string;
+  revoked: boolean;
+  appVersion: string | null;
+}
+
+/** One rung of a connect attempt's failover ladder, with the server it
+ * dialled resolved to a name where the backend could. */
+export interface CustomerAttemptRung {
+  protocol: string | null;
+  server: string | null;
+  result: string;
+  carried: boolean | null;
+}
+
+/** A client attempt as the profile shows it. `kind` and `outcome` carry
+ * the ClientAttemptKind / ClientAttemptOutcome values, typed loosely so a
+ * value added on the backend renders as itself instead of breaking. */
+export interface CustomerAttempt {
+  id: string;
+  at: string;
+  kind: string;
+  outcome: string;
+  platform: string;
+  appVersion: string;
+  network: { asn: number; name: string | null } | null;
+  ip: string | null;
+  protocol: string | null;
+  reason: string | null;
+  sessionSeconds: number | null;
+  rungs: CustomerAttemptRung[];
+}
+
+/** One day x server x protocol of usage, last 14 days. `day` is a UTC
+ * date, YYYY-MM-DD. */
+export interface CustomerTrafficRow {
+  day: string;
+  nodeName: string;
+  protocol: string;
+  bytesUp: string;
+  bytesDown: string;
+}
+
+/** GET /customers/:id/activity */
+export interface CustomerActivity {
+  now: { lastSeenAt: string | null; connected: CustomerConnectedNow | null };
+  devices: CustomerDevice[];
+  attempts: CustomerAttempt[];
+  traffic: CustomerTrafficRow[];
+}
+
+/** One destination the customer's connections opened, summed over the
+ * window. `host` is what the server logged: a name when the app asked by
+ * name, an address otherwise. */
+export interface CustomerSite {
+  host: string;
+  port: number;
+  network: string;
+  /** The ASN's organisation, when `host` is an address. */
+  owner: string | null;
+  count: number;
+  firstSeen: string;
+  lastSeen: string;
+  servers: string[];
+  protocols: string[];
+}
+
+/** GET /customers/:id/sites -- SUPERADMIN only, and audit-logged. */
+export interface CustomerSites {
+  retentionDays: number;
+  /** A plain sentence on what is and is not recorded. Shown as-is, so the
+   * limits of the data are stated by the side that knows them. */
+  coverage: string;
+  total: number;
+  sites: CustomerSite[];
+}
+
+/** GET /monitor/live -- customers with traffic in the last 10 minutes. */
+export interface LiveMonitor {
+  at: string;
+  users: {
+    customerId: string;
+    email: string;
+    nodeName: string;
+    protocol: string;
+    lastTrafficAt: string;
+    bytesLast10Min: string;
+  }[];
+}

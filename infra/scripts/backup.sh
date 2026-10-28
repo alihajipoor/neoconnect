@@ -51,9 +51,17 @@ trap 'rm -rf "$work_dir"' EXIT
 
 install -d -m 700 "$BACKUP_DIR"
 
+# site_visits keeps its schema but not its rows. The privacy page tells
+# customers the record of which sites they reached is deleted after 7
+# days, and the sweep keeps that true of the live table -- but a copy in
+# a backup kept for BACKUP_KEEP days would hold it for three weeks, and
+# out of reach of the sweep. Losing at most seven days of that history on
+# a restore is the right trade; the restored table is empty, not missing.
+# Any other dump of this database (the pre-deploy one included) needs the
+# same flag for the same reason.
 echo "Dumping database..."
 docker compose -f "$PROD_COMPOSE" --env-file "$PROD_ENV" exec -T postgres \
-  pg_dump -U neoxify -Fc neoxify > "$work_dir/database.dump"
+  pg_dump -U neoxify -Fc --exclude-table-data=site_visits neoxify > "$work_dir/database.dump"
 
 dump_size=$(stat -c%s "$work_dir/database.dump" 2>/dev/null || stat -f%z "$work_dir/database.dump")
 if [[ "$dump_size" -lt 100 ]]; then

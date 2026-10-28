@@ -2,13 +2,17 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText, Ticket, LifeBuoy, Activity, Handshake, Gamepad2, SatelliteDish, Network, ShieldAlert } from "lucide-react";
+import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText, Ticket, LifeBuoy, Activity, Handshake, Gamepad2, SatelliteDish, Network, ShieldAlert, Radar } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AdminRole } from "@/lib/session";
 
 const NAV_ITEMS: { href: string; label: string; icon: typeof Users; roles?: AdminRole[] }[] = [
   { href: "/overview", label: "Overview", icon: LayoutDashboard },
   { href: "/customers", label: "Customers", icon: Users },
+  // Who is carrying traffic right now, each a link into their profile.
+  // Next to Customers because that is where it leads. Open to every
+  // staff role, like the profile it opens.
+  { href: "/monitor", label: "Live", icon: Radar },
   { href: "/plans", label: "Plans", icon: CreditCard },
   // Viewable by every role (GET is open to any admin on the backend);
   // create/delete are SUPERADMIN-only, gated per-page via `canManage`,

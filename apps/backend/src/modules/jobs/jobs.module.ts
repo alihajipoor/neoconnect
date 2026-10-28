@@ -13,6 +13,7 @@ import { ANNOUNCEMENTS_QUEUE, SWEEPS_QUEUE } from "./jobs.constants";
 import { ReferralsModule } from "../referrals/referrals.module";
 import { ProtocolUsersModule } from "../protocol-users/protocol-users.module";
 import { RelayAuthModule } from "../relay-auth/relay-auth.module";
+import { SiteVisitsModule } from "../site-visits/site-visits.module";
 import { SweepsProcessor } from "./sweeps.processor";
 import { SweepsSchedulerService } from "./sweeps-scheduler.service";
 import { AnnouncementsProcessor } from "./announcements.processor";
@@ -57,6 +58,9 @@ const announcementsQueue = BullModule.registerQueue({ name: ANNOUNCEMENTS_QUEUE 
     // Prisma and the agent gateway only.
     ProtocolUsersModule,
     RelayAuthModule,
+    // For the site history's seven-day retention sweep. No cycle: it pulls
+    // in network identity and the admin audit only.
+    SiteVisitsModule,
   ],
   providers: [SweepsProcessor, SweepsSchedulerService, AnnouncementsProcessor],
   exports: [announcementsQueue],

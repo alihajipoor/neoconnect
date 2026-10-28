@@ -135,3 +135,20 @@ export async function moveAddressWithRecoveryCode(
     }),
   );
 }
+
+/** Signs one of the customer's devices out: its session is revoked and
+ * the VPN credentials that belonged to it are removed, which also gives
+ * up whatever device slot it held. The customer can sign in on it again;
+ * this is not a block. */
+export async function signOutDevice(
+  customerId: string,
+  sessionId: string,
+): Promise<MutationResult<{ ok: true }>> {
+  return done(
+    customerId,
+    await apiMutate<{ ok: true }>(
+      `/customers/${encodeURIComponent(customerId)}/sessions/${encodeURIComponent(sessionId)}/sign-out`,
+      { method: "POST" },
+    ),
+  );
+}

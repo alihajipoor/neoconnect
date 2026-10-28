@@ -48,6 +48,8 @@ import { DeviceSlotsModule } from "./modules/device-slots/device-slots.module";
 import { RelayAuthModule } from "./modules/relay-auth/relay-auth.module";
 import { AdminAuditModule } from "./modules/admin-audit/admin-audit.module";
 import { AccountActivityModule } from "./modules/account-activity/account-activity.module";
+import { CustomerActivityModule } from "./modules/customer-activity/customer-activity.module";
+import { SiteVisitsModule } from "./modules/site-visits/site-visits.module";
 
 @Module({
   imports: [
@@ -115,6 +117,13 @@ import { AccountActivityModule } from "./modules/account-activity/account-activi
     // The Activity screen: GET/DELETE /customer/devices, GET
     // /customer/usage and GET /customer/subscriptions/:id/usage.
     AccountActivityModule,
+    // A customer's connections for staff: GET /customers/:id/activity,
+    // POST /customers/:id/sessions/:sessionId/sign-out, GET /monitor/live.
+    CustomerActivityModule,
+    // Seven days of where each customer's connections went, from the
+    // agents' DestinationBatch: GET /customers/:id/sites (owner only,
+    // audited). Also imported by the agent gateway and the sweeps.
+    SiteVisitsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ClientThrottlerGuard }],
 })
