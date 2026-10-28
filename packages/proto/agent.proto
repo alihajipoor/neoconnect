@@ -27,6 +27,7 @@ message AgentMessage {
     StatsBatch stats_batch = 3;
     CommandAck command_ack = 4;
     StateSnapshot state_snapshot = 5;
+    DestinationBatch destination_batch = 6;
   }
 }
 
@@ -101,6 +102,35 @@ message SessionCount {
   // roaming between networks briefly shows two, which is why the server
   // requires this to persist before acting on it.
   uint32 distinct_sources = 3;
+}
+
+// Where provisioned users' connections went, read from Xray's access log
+// on this node and counted per user and destination over one window.
+//
+// The owner's decision (2026-10-28): the panel keeps seven days of the
+// sites and addresses each customer's connections opened, to diagnose
+// and monitor. The privacy page says so. Only engines that log
+// destinations can report them -- Xray, and only where its access log is
+// on; WireGuard, OpenVPN and IKEv2 report nothing here. An agent older
+// than v0.2.11 never sends this.
+message DestinationBatch {
+  int64 window_start = 1;  // unix seconds
+  int64 window_end = 2;    // unix seconds
+  repeated DestinationCount destinations = 3;
+  // Log lines in the window left uncounted because the window's cap on
+  // distinct destinations was reached. Said, not hidden.
+  uint32 dropped = 4;
+}
+
+message DestinationCount {
+  string external_user_id = 1;  // the Xray client's email: the provisioned user
+  string inbound_tag = 2;       // e.g. vless-in, trojan-in, shadowsocks-in
+  string network = 3;           // tcp | udp
+  string host = 4;              // a name or an address, exactly as Xray logged it
+  uint32 port = 5;
+  uint32 count = 6;             // connections opened in the window
+  int64 first_seen = 7;         // unix seconds
+  int64 last_seen = 8;          // unix seconds
 }
 
 message UsageDelta {
