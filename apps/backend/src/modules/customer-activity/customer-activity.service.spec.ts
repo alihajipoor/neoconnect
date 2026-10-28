@@ -124,7 +124,7 @@ describe("CustomerActivityService.activity", () => {
   it("names the server a report came through instead of giving its address as the customer's", async () => {
     const { service, prisma } = build();
     prisma.clientAttempt.findMany.mockResolvedValue([attempt({ id: "att-through", ip: "203.0.113.2" })]);
-    const { attempts } = await service.activity("cust-1", NOW);
+    const { attempts } = await service.activity("cust-1", {}, NOW);
     expect(attempts[0]).toMatchObject({ ip: null, throughServer: "beta" });
   });
 
