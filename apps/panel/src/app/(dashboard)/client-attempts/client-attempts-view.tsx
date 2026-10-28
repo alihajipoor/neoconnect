@@ -31,7 +31,7 @@ import { cn } from "@/lib/utils";
  * password are both "could not sign in" to the customer and mean
  * completely different things to us.
  */
-const OUTCOMES: Record<
+export const OUTCOMES: Record<
   ClientAttemptOutcome,
   { label: string; hint: string; variant: "success" | "destructive" | "highlight" | "secondary" }
 > = {
@@ -87,7 +87,7 @@ const FILTERS: { label: string; href: string; match: (o: ClientAttemptOutcome | 
   { label: "Everything", href: "/client-attempts?failures=0", match: (o, f) => o === null && !f },
 ];
 
-const KINDS: Record<ClientAttemptKind, string> = {
+export const KINDS: Record<ClientAttemptKind, string> = {
   REGISTER: "Sign-up",
   SIGN_IN: "Sign-in",
   CONNECT: "Connect",
@@ -251,7 +251,19 @@ function AttemptRow({ attempt }: { attempt: ClientAttempt }) {
         </TableCell>
         <TableCell className="text-sm text-muted-foreground">{KINDS[attempt.kind] ?? attempt.kind}</TableCell>
         <TableCell className="text-sm">
-          {attempt.customer?.email ?? (
+          {attempt.customer?.email ? (
+            // Straight to the person: their profile has every attempt,
+            // device and server they used, which is the next question
+            // after "this one failed". The click must not also fold the
+            // row open underneath the navigation.
+            <Link
+              href={`/customers/${attempt.customer.id}`}
+              onClick={(event) => event.stopPropagation()}
+              className="hover:text-primary hover:underline"
+            >
+              {attempt.customer.email}
+            </Link>
+          ) : (
             // Not a gap in the data -- a sign-up that failed or a client
             // that never got a session has nobody to name, and those are
             // the reports worth having.

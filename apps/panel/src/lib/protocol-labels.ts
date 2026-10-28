@@ -46,3 +46,12 @@ export const DEFAULT_PROTOCOL_PORT: Record<Protocol, number> = {
   // config that disagrees with the node it describes.
   IKEV2: 500,
 };
+
+/** For protocol names that arrive as plain strings. Usage records name
+ * the Protocol enum and read as its label; client reports name whatever
+ * the app called the protocol, and are shown exactly as sent rather than
+ * guessed at. */
+export function protocolLabel(protocol: string | null | undefined): string {
+  if (!protocol) return "—";
+  return PROTOCOL_LABELS[protocol as Protocol] ?? protocol;
+}

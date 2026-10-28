@@ -3,13 +3,27 @@ import { requireStaff } from "@/lib/session";
 import { notFound } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Mail, Users } from "lucide-react";
 import { apiFetch, apiFetchList } from "@/lib/api";
-import type { Customer, InvoiceListRow, Subscription, SubscriptionPlan } from "@/lib/types";
+import type {
+  Customer,
+  CustomerActivity,
+  InvoiceListRow,
+  Subscription,
+  SubscriptionPlan,
+} from "@/lib/types";
 import { Pager, pageWindow } from "@/components/dashboard/pager";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SubscriptionsPanel } from "./subscriptions-panel";
 import { MoveAddressCard } from "./move-address-card";
 import { MarkVerifiedButton } from "./mark-verified-button";
+import { RightNowCard } from "./right-now-card";
+import { DevicesCard } from "./devices-card";
+import { ConnectionLog } from "./connection-log";
+import { TrafficCard } from "./traffic-card";
+
+/** How many of the newest attempts the connection log shows. Enough to
+ * cover a bad evening of retries; older ones are on Client Attempts. */
+const ATTEMPTS_SHOWN = 50;
 
 /** Everything about one customer, in one place.
  *
@@ -25,9 +39,8 @@ export default async function CustomerDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  // The window belongs to the invoice list -- it is the only thing on
-  // this page the API pages. A long-standing customer on a monthly plan
-  // has more invoices than fit on one card.
+  // take/skip page the invoice list: a long-standing customer on a
+  // monthly plan has more invoices than fit on one card.
   searchParams: Promise<{ take?: string; skip?: string }>;
 }) {
   const admin = await requireStaff();
@@ -41,14 +54,14 @@ export default async function CustomerDetailPage({
   if (!customer) notFound();
 
   // Fetched together: the page is useless without the subscriptions, and
-  // serially awaiting three independent requests just makes it slower.
+  // serially awaiting independent requests just makes it slower.
   const invoiceQuery = new URLSearchParams({
     customerId: id,
     take: String(take),
   });
   if (skip > 0) invoiceQuery.set("skip", String(skip));
 
-  const [subscriptions, plans, invoices] = await Promise.all([
+  const [subscriptions, plans, invoices, activity] = await Promise.all([
     // Not windowed on the API, and does not need to be: one customer's
     // subscriptions are bounded by the customer.
     apiFetch<Subscription[]>(`/subscriptions?customerId=${encodeURIComponent(id)}`).catch(() => []),
@@ -57,6 +70,12 @@ export default async function CustomerDetailPage({
       items: [],
       total: 0,
     })),
+    // Null on failure, and each section says "could not load" for it:
+    // an empty list here would read as "never connected" and "no
+    // devices", which are claims, not gaps.
+    apiFetch<CustomerActivity>(
+      `/customers/${encodeURIComponent(id)}/activity?attemptsTake=${ATTEMPTS_SHOWN}`,
+    ).catch(() => null),
   ]);
 
   return (
@@ -119,7 +138,24 @@ export default async function CustomerDetailPage({
         />
       </div>
 
+      {/* First, because "why can't they connect" is most of why this
+          page is opened, and whether they are on right now is the first
+          half of the answer. */}
+      <RightNowCard now={activity?.now ?? null} />
+
       <SubscriptionsPanel customerId={id} subscriptions={subscriptions} plans={plans} />
+
+      <ConnectionLog attempts={activity?.attempts ?? null} shown={ATTEMPTS_SHOWN} />
+
+      {/* Signing a device out is SUPERADMIN or SUPPORT on the backend, so
+          nobody else is shown a button that would only answer 403. */}
+      <DevicesCard
+        customerId={id}
+        devices={activity?.devices ?? null}
+        canSignOut={admin.role === "SUPERADMIN" || admin.role === "SUPPORT"}
+      />
+
+      <TrafficCard traffic={activity?.traffic ?? null} />
 
       {customer.recoveryCodeSetAt && <MoveAddressCard customerId={id} />}
 

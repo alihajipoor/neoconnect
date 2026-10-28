@@ -29,12 +29,21 @@ import (
 
 // A line looks like:
 //
-//	2026/07/25 10:13:18 from tcp:203.0.113.9:51234 accepted tcp:1.1.1.1:443 [vless-in >> direct] email: <externalUserId>
+//	2026/10/28 08:20:17.560474 from tcp:203.0.113.9:51234 accepted tcp:1.1.1.1:443 [vless-in >> direct] email: <externalUserId>
+//	2026/10/28 08:21:40.118210 from 203.0.113.9:4411 accepted 198.51.100.63:443 [shadowsocks-in >> direct] email: <externalUserId>
 //
 // The source address and the email tag are the only parts that matter.
 // Matched with a regexp rather than split on spaces because the tail of
 // the line varies with routing decisions.
-var accessLineRe = regexp.MustCompile(`^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) from \S+?:([0-9a-fA-F.:\[\]]+):\d+ .*email: (\S+)`)
+//
+// The fraction of a second and the bare source address are both what the
+// live nodes write, and this used to match neither: it wanted the time
+// to end at the seconds and a "tcp:" before every source. Every line on
+// every node failed it, so no Xray user ever had a device count, and the
+// device-limit backstop (CONCURRENCY_CUT=enforce) had nothing to act on
+// for any Xray protocol. Found on 2026-10-28 by reading a node's log; the
+// owner chose to fix it knowing it starts the backstop for real.
+var accessLineRe = regexp.MustCompile(`^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})(?:\.\d+)? from (?:(?:tcp|udp):)?(\[[0-9a-fA-F:.]+\]|[0-9a-fA-F.:]+?):\d+ .*email: (\S+)`)
 
 const accessTimeLayout = "2006/01/02 15:04:05"
 
