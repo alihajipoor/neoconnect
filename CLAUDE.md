@@ -239,7 +239,9 @@ slots are live. `CONCURRENCY_CUT=enforce` is set in the panel host's
 `infra/.env` (the owner turned the device-limit backstop on on
 2026-10-07; the code default is `shadow`) -- see `docs/device-slots.md`). It is deployed over SSH to the
 panel host with the key at `C:\Users\aliha\.ssh\neoxify_panel`: dump the
-database to `/root/db-backups/pre-<what>-<time>.sql.gz` first, then
+database to `/root/db-backups/pre-<what>-<time>.sql.gz` first (with
+`pg_dump --exclude-table-data=site_visits`: the privacy page promises the
+site history is gone after 7 days, copies included), then
 `git pull --ff-only` in `/root/neoconnect` and
 `docker compose -f infra/docker-compose.prod.yml --env-file infra/.env up -d --build`.
 Migrations apply at container start. Always deploy the backend before
