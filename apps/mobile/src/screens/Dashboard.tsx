@@ -2519,7 +2519,10 @@ export function Dashboard({
             kind: "CONNECT",
             outcome: "OTHER",
             reason: `cancelled by the customer after ${attempts.length} of ${candidates.length} attempt(s)`,
-            attempts: attempts.length > 0 ? rungsFrom(attempts) : undefined,
+            // With the dials, as every other report: without them each
+            // rung lost its server, and the log showed what was given up
+            // on as "unknown server".
+            attempts: attempts.length > 0 ? rungsFrom(attempts, dials) : undefined,
           },
           options.reconnect,
         ),
