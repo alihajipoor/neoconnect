@@ -104,14 +104,48 @@ export function serverKey(candidate: ProtocolUser, routes: ReadonlyArray<Pick<Ro
   return `${host}|${exit}`;
 }
 
+/** Whether a candidate shows one of our own server names on the wire:
+ * its TLS handshake names the server it is dialling, with our certificate
+ * behind it. Stealth HTTPS, Stealth Web and Stealth Lite do (the engine
+ * sets `serverName` from the credential's own, xray-config.ts); Stealth
+ * borrows another site's name, which is REALITY's whole design; and
+ * Shadowsocks, Fast, Compatible and Built-in present no name at all.
+ * Stealth (legacy) does when it is carried over TLS.
+ *
+ * What it is for: a slow rung's evidence is about what the network could
+ * see of it. A hold on an address slows every protocol there alike (two
+ * rounds of measurement, `serverKey`), but Iran also throttles by name,
+ * and a Stealth HTTPS rung held that way says nothing about Stealth or
+ * Shadowsocks on the same box -- which are exactly the rungs built to
+ * get past that, and which the ladder was skipping on its strength. */
+export function presentsOwnName(candidate: Pick<ProtocolUser, "protocol" | "connection">): boolean {
+  switch (candidate.protocol) {
+    case "XRAY_VLESS_TLS":
+    case "XRAY_TROJAN":
+      return true;
+    case "XRAY_VMESS":
+      return candidate.connection?.security === "TLS";
+    default:
+      return false;
+  }
+}
+
 /** What the ladder keeps of rungs that came up and were too slow: which
  * servers (`serverKey`) to pass over for the rest of the pass, and the
  * best of them to dial again, and keep, if nothing better turns up. A
  * held server's other protocols would only be slow again, each costing a
- * full check to find out. */
+ * full check to find out.
+ *
+ * In two sets, by what the slow rung showed the network (`presentsOwnName`).
+ * A rung that showed our name may have been held for the name, so it is
+ * evidence against the other rungs on that server that show it, and
+ * those alone (`names`); one that showed no name of ours, or a borrowed
+ * one, was held for its address, and is evidence against everything
+ * there (`servers`). */
 export type SlowRungs = {
   keyOf: (candidate: ProtocolUser) => string;
   servers: Set<string>;
+  names: Set<string>;
   best: { candidate: ProtocolUser; verdict: Extract<DataVerdict, { state: "slow" }> } | null;
   /** The fallback's credential once it has been put back on the ladder;
    * its check then decides nothing. */
@@ -119,7 +153,7 @@ export type SlowRungs = {
 };
 
 export function noSlowRungs(keyOf: (candidate: ProtocolUser) => string = (u) => `route:${u.routeId}`): SlowRungs {
-  return { keyOf, servers: new Set(), best: null, redialling: null };
+  return { keyOf, servers: new Set(), names: new Set(), best: null, redialling: null };
 }
 
 /** The speed a rung is remembered by (`recordSpeed`): its slower
@@ -140,14 +174,18 @@ export function noteSlow(
   candidate: ProtocolUser,
   verdict: Extract<DataVerdict, { state: "slow" }>,
 ): void {
-  slow.servers.add(slow.keyOf(candidate));
+  (presentsOwnName(candidate) ? slow.names : slow.servers).add(slow.keyOf(candidate));
   if (slow.best === null || faster(verdict, slow.best.verdict)) slow.best = { candidate, verdict };
 }
 
 /** Whether to pass over `candidate` without dialling it: its server was
- * too slow on another protocol this pass. Never the fallback itself. */
+ * too slow on another protocol this pass -- on any protocol, or, for a
+ * rung that shows our name, on another that shows it. Never the fallback
+ * itself. */
 export function passOverSlow(slow: SlowRungs, candidate: ProtocolUser): boolean {
-  return slow.servers.has(slow.keyOf(candidate)) && slow.redialling !== candidate.id;
+  const key = slow.keyOf(candidate);
+  const held = slow.servers.has(key) || (presentsOwnName(candidate) && slow.names.has(key));
+  return held && slow.redialling !== candidate.id;
 }
 
 /** At the end of the ladder with nothing landed: the best slow rung, put

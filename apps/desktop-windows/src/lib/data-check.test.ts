@@ -11,6 +11,7 @@ const {
   noSlowRungs,
   noteSlow,
   passOverSlow,
+  presentsOwnName,
   serverKey,
   slowFallback,
   UP_BYTES,
@@ -80,11 +81,11 @@ describe("checkDataMoves", () => {
 
 describe("slow rungs", () => {
   // A route is one server and one protocol: "germany-1 / VLESS+TLS".
-  const user = (id: string, host: string): ProtocolUser =>
-    ({ id, routeId: `${id}-route`, connection: { host } }) as unknown as ProtocolUser;
+  const user = (id: string, host: string, protocol = "XRAY_VLESS_REALITY", security?: string): ProtocolUser =>
+    ({ id, routeId: `${id}-route`, protocol, connection: { host, security } }) as unknown as ProtocolUser;
   const routes = [] as Array<{ id: string; exit: string | null }>;
   const uk = user("uk-reality", "198.51.100.1");
-  const ukTls = user("uk-tls", "198.51.100.1");
+  const ukTls = user("uk-tls", "198.51.100.1", "XRAY_VLESS_TLS");
   const tr = user("tr-reality", "198.51.100.2");
   const de = user("de-reality", "198.51.100.3");
 
@@ -119,5 +120,51 @@ describe("slow rungs", () => {
 
   it("has nothing to put back when nothing was slow", () => {
     expect(slowFallback(noSlowRungs())).toBeNull();
+  });
+
+  /** Which rungs show the network one of our own names: the TLS ones
+   * with our certificate behind them. REALITY borrows a name, and the
+   * rest present none. Stealth (legacy) only when carried over TLS. */
+  it("knows which protocols present our own server name", () => {
+    expect(presentsOwnName(user("a", "h", "XRAY_VLESS_TLS"))).toBe(true);
+    expect(presentsOwnName(user("b", "h", "XRAY_TROJAN"))).toBe(true);
+    expect(presentsOwnName(user("c", "h", "XRAY_VMESS", "TLS"))).toBe(true);
+    expect(presentsOwnName(user("d", "h", "XRAY_VMESS", "NONE"))).toBe(false);
+    for (const protocol of ["XRAY_VLESS_REALITY", "SHADOWSOCKS", "WIREGUARD", "OPENVPN", "IKEV2"]) {
+      expect(presentsOwnName(user("e", "h", protocol))).toBe(false);
+    }
+  });
+
+  /** Iran throttles by name as well as by address. A Stealth HTTPS rung
+   * held that way said nothing about Stealth or Shadowsocks on the same
+   * box -- the rungs built to get past exactly that -- and the ladder was
+   * skipping them on its strength. So its evidence reaches only the other
+   * rungs there that show our name. */
+  it("lets a slow own-name rung pass over only the other own-name rungs on its server", () => {
+    const ukWeb = user("uk-web", "198.51.100.1", "XRAY_VLESS_TLS");
+    const ukLite = user("uk-lite", "198.51.100.1", "XRAY_TROJAN");
+    const ukSs = user("uk-ss", "198.51.100.1", "SHADOWSOCKS");
+    const slow = noSlowRungs((u) => serverKey(u, routes));
+    noteSlow(slow, ukTls, { state: "slow", downKbps: 900, upKbps: 0 });
+    expect(passOverSlow(slow, ukWeb)).toBe(true);
+    expect(passOverSlow(slow, ukLite)).toBe(true);
+    expect(passOverSlow(slow, uk)).toBe(false);
+    expect(passOverSlow(slow, ukSs)).toBe(false);
+    expect(passOverSlow(slow, de)).toBe(false);
+    // Still the best slow rung to fall back on, and never passed over itself.
+    expect(slowFallback(slow)).toBe(ukTls);
+    expect(passOverSlow(slow, ukTls)).toBe(false);
+  });
+
+  /** A hold on the address slows every protocol there alike, measured
+   * twice: a slow REALITY or Shadowsocks rung is evidence against all of
+   * them, the own-name ones included. */
+  it("lets a slow address-level rung pass over everything on its server", () => {
+    const ukSs = user("uk-ss", "198.51.100.1", "SHADOWSOCKS");
+    const slow = noSlowRungs((u) => serverKey(u, routes));
+    noteSlow(slow, ukSs, { state: "slow", downKbps: 900, upKbps: 0 });
+    expect(passOverSlow(slow, uk)).toBe(true);
+    expect(passOverSlow(slow, ukTls)).toBe(true);
+    expect(passOverSlow(slow, de)).toBe(false);
   });
 });
