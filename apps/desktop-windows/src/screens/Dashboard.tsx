@@ -99,6 +99,7 @@ import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } fro
 import {
   checkDataMoves,
   rememberedKbps,
+  rememberedKbpsWith,
   describeSlow,
   keepsSlow,
   noSlowRungs,
@@ -4433,16 +4434,18 @@ export function Dashboard({
             // endpoint the data check used, begun now that the screen says
             // Connected. Nothing of the pass waits on it, and it decides
             // nothing -- the rung has landed whatever it measures. What it
-            // finds replaces the check's figure in the speed memory, so the
-            // next connect here can prefer the faster server by a reading of
-            // some length, and goes out on the landed rung beside the
-            // check's upload. A report held a few seconds is the same
-            // report; a row of its own for the sample would be counted as a
-            // second attempt.
+            // finds stands in for the check's download in the speed memory
+            // (`rememberedKbpsWith`: still the slower direction, since the
+            // hold is on the upload), so the next connect here can prefer
+            // the faster server by a reading of some length, and goes out
+            // on the landed rung beside the check's upload. A report held a
+            // few seconds is the same report; a row of its own for the
+            // sample would be counted as a second attempt.
             void sampleDownload(sampleBase).then((sample) => {
-              if (sample !== null) {
+              const sampled = rememberedKbpsWith(measured, sample);
+              if (sampled !== null) {
                 setHistory((current) => {
-                  const stamped = recordSpeed(current, networkId, candidate.routeId, candidate.protocol, sample.downKbps);
+                  const stamped = recordSpeed(current, networkId, candidate.routeId, candidate.protocol, sampled);
                   void saveConnectHistory(stamped);
                   return stamped;
                 });

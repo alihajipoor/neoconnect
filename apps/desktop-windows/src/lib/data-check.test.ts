@@ -13,6 +13,8 @@ const {
   noteSlow,
   passOverSlow,
   presentsOwnName,
+  rememberedKbps,
+  rememberedKbpsWith,
   rungSpeeds,
   SAMPLE_MS,
   sampleDownload,
@@ -143,6 +145,33 @@ describe("rungSpeeds", () => {
   it("stays within the server's bounds", () => {
     expect(rungSpeeds(null, { ...sample, downKbps: 1e9 })).toEqual({ downKbps: 10_000_000 });
     expect(rungSpeeds(null, { ...sample, downKbps: 1234.6 })).toEqual({ downKbps: 1235 });
+  });
+});
+
+/** What the landed rung is remembered by once the sample is in: the
+ * slower direction still, with the sample's download in place of the
+ * check's -- never the download alone, which would have remembered an
+ * upload-held server as fast and led with it next time. */
+describe("rememberedKbpsWith", () => {
+  const sample = { downKbps: 6400, bytes: 1_200_000, ms: 1_500 };
+
+  it("keeps the check's upload when it is the slower direction", () => {
+    const moves = judgeDataCheck(GOOD);
+    expect(rememberedKbps(moves)).toBe(1748);
+    expect(rememberedKbpsWith(moves, sample)).toBe(1748);
+    expect(rememberedKbpsWith(moves, { ...sample, downKbps: 900 })).toBe(900);
+  });
+
+  it("leaves a held upload at nothing, however fast the download sampled", () => {
+    const held = judgeDataCheck({ ...GOOD, up: leg(null, 0, 8_000) });
+    expect(rememberedKbps(held)).toBe(0);
+    expect(rememberedKbpsWith(held, sample)).toBe(0);
+  });
+
+  it("touches nothing when the check measured nothing, or there is no sample", () => {
+    expect(rememberedKbpsWith({ state: "unmeasured" }, sample)).toBeNull();
+    expect(rememberedKbpsWith(null, sample)).toBeNull();
+    expect(rememberedKbpsWith(judgeDataCheck(GOOD), null)).toBeNull();
   });
 });
 

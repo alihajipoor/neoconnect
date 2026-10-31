@@ -134,6 +134,7 @@ import {
 import {
   checkDataMoves,
   rememberedKbps,
+  rememberedKbpsWith,
   describeSlow,
   keepsSlow,
   noSlowRungs,
@@ -2470,8 +2471,9 @@ export function Dashboard({
       void saveConnectHistory(historyNow);
     };
     // What the sample after landing measured (`sampleDownload`), in place
-    // of the check's figure: a reading of some length, where the check's
-    // 128 KB is over in a few round trips on a good line.
+    // of the check's download: a reading of some length, where the check's
+    // 128 KB is over in a few round trips on a good line. Still the slower
+    // direction (`rememberedKbpsWith`), since the hold is on the upload.
     const rememberSpeed = (routeId: string, protocol: ProtocolUser["protocol"], kbps: number) => {
       historyNow = recordSpeed(historyNow, networkId, routeId, protocol, kbps);
       void saveConnectHistory(historyNow);
@@ -2871,14 +2873,15 @@ export function Dashboard({
           // endpoint the data check used, begun now that the screen says
           // Connected. Nothing of the pass waits on it, and it decides
           // nothing -- the rung has landed whatever it measures. What it
-          // finds replaces the check's figure in the speed memory
-          // (`rememberSpeed`) and goes out on the landed rung beside the
-          // check's upload. A report held a few seconds is the same report;
-          // a row of its own for the sample would be counted as a second
-          // attempt. The Windows ladder's rule.
+          // finds stands in for the check's download in the speed memory
+          // (`rememberSpeed`, still the slower direction) and goes out on
+          // the landed rung beside the check's upload. A report held a few
+          // seconds is the same report; a row of its own for the sample
+          // would be counted as a second attempt. The Windows ladder's rule.
           const sampleBase = measured !== null && verdict.state === "throughTunnel" ? verdict.from : undefined;
           void sampleDownload(sampleBase).then((sample) => {
-            if (sample !== null) rememberSpeed(candidate.routeId, candidate.protocol, sample.downKbps);
+            const sampled = rememberedKbpsWith(measured, sample);
+            if (sampled !== null) rememberSpeed(candidate.routeId, candidate.protocol, sampled);
             void reportAttempt(
               asReconnectReport(
                 {

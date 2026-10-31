@@ -241,6 +241,23 @@ export function rememberedKbps(verdict: DataVerdict | null): number | null {
   return Math.min(verdict.downKbps, verdict.upKbps);
 }
 
+/** The speed a landed rung is remembered by once its sample is in
+ * (`sampleDownload`), in place of `rememberedKbps`: still the slower
+ * direction, with the sample's download standing in for the check's.
+ *
+ * Not the sample alone. It measures the download, and the hold is on
+ * the upload: a held server that landed as the slow fallback was
+ * remembered at its upload's 0 kbps, and the download alone would have
+ * overwritten that with a figure that ranked it first on the next
+ * connect here (`bySpeed` in failover.ts) -- the pass over it is what
+ * the memory is for. Null when there is no sample, or the check measured
+ * nothing: nothing was remembered then, and a download alone says
+ * nothing about the direction that is held. */
+export function rememberedKbpsWith(verdict: DataVerdict | null, sample: SpeedSample | null): number | null {
+  if (sample === null || verdict === null || verdict.state === "unmeasured") return null;
+  return Math.min(sample.downKbps, verdict.upKbps);
+}
+
 /** Upload first -- the direction that is held -- then download. */
 function faster(a: { downKbps: number; upKbps: number }, b: { downKbps: number; upKbps: number }): boolean {
   return a.upKbps !== b.upKbps ? a.upKbps > b.upKbps : a.downKbps > b.downKbps;
