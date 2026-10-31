@@ -204,6 +204,12 @@ pub async fn health_ip_v4(base: String, timeout_ms: u64) -> Result<HealthIpAnswe
 /// down and 256 KB up.
 const DATA_CHECK_MAX_BYTES: u64 = 512 * 1024;
 
+/// The bounds of a timed sample (`data_check_v4`'s `sample_ms`): the
+/// API's own for its `ms` (`BULK_WINDOW_MIN_MS` and `_MAX_MS` in the
+/// backend's data-check.ts), so what is asked for is what is served.
+const SAMPLE_MIN_MS: u64 = 250;
+const SAMPLE_MAX_MS: u64 = 2_000;
+
 /// What one direction of the data check measured.
 #[derive(serde::Serialize, Debug, PartialEq)]
 pub struct DataLeg {
@@ -276,12 +282,24 @@ fn millis_since(started: Instant) -> u64 {
 /// to say so again. `Err` only for a base that is refused, as
 /// `health_ip_v4`'s.
 /// The same client as `health_ip_v4`: IPv4 only, no proxy, no redirect.
+///
+/// With `sample_ms`, a different question of the same endpoint: how fast
+/// the tunnel is, once it has landed, rather than whether it moves at
+/// all. The download alone, for that long (clamped to the API's bounds):
+/// the API is asked to stream for it and the bytes are counted here
+/// until the same deadline, whichever side reaches it first, so the
+/// answer is a rate -- `bytes` over `ms` -- not a size that finished.
+/// `down_bytes` is then what an API from before `ms` serves, and the
+/// count of that over its time is a shorter sample, still a reading. No
+/// upload is made (`up` comes back empty). Absent, as every call before
+/// it, the check is exactly the one described above.
 #[tauri::command]
 pub async fn data_check_v4(
     base: String,
     down_bytes: u64,
     up_bytes: u64,
     timeout_ms: u64,
+    sample_ms: Option<u64>,
 ) -> Result<DataCheck, String> {
     let up_url = bulk_url(&base).map_err(str::to_string)?;
     let down_bytes = down_bytes.clamp(1, DATA_CHECK_MAX_BYTES);
@@ -291,6 +309,13 @@ pub async fn data_check_v4(
     let timeout = Duration::from_millis(timeout_ms.max(1)).min(MAX_TIMEOUT);
     let client = ipv4_client(timeout)?;
     let mut peer = None;
+
+    if let Some(sample_ms) = sample_ms {
+        let sample = Duration::from_millis(sample_ms.clamp(SAMPLE_MIN_MS, SAMPLE_MAX_MS));
+        down_url.query_pairs_mut().append_pair("ms", &sample.as_millis().to_string());
+        let (down, peer) = sample_download(&client, down_url, sample).await;
+        return Ok(DataCheck { down, up: DataLeg { status: None, bytes: 0, ms: 0 }, peer });
+    }
 
     let started = Instant::now();
     let down = match client.get(down_url).send().await {
@@ -340,6 +365,47 @@ pub async fn data_check_v4(
     };
 
     Ok(DataCheck { down, up, peer })
+}
+
+/// The timed download of `data_check_v4`'s sample: `url` asked, and the
+/// body counted for `sample` from the moment the answer's headers are in.
+///
+/// The clock starts with the answer, not the request. A sample is a
+/// rate, and the request's own round trip -- the handshake through the
+/// tunnel, a few hundred milliseconds from Iran -- is latency, which the
+/// data check already pays for in its own figures; counted here it would
+/// make a second and a half of a good line read a fifth slower than it
+/// is. The deadline is the client's own: a server that streams for the
+/// same window ends the body first, give or take the path, and one that
+/// serves a fixed size ends it when that is sent or when the window is
+/// up, whichever comes first. A read that fails ends the leg with what
+/// had arrived, as the check's does.
+async fn sample_download(
+    client: &reqwest::Client,
+    url: reqwest::Url,
+    sample: Duration,
+) -> (DataLeg, Option<String>) {
+    let started = Instant::now();
+    let mut response = match client.get(url).send().await {
+        Err(_) => return (DataLeg { status: None, bytes: 0, ms: millis_since(started) }, None),
+        Ok(response) => response,
+    };
+    let status = response.status().as_u16();
+    let peer = response.remote_addr().map(|address| address.ip().to_canonical().to_string());
+    let started = Instant::now();
+    let mut moved: u64 = 0;
+    loop {
+        let left = sample.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(left, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => moved += chunk.len() as u64,
+            // The body's end, a failed read, or the deadline.
+            _ => break,
+        }
+    }
+    (DataLeg { status: Some(status), bytes: moved, ms: millis_since(started) }, peer)
 }
 
 /// A response body of at most `MAX_BODY_BYTES`, or `None` when it was
@@ -663,6 +729,105 @@ mod tests {
             stream.write_all(response.as_bytes()).ok()?;
             Some(request_line)
         })
+    }
+
+    /// `serve_once`, with the body written by `write_body` after the
+    /// `headers` (which end the header block), so a response can be as
+    /// long, or as slow, as a test needs.
+    fn serve_body(
+        listener: std::net::TcpListener,
+        headers: &'static str,
+        write_body: impl FnOnce(&mut std::net::TcpStream) + Send + 'static,
+    ) -> std::thread::JoinHandle<Option<String>> {
+        use std::io::{BufRead, BufReader, Write};
+        std::thread::spawn(move || {
+            listener.set_nonblocking(false).ok()?;
+            let (stream, _) = listener.accept().ok()?;
+            let mut reader = BufReader::new(stream.try_clone().ok()?);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).ok()?;
+            let mut line = String::new();
+            while reader.read_line(&mut line).ok()? > 2 {
+                line.clear();
+            }
+            let mut stream = stream;
+            stream.write_all(headers.as_bytes()).ok()?;
+            write_body(&mut stream);
+            Some(request_line)
+        })
+    }
+
+    const STREAM_HEADERS: &str =
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n";
+
+    /// The sample against an API that streams for the window, as ours
+    /// does for `ms`: counted here for the window asked and no longer,
+    /// from the answer rather than the request, with nothing uploaded.
+    #[test]
+    fn samples_a_stream_for_the_window_asked() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Longer than the client's window, so the client's deadline is
+        // the one that ends the sample.
+        let server = serve_body(listener, STREAM_HEADERS, |stream| {
+            let block = [0x5Au8; 8 * 1024];
+            let until = Instant::now() + Duration::from_millis(1_200);
+            while Instant::now() < until && stream.write_all(&block).is_ok() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        let check = tauri::async_runtime::block_on(data_check_v4(
+            format!("http://localhost:{port}/api"),
+            DATA_CHECK_MAX_BYTES,
+            1,
+            5_000,
+            Some(400),
+        ))
+        .unwrap();
+        assert_eq!(check.down.status, Some(200), "{check:?}");
+        // Windows sleeps in ~15 ms steps: at least ten blocks in 400 ms.
+        assert!(check.down.bytes >= 10 * 8 * 1024, "{check:?}");
+        assert!((350..=1_000).contains(&check.down.ms), "{check:?}");
+        assert_eq!(check.up, DataLeg { status: None, bytes: 0, ms: 0 });
+        assert_eq!(check.peer.as_deref(), Some("127.0.0.1"));
+        let request_line = server.join().unwrap().unwrap();
+        assert!(request_line.starts_with("GET /api/health/bulk?bytes=524288&ms=400 "), "{request_line}");
+    }
+
+    /// An API from before `ms` serves the `bytes` asked and no more. The
+    /// whole of it, counted over its time, is the sample then -- a short
+    /// one, not an error -- and the window asked for is clamped to what
+    /// the API would accept.
+    #[test]
+    fn samples_a_fixed_body_from_an_older_api_whole() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        const SIZE: usize = 20_000;
+        let server = serve_body(
+            listener,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 20000\r\nConnection: close\r\n\r\n",
+            |stream| {
+                stream.write_all(&[0xA5u8; SIZE]).ok();
+            },
+        );
+
+        let check = tauri::async_runtime::block_on(data_check_v4(
+            format!("http://localhost:{port}/api"),
+            SIZE as u64,
+            1,
+            5_000,
+            Some(10),
+        ))
+        .unwrap();
+        assert_eq!(check.down.status, Some(200), "{check:?}");
+        assert_eq!(check.down.bytes, SIZE as u64, "{check:?}");
+        assert!(check.down.ms < 250, "{check:?}");
+        assert_eq!(check.up, DataLeg { status: None, bytes: 0, ms: 0 });
+        let request_line = server.join().unwrap().unwrap();
+        assert!(request_line.starts_with("GET /api/health/bulk?bytes=20000&ms=250 "), "{request_line}");
     }
 
     const OK_JSON: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"ip\":\"192.0.2.1\"}";
