@@ -19,6 +19,14 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # The timed download of /health/bulk (the apps' speed sample) asks
+        # not to be buffered, so it is paced by the customer's line rather
+        # than taken whole at this host's speed. nginx honours the header
+        # here, then drops it by default (every X-Accel-* is hidden), so
+        # the node API mirrors behind this hop never saw it and buffered
+        # the whole stream -- the full cap per sample, pulled at datacentre
+        # speed into their temp files. Passed on, so they honour it too.
+        proxy_pass_header X-Accel-Buffering;
     }
 
     location / {

@@ -45,14 +45,34 @@ export const BULK_IN_FLIGHT = 48;
 export const BULK_WINDOW_MIN_MS = 250;
 export const BULK_WINDOW_MAX_MS = 2_000;
 
-/** The most a timed download sends however long the window: 16 MiB in
- * two seconds is 67 Mbps, more than any customer's tunnel reaches, and
- * a bound on what one unauthenticated request can make this host send. */
-export const BULK_TIMED_MAX_BYTES = 16 * 1024 * 1024;
+/** The most a timed download sends however long the window: 4 MiB over
+ * the apps' second and a half is 22 Mbps, which few customers' tunnels
+ * reach -- a faster one gets a shorter sample that is still a rate, since
+ * the app counts over the time the body took -- and a bound on what one
+ * unauthenticated request can make this host send.
+ *
+ * It was 16 MiB, and the whole of it went out on every landed connect
+ * through a node API mirror: the mirror's nginx buffered, so it pulled
+ * the stream from here at datacentre speed into a temp file while the
+ * customer took a few tens of KB. The installer now turns that buffering
+ * off (`proxy_buffering off` in the mirror, and the panel's nginx passing
+ * `X-Accel-Buffering` on); until a node has re-run it, this is what each
+ * sample there costs. */
+export const BULK_TIMED_MAX_BYTES = 4 * 1024 * 1024;
 
 /** How much a timed download writes at a time -- the unit the deadline
  * and the byte cap are checked at. */
 export const BULK_CHUNK_BYTES = 64 * 1024;
+
+/** How long a timed download's response may take to finish once it has
+ * been ended, before it is cut. A legitimate app has stopped reading at
+ * its own deadline by then -- the same window, started when the headers
+ * arrived -- and a cut body is read by it as the end of the leg. Without
+ * a bound, a client that opens the request and never reads holds its
+ * in-flight slot until nginx gives up on it (`send_timeout`, a minute
+ * by default): the end of the response waits on the socket draining,
+ * which is in the client's hands once nothing in front buffers. */
+export const BULK_END_GRACE_MS = 1_000;
 
 /** One buffer of random bytes, made once. Random so nothing on the path
  * can compress it into a faster-looking transfer; reused because what
@@ -89,21 +109,42 @@ export function bulkWindow(raw: unknown): number | null | undefined {
  * so a slow tunnel is sent what it can take in the window and no more,
  * rather than having two seconds of a fast host's output queued behind
  * it. A response closed mid-stream -- the app stopped reading at its own
- * deadline -- ends the wait, since its drain never comes. */
+ * deadline -- ends the wait, since its drain never comes.
+ *
+ * Bounded in time, not by the client's reading: once ended, a response
+ * still not finished after `endGraceMs` is destroyed (`BULK_END_GRACE_MS`),
+ * so the slot it holds (`InFlight`, released on `close`) is free within
+ * the window and the grace whatever the client does with the socket. */
 export async function streamBulk(
   res: Response,
   deadline: number,
-  options: { maxBytes?: number; now?: () => number } = {},
+  options: { maxBytes?: number; endGraceMs?: number; now?: () => number } = {},
 ): Promise<number> {
-  const { maxBytes = BULK_TIMED_MAX_BYTES, now = Date.now } = options;
+  const { maxBytes = BULK_TIMED_MAX_BYTES, endGraceMs = BULK_END_GRACE_MS, now = Date.now } = options;
   const chunk = bulkPayload(BULK_CHUNK_BYTES);
   let sent = 0;
   while (now() < deadline && sent + chunk.length <= maxBytes && !res.destroyed && !res.writableEnded) {
     sent += chunk.length;
     if (!res.write(chunk) && !(await drained(res, deadline - now()))) break;
   }
-  if (!res.destroyed && !res.writableEnded) res.end();
+  if (!res.destroyed && !res.writableEnded) {
+    res.end();
+    cutUnlessFinished(res, endGraceMs);
+  }
   return sent;
+}
+
+/** Destroys `res` if it has not finished within `ms` of being ended --
+ * its last chunk still waiting on a socket nobody reads. Nothing happens
+ * to one that finishes or closes first. */
+function cutUnlessFinished(res: Response, ms: number): void {
+  if (res.writableFinished || res.destroyed) return;
+  const timer = setTimeout(() => {
+    if (!res.writableFinished && !res.destroyed) res.destroy();
+  }, ms);
+  const settled = () => clearTimeout(timer);
+  res.once("finish", settled);
+  res.once("close", settled);
 }
 
 /** Resolves true once `res` can take more, false when it closed or `ms`

@@ -278,8 +278,10 @@ describe("HealthController bulk", () => {
     const stream = new Writable({
       write(chunk: Buffer, _encoding, done) {
         sent.bytes += chunk.length;
+        // Infinity: a sink that never takes the chunk -- a client that
+        // opened the request and never reads.
         if (perChunkMs === 0) done();
-        else setTimeout(done, perChunkMs);
+        else if (Number.isFinite(perChunkMs)) setTimeout(done, perChunkMs);
       },
     });
     const res = Object.assign(stream, {
@@ -317,7 +319,7 @@ describe("HealthController bulk", () => {
     // About 300 ms of 64 KiB every 20 ms, give or take the timer; never
     // the whole cap, which an unpaced write would have reached at once.
     expect(sent.bytes).toBeGreaterThanOrEqual(5 * BULK_CHUNK_BYTES);
-    expect(sent.bytes).toBeLessThan(BULK_TIMED_MAX_BYTES / 4);
+    expect(sent.bytes).toBeLessThan(BULK_TIMED_MAX_BYTES / 2);
     expect(took).toBeGreaterThanOrEqual(250);
     expect(took).toBeLessThan(1_500);
   });
@@ -340,6 +342,24 @@ describe("HealthController bulk", () => {
     await writing;
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(sent.bytes).toBeLessThan(BULK_TIMED_MAX_BYTES / 4);
+  });
+
+  /** A client that opens the request and never reads: the response's end
+   * waits on a socket that never drains, and the in-flight slot with it,
+   * for as long as nginx allows the socket. Cut after the grace instead,
+   * so the slot is bounded by the window and the grace, not the client. */
+  it("cuts a response nobody reads once the window and the grace are up", async () => {
+    const { res, sent } = timedResponse(Infinity);
+    const closed = new Promise<void>((resolve) => res.once("close", resolve));
+    const started = Date.now();
+    const written = await streamBulk(res, Date.now() + 100, { endGraceMs: 100 });
+    expect(written).toBe(BULK_CHUNK_BYTES);
+    expect(sent.bytes).toBe(BULK_CHUNK_BYTES);
+    expect(res.writableEnded).toBe(true);
+    expect(res.writableFinished).toBe(false);
+    await closed;
+    expect(res.destroyed).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
   it("clamps the window to its bounds and refuses one that is not a number", () => {
