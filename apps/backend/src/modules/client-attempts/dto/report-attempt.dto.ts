@@ -41,6 +41,10 @@ import {
  * column is TEXT, so no migration. */
 export const API_ENDPOINT_MAX_LENGTH = 2000;
 
+/** The fastest a rung may claim, in kilobits a second: ten gigabits.
+ * Nothing of ours moves that; a figure above it is a broken clock. */
+export const RUNG_KBPS_MAX = 10_000_000;
+
 /** One rung of the failover ladder, as the app recorded it.
  *
  * The client already builds exactly this to show under "show details";
@@ -69,6 +73,25 @@ export class AttemptRungDto {
   @IsOptional()
   @IsBoolean()
   carried?: boolean;
+
+  /** What the tunnel moved on the rung it landed on, in kilobits a
+   * second. The download is the app's sample once it said "Connected" --
+   * about a second and a half through the tunnel, the nearest thing to
+   * what the customer then gets -- or, where no sample could be taken,
+   * the data check's 128 KB; the upload is the check's 256 KB either way
+   * (data-check.ts in the apps). Absent on a rung that was not measured,
+   * and on every report from a client older than the field. */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(RUNG_KBPS_MAX)
+  downKbps?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(RUNG_KBPS_MAX)
+  upKbps?: number;
 }
 
 /** A client reporting what happened to it.

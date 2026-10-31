@@ -64,6 +64,11 @@ export interface AttemptRung {
   server: string | null;
   result: string;
   carried: boolean | null;
+  /** What the landed rung moved, in kilobits a second (the app's
+   * post-landing download sample and the data check's upload), or null
+   * where the client measured nothing or is too old to say. */
+  downKbps: number | null;
+  upKbps: number | null;
 }
 
 export interface AttemptRow {
@@ -520,6 +525,8 @@ export class CustomerActivityService {
           server: r.routeId ? (servers.get(r.routeId) ?? null) : null,
           result: r.result,
           carried: r.carried,
+          downKbps: r.downKbps,
+          upKbps: r.upKbps,
         })),
       ]),
     );
@@ -553,11 +560,18 @@ interface ParsedRung {
   routeId: string | null;
   result: string;
   carried: boolean | null;
+  downKbps: number | null;
+  upKbps: number | null;
+}
+
+/** A whole non-negative number, or null for anything else. */
+function wholeOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
 /** The ladder a client reported, as stored by ClientAttemptsService:
- * an array of { protocol, result, routeId?, carried? }, validated on the
- * way in. Read defensively all the same -- rows from older backends, and
+ * an array of { protocol, result, routeId?, carried?, downKbps?, upKbps? },
+ * validated on the way in. Read defensively all the same -- rows from older backends, and
  * whatever a future client sends, should show as what they are rather
  * than break the page. */
 export function parseRungs(json: Prisma.JsonValue | null): ParsedRung[] {
@@ -571,6 +585,8 @@ export function parseRungs(json: Prisma.JsonValue | null): ParsedRung[] {
       routeId: typeof rung.routeId === "string" && rung.routeId ? rung.routeId : null,
       result: typeof rung.result === "string" ? rung.result : "",
       carried: typeof rung.carried === "boolean" ? rung.carried : null,
+      downKbps: wholeOrNull(rung.downKbps),
+      upKbps: wholeOrNull(rung.upKbps),
     });
   }
   return rungs;

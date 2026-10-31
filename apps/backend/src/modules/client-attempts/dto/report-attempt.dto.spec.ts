@@ -1,7 +1,7 @@
 import "reflect-metadata";
 import { plainToInstance } from "class-transformer";
 import { validate } from "class-validator";
-import { API_ENDPOINT_MAX_LENGTH, ReportAttemptDto } from "./report-attempt.dto";
+import { API_ENDPOINT_MAX_LENGTH, ReportAttemptDto, RUNG_KBPS_MAX } from "./report-attempt.dto";
 
 /** Validated as the app's global pipe does: whitelist, and reject what
  * is not declared. An undeclared field is a 400, which a client counts as
@@ -34,6 +34,24 @@ describe("ReportAttemptDto", () => {
         ],
       }),
     ).toEqual([]);
+  });
+
+  /** The speed the landed rung measured, for the connection log. */
+  it("accepts a landed rung's speeds, as whole kilobits a second within reason", async () => {
+    expect(
+      await errorsFor({
+        ...base,
+        attempts: [{ protocol: "Stealth", result: "connected", routeId: ROUTE, carried: true, downKbps: 12_400, upKbps: 1_750 }],
+      }),
+    ).toEqual([]);
+    const errors = await errorsFor({
+      ...base,
+      attempts: [{ protocol: "Stealth", result: "connected", downKbps: 12.5, upKbps: RUNG_KBPS_MAX + 1 }],
+    });
+    expect(errors).toEqual(expect.arrayContaining(["attempts.0.downKbps:isInt", "attempts.0.upKbps:max"]));
+    expect(await errorsFor({ ...base, attempts: [{ protocol: "Fast", result: "x", downKbps: -1 }] })).toContain(
+      "attempts.0.downKbps:min",
+    );
   });
 
   it("accepts a SESSION report with its length", async () => {

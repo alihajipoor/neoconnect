@@ -459,6 +459,10 @@ export interface AttemptRung {
   /** The route this rung dialled, on clients new enough to say. */
   routeId?: string;
   carried?: boolean;
+  /** What the landed rung moved, in kilobits a second, on clients that
+   * measure it. */
+  downKbps?: number;
+  upKbps?: number;
 }
 
 export interface ClientAttempt {
@@ -843,6 +847,11 @@ export interface CustomerAttemptRung {
   server: string | null;
   result: string;
   carried: boolean | null;
+  /** What the landed rung moved, in kilobits a second: the app's download
+   * sample once it said "Connected", and the data check's upload. Null
+   * where nothing was measured or the client is too old to say. */
+  downKbps: number | null;
+  upKbps: number | null;
 }
 
 /** A client attempt as the profile shows it. `kind` and `outcome` carry
