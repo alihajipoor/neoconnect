@@ -7,11 +7,15 @@ const {
   checkDataMoves,
   DOWN_BYTES,
   judgeDataCheck,
+  judgeSample,
   keepsSlow,
   noSlowRungs,
   noteSlow,
   passOverSlow,
   presentsOwnName,
+  rungSpeeds,
+  SAMPLE_MS,
+  sampleDownload,
   serverKey,
   slowFallback,
   UP_BYTES,
@@ -76,6 +80,69 @@ describe("checkDataMoves", () => {
     invoke.mockRejectedValueOnce(new Error("unknown command"));
     await expect(checkDataMoves("https://api.example/api")).resolves.toEqual({ state: "unmeasured" });
     await expect(checkDataMoves(undefined)).resolves.toEqual({ state: "unmeasured" });
+  });
+});
+
+/** The speed a landed tunnel actually gives: a second and a half of
+ * download, counted. */
+describe("sampleDownload", () => {
+  /** 1.2 MB in 1.5 s is 6.4 Mbps; the upload leg is not made. */
+  const SAMPLED: DataCheck = { down: leg(200, 1_200_000, 1_500), up: leg(null, 0, 0), peer: null };
+
+  it("asks the check's endpoint for a timed stream, and reads the rate", async () => {
+    invoke.mockResolvedValueOnce(SAMPLED);
+    await expect(sampleDownload("https://api.example/api")).resolves.toEqual({ downKbps: 6400, bytes: 1_200_000, ms: 1_500 });
+    expect(invoke).toHaveBeenLastCalledWith("data_check_v4", {
+      base: "https://api.example/api",
+      downBytes: 512 * 1024,
+      upBytes: 1,
+      timeoutMs: SAMPLE_MS + 4_000,
+      sampleMs: SAMPLE_MS,
+    });
+  });
+
+  /** An API from before the window serves the 512 KB asked and stops; the
+   * whole of it over its time is still a reading. */
+  it("reads a fixed body from an older API as a shorter sample", () => {
+    expect(judgeSample({ ...SAMPLED, down: leg(200, 524_288, 400) })).toEqual({ downKbps: 10486, bytes: 524_288, ms: 400 });
+  });
+
+  /** Busy, an error page, no answer: nothing is known, and nothing is
+   * recorded or reported -- never a zero. */
+  it("is nothing when our endpoint did not answer with data", async () => {
+    for (const down of [leg(503, 0, 20), leg(404, 0, 20), leg(null, 0, 5_500), leg(200, 0, 1_500), leg(200, 4096, 0)]) {
+      expect(judgeSample({ ...SAMPLED, down })).toBeNull();
+    }
+    invoke.mockRejectedValueOnce(new Error("unknown command"));
+    await expect(sampleDownload("https://api.example/api")).resolves.toBeNull();
+    await expect(sampleDownload(undefined)).resolves.toBeNull();
+  });
+});
+
+/** What the landed rung's report says it moved. */
+describe("rungSpeeds", () => {
+  const moves = judgeDataCheck(GOOD);
+  const sample = { downKbps: 6400, bytes: 1_200_000, ms: 1_500 };
+
+  it("prefers the sample's download to the check's, and keeps the check's upload", () => {
+    expect(rungSpeeds(moves, sample)).toEqual({ downKbps: 6400, upKbps: 1748 });
+    expect(rungSpeeds(moves, null)).toEqual({ downKbps: 2621, upKbps: 1748 });
+  });
+
+  /** A leg that ran out of time has no speed, only "too slow": the slow
+   * fallback that landed reports what was measured and nothing for the
+   * rest. And nothing at all where nothing was. */
+  it("says nothing for a leg that was not measured", () => {
+    const held = judgeDataCheck({ ...GOOD, up: leg(null, 0, 8_000) });
+    expect(rungSpeeds(held, sample)).toEqual({ downKbps: 6400 });
+    expect(rungSpeeds(held, null)).toEqual({ downKbps: 2621 });
+    expect(rungSpeeds({ state: "unmeasured" }, null)).toEqual({});
+    expect(rungSpeeds(null, sample)).toEqual({ downKbps: 6400 });
+  });
+
+  it("stays within the server's bounds", () => {
+    expect(rungSpeeds(null, { ...sample, downKbps: 1e9 })).toEqual({ downKbps: 10_000_000 });
+    expect(rungSpeeds(null, { ...sample, downKbps: 1234.6 })).toEqual({ downKbps: 1235 });
   });
 });
 

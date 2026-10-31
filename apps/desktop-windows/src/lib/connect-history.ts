@@ -24,7 +24,11 @@ import type { Protocol } from "./types";
 
 /** One attempt, as thin as it can be: when, and whether it worked --
  * and, where the data check measured it (`data-check.ts`), how fast its
- * slower direction went, in kilobits a second. */
+ * slower direction went, in kilobits a second. On a rung that landed,
+ * that figure is replaced by the download sampled once the app said
+ * "Connected" (`sampleDownload`), where one could be taken: a second and
+ * a half through the tunnel, against the check's 128 KB, which a good
+ * line is through in a few round trips. */
 export type Attempt = { at: number; ok: boolean; kbps?: number };
 
 /** Keyed `network|routeId|protocol`. Newest last. */

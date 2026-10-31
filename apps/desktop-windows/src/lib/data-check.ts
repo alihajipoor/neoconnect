@@ -86,6 +86,83 @@ export async function checkDataMoves(base: string | undefined): Promise<DataVerd
   }
 }
 
+/** How long the sample after landing runs. The check above asks whether
+ * a tunnel moves at all, in sizes chosen so a held line fails them; it
+ * cannot say how fast a tunnel that passed is, since 128 KB is over in a
+ * few round trips on a good one. A second and a half of download is long
+ * enough to get past those and short enough that the customer, already
+ * connected, is not paying for a measurement. */
+export const SAMPLE_MS = 1_500;
+
+/** What an API from before `ms` serves for the sample: the most the
+ * endpoint allows, so that too is a reading of some length. */
+const SAMPLE_FALLBACK_BYTES = 512 * 1024;
+
+/** The sample's whole request: a connection through the tunnel, the
+ * answer, and the window. */
+const SAMPLE_TIMEOUT_MS = SAMPLE_MS + 4_000;
+
+/** What the sample measured. `bytes` over `ms` is the rate. */
+export type SpeedSample = { downKbps: number; bytes: number; ms: number };
+
+/** The sample's reading, or null when nothing of ours answered with
+ * data: busy, an error page, a backend without the endpoint. */
+export function judgeSample(check: DataCheck | null): SpeedSample | null {
+  if (check === null || check.down.status !== 200 || check.down.bytes <= 0 || check.down.ms <= 0) return null;
+  return { downKbps: kbps(check.down), bytes: check.down.bytes, ms: check.down.ms };
+}
+
+/** One timed download through `base`, once a rung has landed: the speed
+ * the customer actually gets, against the endpoint the check used.
+ * Never throws, and decides nothing -- the rung has landed whatever this
+ * finds; what it finds goes into the speed memory (`recordSpeed`) and
+ * out with the report (`rungSpeeds`). */
+export async function sampleDownload(base: string | undefined): Promise<SpeedSample | null> {
+  if (!base) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stalled = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), SAMPLE_TIMEOUT_MS + 2_000);
+  });
+  try {
+    const check = await Promise.race([
+      invoke<DataCheck>("data_check_v4", {
+        base,
+        downBytes: SAMPLE_FALLBACK_BYTES,
+        upBytes: 1,
+        timeoutMs: SAMPLE_TIMEOUT_MS,
+        sampleMs: SAMPLE_MS,
+      }),
+      stalled,
+    ]);
+    return judgeSample(check);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The fastest a rung may claim in a report: the server's own bound
+ * (`RUNG_KBPS_MAX` in report-attempt.dto.ts). */
+const RUNG_KBPS_MAX = 10_000_000;
+
+/** What the landed rung reports it moved (`AttemptRung.downKbps` and
+ * `upKbps`): the sample's download where one was taken, else the check's,
+ * and the check's upload -- each only where that leg finished, since a
+ * leg that ran out of time has no speed, only a "too slow". Empty when
+ * nothing was measured. */
+export type RungSpeeds = { downKbps?: number; upKbps?: number };
+
+export function rungSpeeds(verdict: DataVerdict | null, sample: SpeedSample | null): RungSpeeds {
+  const bound = (kbps: number) => Math.min(Math.max(Math.round(kbps), 0), RUNG_KBPS_MAX);
+  const measured = verdict !== null && verdict.state !== "unmeasured" ? verdict : null;
+  const speeds: RungSpeeds = {};
+  const down = sample?.downKbps ?? (measured && measured.downKbps > 0 ? measured.downKbps : undefined);
+  if (down !== undefined) speeds.downKbps = bound(down);
+  if (measured && measured.upKbps > 0) speeds.upKbps = bound(measured.upKbps);
+  return speeds;
+}
+
 /** Which server a candidate is, for passing over: the address it is
  * dialled at, and the machine its traffic leaves from.
  *

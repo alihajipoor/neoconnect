@@ -47,17 +47,24 @@ export interface AttemptRung {
   routeId?: string;
   /** Whether that dial carried traffic, by the egress check. */
   carried?: boolean;
+  /** What the rung moved once it landed, in kilobits a second: the
+   * download sampled after "Connected", or the data check's where none
+   * could be, and the check's upload (`rungSpeeds` in data-check.ts).
+   * Only on the landed rung, and only the legs that were measured. */
+  downKbps?: number;
+  upKbps?: number;
 }
 
 /** One rung's dial, for the per-ISP tags: which route was tried from
- * this network and whether traffic got through.
+ * this network and whether traffic got through -- and, on the rung that
+ * landed, how fast (`AttemptRung.downKbps` / `upKbps`).
  *
  * Null for a rung that says nothing about the network -- skipped before
  * dialling, or refused for a reason that is the account's or the
  * device's rather than the network's. Counting those against a route
  * would tell other customers a route is failing when it is this
  * customer's quota that ran out. */
-export type Dial = { routeId: string; carried: boolean } | null;
+export type Dial = { routeId: string; carried: boolean; downKbps?: number; upKbps?: number } | null;
 
 /** The dial a failed rung represents, by how it was classified.
  *
@@ -725,6 +732,14 @@ export function rungsFrom(lines: string[], dials: Dial[] = []): AttemptRung[] {
     // Parallel to the lines, by index: the dashboards push one of each
     // per rung. A missing or null entry leaves the rung as it always was.
     const dial = dials[i];
-    return dial ? { ...rung, routeId: dial.routeId, carried: dial.carried } : rung;
+    if (!dial) return rung;
+    const { routeId, carried, downKbps, upKbps } = dial;
+    return {
+      ...rung,
+      routeId,
+      carried,
+      ...(downKbps !== undefined ? { downKbps } : {}),
+      ...(upKbps !== undefined ? { upKbps } : {}),
+    };
   });
 }

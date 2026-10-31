@@ -104,6 +104,8 @@ import {
   noSlowRungs,
   noteSlow,
   passOverSlow,
+  rungSpeeds,
+  sampleDownload,
   serverKey,
   slowFallback,
   type DataVerdict,
@@ -4127,6 +4129,9 @@ export function Dashboard({
           // What the data check measured, remembered with the attempt so
           // the next connect here can prefer the faster server.
           let measured: DataVerdict | null = null;
+          // The endpoint it measured through, for the speed sample once the
+          // rung has landed (`sampleDownload`).
+          let sampleBase: string | undefined;
 
           if (customMode) {
             // The service's own words when it fails, not a generic
@@ -4259,6 +4264,7 @@ export function Dashboard({
             if (verdict === "connected" && egress.state === "throughTunnel") {
               const moved = await checkDataMoves(egress.from);
               measured = moved;
+              sampleBase = egress.from;
               if (moved.state === "slow") {
                 if (keepsSlow(slow, candidate)) {
                   landedSlow = true;
@@ -4421,21 +4427,47 @@ export function Dashboard({
             //
             // An automatic reconnect's is marked as one, so it is not read
             // as somebody pressing Connect (`asReconnectReport`).
-            void reportAttempt(
-              asReconnectReport(
-                {
-                  kind: "CONNECT",
-                  outcome: "SUCCESS",
-                  protocol: label,
-                  routeId: candidate.routeId,
-                  attempts: rungsFrom(
-                    [...attempts, `${label}: connected`],
-                    [...dials, verdict === "connected" ? { routeId: candidate.routeId, carried: true } : null],
-                  ),
-                },
-                options.reconnect,
-              ),
-            );
+            //
+            // Sent once the speed sample is in (`sampleDownload`): about a
+            // second and a half of download through the tunnel, against the
+            // endpoint the data check used, begun now that the screen says
+            // Connected. Nothing of the pass waits on it, and it decides
+            // nothing -- the rung has landed whatever it measures. What it
+            // finds replaces the check's figure in the speed memory, so the
+            // next connect here can prefer the faster server by a reading of
+            // some length, and goes out on the landed rung beside the
+            // check's upload. A report held a few seconds is the same
+            // report; a row of its own for the sample would be counted as a
+            // second attempt.
+            void sampleDownload(sampleBase).then((sample) => {
+              if (sample !== null) {
+                setHistory((current) => {
+                  const stamped = recordSpeed(current, networkId, candidate.routeId, candidate.protocol, sample.downKbps);
+                  void saveConnectHistory(stamped);
+                  return stamped;
+                });
+              }
+              void reportAttempt(
+                asReconnectReport(
+                  {
+                    kind: "CONNECT",
+                    outcome: "SUCCESS",
+                    protocol: label,
+                    routeId: candidate.routeId,
+                    attempts: rungsFrom(
+                      [...attempts, `${label}: connected`],
+                      [
+                        ...dials,
+                        verdict === "connected"
+                          ? { routeId: candidate.routeId, carried: true, ...rungSpeeds(measured, sample) }
+                          : null,
+                      ],
+                    ),
+                  },
+                  options.reconnect,
+                ),
+              );
+            });
             // A tunnel to reconnect if it drops. A reconnect's own landing
             // is armed by the episode, which carries its count of quick
             // deaths; every other pass starts the clock afresh -- unless
