@@ -475,7 +475,14 @@ function withoutSpeeds<T extends Pick<AttemptReport, "attempts">>(report: T): T 
  * only a server with the feature issues one. With one, everything goes.
  * Without, the report is sent in the shape every server accepts, and a
  * SESSION report -- which says nothing useful without a network -- is
- * not sent at all. Returns null for "do not send". */
+ * not sent at all. Returns null for "do not send".
+ *
+ * Except the landed rung's speeds. They are not per-ISP evidence -- the
+ * tags and the block watch read only rungs with a route and an outcome --
+ * and a server too old for them is answered by `send`, which tries again
+ * without them. Stripped with the rest, a connect whose network could not
+ * be attested -- a baseline a node mirror answered, say -- reached the
+ * connection log with no speed, which is most of what it was for. */
 export function withNetwork(
   report: AttemptReport,
   attestation = currentAttestation(),
@@ -489,7 +496,12 @@ export function withNetwork(
   const { sessionSeconds: _unused, ...rest } = report;
   return {
     ...rest,
-    attempts: report.attempts?.map(({ protocol, result }) => ({ protocol, result })),
+    attempts: report.attempts?.map(({ protocol, result, downKbps, upKbps }) => ({
+      protocol,
+      result,
+      ...(downKbps !== undefined ? { downKbps } : {}),
+      ...(upKbps !== undefined ? { upKbps } : {}),
+    })),
   };
 }
 

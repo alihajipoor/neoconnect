@@ -126,6 +126,17 @@ describe("attempt reports", () => {
     expect(plain.attempts).toEqual([{ protocol: "Stealth", result: "connected" }]);
     expect(withNetwork({ kind: "SESSION", outcome: "SUCCESS", sessionSeconds: 700 }, null)).toBeNull();
   });
+
+  it("keeps the landed rung's speeds without an attestation, and nothing else of the dial", () => {
+    const report = {
+      kind: "CONNECT" as const,
+      outcome: "SUCCESS" as const,
+      attempts: rungsFrom(["Stealth: connected"], [{ routeId: "r2", carried: true, downKbps: 6400, upKbps: 900 }]),
+    };
+    expect(withNetwork(report, null)!.attempts).toEqual([
+      { protocol: "Stealth", result: "connected", downKbps: 6400, upKbps: 900 },
+    ]);
+  });
 });
 
 describe("session report", () => {
