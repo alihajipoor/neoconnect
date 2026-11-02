@@ -76,7 +76,7 @@ describe("CustomerActivityService.activity", () => {
       attempt({
         attemptsJson: [
           { protocol: "Fast", result: "up but unreachable", routeId: ROUTE_DIRECT, carried: false },
-          { protocol: "Stealth", result: "connected", routeId: ROUTE_RELAY, carried: true },
+          { protocol: "Stealth", result: "connected", routeId: ROUTE_RELAY, carried: true, downKbps: 12_400, upKbps: 1_750 },
           { protocol: "Stealth HTTPS", result: "refused", routeId: ROUTE_GONE },
           { protocol: "IKEv2", result: "not available with selected apps" },
         ],
@@ -110,10 +110,10 @@ describe("CustomerActivityService.activity", () => {
       reason: "every server tried",
       sessionSeconds: null,
       rungs: [
-        { protocol: "Fast", server: "alpha", result: "up but unreachable", carried: false },
-        { protocol: "Stealth", server: "relay-1 -> beta", result: "connected", carried: true },
-        { protocol: "Stealth HTTPS", server: null, result: "refused", carried: null },
-        { protocol: "IKEv2", server: null, result: "not available with selected apps", carried: null },
+        { protocol: "Fast", server: "alpha", result: "up but unreachable", carried: false, downKbps: null, upKbps: null },
+        { protocol: "Stealth", server: "relay-1 -> beta", result: "connected", carried: true, downKbps: 12_400, upKbps: 1_750 },
+        { protocol: "Stealth HTTPS", server: null, result: "refused", carried: null, downKbps: null, upKbps: null },
+        { protocol: "IKEv2", server: null, result: "not available with selected apps", carried: null, downKbps: null, upKbps: null },
       ],
     });
     expect(attempts[1]).toMatchObject({ at: new Date(NOW - 5 * MIN).toISOString(), network: null, ip: null, rungs: [] });
@@ -402,8 +402,11 @@ describe("parseRungs", () => {
   it("reads what clients send and survives what they should not", () => {
     expect(parseRungs(null)).toEqual([]);
     expect(parseRungs({ protocol: "Fast" } as any)).toEqual([]);
-    expect(parseRungs([1, "x", null, ["a"], { protocol: 7, result: "ok", routeId: "", carried: "yes" }] as any)).toEqual([
-      { protocol: null, routeId: null, result: "ok", carried: null },
+    expect(
+      parseRungs([1, "x", null, ["a"], { protocol: 7, result: "ok", routeId: "", carried: "yes", downKbps: "fast", upKbps: -3 }] as any),
+    ).toEqual([{ protocol: null, routeId: null, result: "ok", carried: null, downKbps: null, upKbps: null }]);
+    expect(parseRungs([{ protocol: "Stealth", result: "connected", downKbps: 12_400, upKbps: 1.5 }] as any)).toEqual([
+      { protocol: "Stealth", routeId: null, result: "connected", carried: null, downKbps: 12_400, upKbps: null },
     ]);
   });
 });

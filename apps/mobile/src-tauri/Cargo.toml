@@ -44,6 +44,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # these features through reqwest's system-proxy, at the version in
 # Cargo.lock. On the phones it reads the environment only.
 hyper-util = { version = "0.1", default-features = false, features = ["client-proxy", "client-proxy-system"] }
+# The speed sample's deadline in health_ip.rs (`tokio::time::timeout`).
+# Already in the tree through tauri and reqwest, at the version in
+# Cargo.lock and with `time` on, so this names it rather than adding
+# anything.
+tokio = { version = "1", features = ["time"] }
 # The relay of last resort -- the Windows app's relay_http.rs, compiled
 # here by path (see src/lib.rs). Its pin check reads the certificate with
 # webpki and hashes with ring, its pins are base64 and its gzip bodies

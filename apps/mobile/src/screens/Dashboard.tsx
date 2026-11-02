@@ -134,11 +134,14 @@ import {
 import {
   checkDataMoves,
   rememberedKbps,
+  rememberedKbpsWith,
   describeSlow,
   keepsSlow,
   noSlowRungs,
   noteSlow,
   passOverSlow,
+  rungSpeeds,
+  sampleDownload,
   serverKey,
   slowFallback,
 } from "@shared/lib/data-check";
@@ -2467,6 +2470,14 @@ export function Dashboard({
       if (kbps !== null) historyNow = recordSpeed(historyNow, networkId, routeId, protocol, kbps);
       void saveConnectHistory(historyNow);
     };
+    // What the sample after landing measured (`sampleDownload`), in place
+    // of the check's download: a reading of some length, where the check's
+    // 128 KB is over in a few round trips on a good line. Still the slower
+    // direction (`rememberedKbpsWith`), since the hold is on the upload.
+    const rememberSpeed = (routeId: string, protocol: ProtocolUser["protocol"], kbps: number) => {
+      historyNow = recordSpeed(historyNow, networkId, routeId, protocol, kbps);
+      void saveConnectHistory(historyNow);
+    };
 
     const allowedApps = await loadAllowedApps();
     /** Whether any rung got as far as dialling, so there is an engine to
@@ -2519,7 +2530,10 @@ export function Dashboard({
             kind: "CONNECT",
             outcome: "OTHER",
             reason: `cancelled by the customer after ${attempts.length} of ${candidates.length} attempt(s)`,
-            attempts: attempts.length > 0 ? rungsFrom(attempts) : undefined,
+            // With the dials, as every other report: without them each
+            // rung lost its server, and the log showed what was given up
+            // on as "unknown server".
+            attempts: attempts.length > 0 ? rungsFrom(attempts, dials) : undefined,
           },
           options.reconnect,
         ),
@@ -2853,21 +2867,37 @@ export function Dashboard({
           //
           // An automatic reconnect's is marked as one, so it is not read
           // as somebody pressing Connect (`asReconnectReport`).
-          void reportAttempt(
-            asReconnectReport(
-              {
-                kind: "CONNECT",
-                outcome: "SUCCESS",
-                protocol: label,
-                routeId: candidate.routeId,
-                attempts: rungsFrom(
-                  [...attempts, `${label}: connected`],
-                  [...dials, proven ? { routeId: candidate.routeId, carried: true } : null],
-                ),
-              },
-              options.reconnect,
-            ),
-          );
+          //
+          // Sent once the speed sample is in (`sampleDownload`): about a
+          // second and a half of download through the tunnel, against the
+          // endpoint the data check used, begun now that the screen says
+          // Connected. Nothing of the pass waits on it, and it decides
+          // nothing -- the rung has landed whatever it measures. What it
+          // finds stands in for the check's download in the speed memory
+          // (`rememberSpeed`, still the slower direction) and goes out on
+          // the landed rung beside the check's upload. A report held a few
+          // seconds is the same report; a row of its own for the sample
+          // would be counted as a second attempt. The Windows ladder's rule.
+          const sampleBase = measured !== null && verdict.state === "throughTunnel" ? verdict.from : undefined;
+          void sampleDownload(sampleBase).then((sample) => {
+            const sampled = rememberedKbpsWith(measured, sample);
+            if (sampled !== null) rememberSpeed(candidate.routeId, candidate.protocol, sampled);
+            void reportAttempt(
+              asReconnectReport(
+                {
+                  kind: "CONNECT",
+                  outcome: "SUCCESS",
+                  protocol: label,
+                  routeId: candidate.routeId,
+                  attempts: rungsFrom(
+                    [...attempts, `${label}: connected`],
+                    [...dials, proven ? { routeId: candidate.routeId, carried: true, ...rungSpeeds(measured, sample) } : null],
+                  ),
+                },
+                options.reconnect,
+              ),
+            );
+          });
           // A tunnel to reconnect if it drops. A reconnect's own landing
           // is armed by the episode, which carries its count of quick
           // deaths; a customer's connect starts the clock afresh -- on the

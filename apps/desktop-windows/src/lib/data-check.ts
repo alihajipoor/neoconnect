@@ -86,6 +86,83 @@ export async function checkDataMoves(base: string | undefined): Promise<DataVerd
   }
 }
 
+/** How long the sample after landing runs. The check above asks whether
+ * a tunnel moves at all, in sizes chosen so a held line fails them; it
+ * cannot say how fast a tunnel that passed is, since 128 KB is over in a
+ * few round trips on a good one. A second and a half of download is long
+ * enough to get past those and short enough that the customer, already
+ * connected, is not paying for a measurement. */
+export const SAMPLE_MS = 1_500;
+
+/** What an API from before `ms` serves for the sample: the most the
+ * endpoint allows, so that too is a reading of some length. */
+const SAMPLE_FALLBACK_BYTES = 512 * 1024;
+
+/** The sample's whole request: a connection through the tunnel, the
+ * answer, and the window. */
+const SAMPLE_TIMEOUT_MS = SAMPLE_MS + 4_000;
+
+/** What the sample measured. `bytes` over `ms` is the rate. */
+export type SpeedSample = { downKbps: number; bytes: number; ms: number };
+
+/** The sample's reading, or null when nothing of ours answered with
+ * data: busy, an error page, a backend without the endpoint. */
+export function judgeSample(check: DataCheck | null): SpeedSample | null {
+  if (check === null || check.down.status !== 200 || check.down.bytes <= 0 || check.down.ms <= 0) return null;
+  return { downKbps: kbps(check.down), bytes: check.down.bytes, ms: check.down.ms };
+}
+
+/** One timed download through `base`, once a rung has landed: the speed
+ * the customer actually gets, against the endpoint the check used.
+ * Never throws, and decides nothing -- the rung has landed whatever this
+ * finds; what it finds goes into the speed memory (`recordSpeed`) and
+ * out with the report (`rungSpeeds`). */
+export async function sampleDownload(base: string | undefined): Promise<SpeedSample | null> {
+  if (!base) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stalled = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), SAMPLE_TIMEOUT_MS + 2_000);
+  });
+  try {
+    const check = await Promise.race([
+      invoke<DataCheck>("data_check_v4", {
+        base,
+        downBytes: SAMPLE_FALLBACK_BYTES,
+        upBytes: 1,
+        timeoutMs: SAMPLE_TIMEOUT_MS,
+        sampleMs: SAMPLE_MS,
+      }),
+      stalled,
+    ]);
+    return judgeSample(check);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The fastest a rung may claim in a report: the server's own bound
+ * (`RUNG_KBPS_MAX` in report-attempt.dto.ts). */
+const RUNG_KBPS_MAX = 10_000_000;
+
+/** What the landed rung reports it moved (`AttemptRung.downKbps` and
+ * `upKbps`): the sample's download where one was taken, else the check's,
+ * and the check's upload -- each only where that leg finished, since a
+ * leg that ran out of time has no speed, only a "too slow". Empty when
+ * nothing was measured. */
+export type RungSpeeds = { downKbps?: number; upKbps?: number };
+
+export function rungSpeeds(verdict: DataVerdict | null, sample: SpeedSample | null): RungSpeeds {
+  const bound = (kbps: number) => Math.min(Math.max(Math.round(kbps), 0), RUNG_KBPS_MAX);
+  const measured = verdict !== null && verdict.state !== "unmeasured" ? verdict : null;
+  const speeds: RungSpeeds = {};
+  const down = sample?.downKbps ?? (measured && measured.downKbps > 0 ? measured.downKbps : undefined);
+  if (down !== undefined) speeds.downKbps = bound(down);
+  if (measured && measured.upKbps > 0) speeds.upKbps = bound(measured.upKbps);
+  return speeds;
+}
+
 /** Which server a candidate is, for passing over: the address it is
  * dialled at, and the machine its traffic leaves from.
  *
@@ -104,14 +181,48 @@ export function serverKey(candidate: ProtocolUser, routes: ReadonlyArray<Pick<Ro
   return `${host}|${exit}`;
 }
 
+/** Whether a candidate shows one of our own server names on the wire:
+ * its TLS handshake names the server it is dialling, with our certificate
+ * behind it. Stealth HTTPS, Stealth Web and Stealth Lite do (the engine
+ * sets `serverName` from the credential's own, xray-config.ts); Stealth
+ * borrows another site's name, which is REALITY's whole design; and
+ * Shadowsocks, Fast, Compatible and Built-in present no name at all.
+ * Stealth (legacy) does when it is carried over TLS.
+ *
+ * What it is for: a slow rung's evidence is about what the network could
+ * see of it. A hold on an address slows every protocol there alike (two
+ * rounds of measurement, `serverKey`), but Iran also throttles by name,
+ * and a Stealth HTTPS rung held that way says nothing about Stealth or
+ * Shadowsocks on the same box -- which are exactly the rungs built to
+ * get past that, and which the ladder was skipping on its strength. */
+export function presentsOwnName(candidate: Pick<ProtocolUser, "protocol" | "connection">): boolean {
+  switch (candidate.protocol) {
+    case "XRAY_VLESS_TLS":
+    case "XRAY_TROJAN":
+      return true;
+    case "XRAY_VMESS":
+      return candidate.connection?.security === "TLS";
+    default:
+      return false;
+  }
+}
+
 /** What the ladder keeps of rungs that came up and were too slow: which
  * servers (`serverKey`) to pass over for the rest of the pass, and the
  * best of them to dial again, and keep, if nothing better turns up. A
  * held server's other protocols would only be slow again, each costing a
- * full check to find out. */
+ * full check to find out.
+ *
+ * In two sets, by what the slow rung showed the network (`presentsOwnName`).
+ * A rung that showed our name may have been held for the name, so it is
+ * evidence against the other rungs on that server that show it, and
+ * those alone (`names`); one that showed no name of ours, or a borrowed
+ * one, was held for its address, and is evidence against everything
+ * there (`servers`). */
 export type SlowRungs = {
   keyOf: (candidate: ProtocolUser) => string;
   servers: Set<string>;
+  names: Set<string>;
   best: { candidate: ProtocolUser; verdict: Extract<DataVerdict, { state: "slow" }> } | null;
   /** The fallback's credential once it has been put back on the ladder;
    * its check then decides nothing. */
@@ -119,7 +230,7 @@ export type SlowRungs = {
 };
 
 export function noSlowRungs(keyOf: (candidate: ProtocolUser) => string = (u) => `route:${u.routeId}`): SlowRungs {
-  return { keyOf, servers: new Set(), best: null, redialling: null };
+  return { keyOf, servers: new Set(), names: new Set(), best: null, redialling: null };
 }
 
 /** The speed a rung is remembered by (`recordSpeed`): its slower
@@ -128,6 +239,23 @@ export function noSlowRungs(keyOf: (candidate: ProtocolUser) => string = (u) => 
 export function rememberedKbps(verdict: DataVerdict | null): number | null {
   if (verdict === null || verdict.state === "unmeasured") return null;
   return Math.min(verdict.downKbps, verdict.upKbps);
+}
+
+/** The speed a landed rung is remembered by once its sample is in
+ * (`sampleDownload`), in place of `rememberedKbps`: still the slower
+ * direction, with the sample's download standing in for the check's.
+ *
+ * Not the sample alone. It measures the download, and the hold is on
+ * the upload: a held server that landed as the slow fallback was
+ * remembered at its upload's 0 kbps, and the download alone would have
+ * overwritten that with a figure that ranked it first on the next
+ * connect here (`bySpeed` in failover.ts) -- the pass over it is what
+ * the memory is for. Null when there is no sample, or the check measured
+ * nothing: nothing was remembered then, and a download alone says
+ * nothing about the direction that is held. */
+export function rememberedKbpsWith(verdict: DataVerdict | null, sample: SpeedSample | null): number | null {
+  if (sample === null || verdict === null || verdict.state === "unmeasured") return null;
+  return Math.min(sample.downKbps, verdict.upKbps);
 }
 
 /** Upload first -- the direction that is held -- then download. */
@@ -140,14 +268,18 @@ export function noteSlow(
   candidate: ProtocolUser,
   verdict: Extract<DataVerdict, { state: "slow" }>,
 ): void {
-  slow.servers.add(slow.keyOf(candidate));
+  (presentsOwnName(candidate) ? slow.names : slow.servers).add(slow.keyOf(candidate));
   if (slow.best === null || faster(verdict, slow.best.verdict)) slow.best = { candidate, verdict };
 }
 
 /** Whether to pass over `candidate` without dialling it: its server was
- * too slow on another protocol this pass. Never the fallback itself. */
+ * too slow on another protocol this pass -- on any protocol, or, for a
+ * rung that shows our name, on another that shows it. Never the fallback
+ * itself. */
 export function passOverSlow(slow: SlowRungs, candidate: ProtocolUser): boolean {
-  return slow.servers.has(slow.keyOf(candidate)) && slow.redialling !== candidate.id;
+  const key = slow.keyOf(candidate);
+  const held = slow.servers.has(key) || (presentsOwnName(candidate) && slow.names.has(key));
+  return held && slow.redialling !== candidate.id;
 }
 
 /** At the end of the ladder with nothing landed: the best slow rung, put

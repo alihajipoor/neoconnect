@@ -7,10 +7,17 @@ const {
   checkDataMoves,
   DOWN_BYTES,
   judgeDataCheck,
+  judgeSample,
   keepsSlow,
   noSlowRungs,
   noteSlow,
   passOverSlow,
+  presentsOwnName,
+  rememberedKbps,
+  rememberedKbpsWith,
+  rungSpeeds,
+  SAMPLE_MS,
+  sampleDownload,
   serverKey,
   slowFallback,
   UP_BYTES,
@@ -78,13 +85,103 @@ describe("checkDataMoves", () => {
   });
 });
 
+/** The speed a landed tunnel actually gives: a second and a half of
+ * download, counted. */
+describe("sampleDownload", () => {
+  /** 1.2 MB in 1.5 s is 6.4 Mbps; the upload leg is not made. */
+  const SAMPLED: DataCheck = { down: leg(200, 1_200_000, 1_500), up: leg(null, 0, 0), peer: null };
+
+  it("asks the check's endpoint for a timed stream, and reads the rate", async () => {
+    invoke.mockResolvedValueOnce(SAMPLED);
+    await expect(sampleDownload("https://api.example/api")).resolves.toEqual({ downKbps: 6400, bytes: 1_200_000, ms: 1_500 });
+    expect(invoke).toHaveBeenLastCalledWith("data_check_v4", {
+      base: "https://api.example/api",
+      downBytes: 512 * 1024,
+      upBytes: 1,
+      timeoutMs: SAMPLE_MS + 4_000,
+      sampleMs: SAMPLE_MS,
+    });
+  });
+
+  /** An API from before the window serves the 512 KB asked and stops; the
+   * whole of it over its time is still a reading. */
+  it("reads a fixed body from an older API as a shorter sample", () => {
+    expect(judgeSample({ ...SAMPLED, down: leg(200, 524_288, 400) })).toEqual({ downKbps: 10486, bytes: 524_288, ms: 400 });
+  });
+
+  /** Busy, an error page, no answer: nothing is known, and nothing is
+   * recorded or reported -- never a zero. */
+  it("is nothing when our endpoint did not answer with data", async () => {
+    for (const down of [leg(503, 0, 20), leg(404, 0, 20), leg(null, 0, 5_500), leg(200, 0, 1_500), leg(200, 4096, 0)]) {
+      expect(judgeSample({ ...SAMPLED, down })).toBeNull();
+    }
+    invoke.mockRejectedValueOnce(new Error("unknown command"));
+    await expect(sampleDownload("https://api.example/api")).resolves.toBeNull();
+    await expect(sampleDownload(undefined)).resolves.toBeNull();
+  });
+});
+
+/** What the landed rung's report says it moved. */
+describe("rungSpeeds", () => {
+  const moves = judgeDataCheck(GOOD);
+  const sample = { downKbps: 6400, bytes: 1_200_000, ms: 1_500 };
+
+  it("prefers the sample's download to the check's, and keeps the check's upload", () => {
+    expect(rungSpeeds(moves, sample)).toEqual({ downKbps: 6400, upKbps: 1748 });
+    expect(rungSpeeds(moves, null)).toEqual({ downKbps: 2621, upKbps: 1748 });
+  });
+
+  /** A leg that ran out of time has no speed, only "too slow": the slow
+   * fallback that landed reports what was measured and nothing for the
+   * rest. And nothing at all where nothing was. */
+  it("says nothing for a leg that was not measured", () => {
+    const held = judgeDataCheck({ ...GOOD, up: leg(null, 0, 8_000) });
+    expect(rungSpeeds(held, sample)).toEqual({ downKbps: 6400 });
+    expect(rungSpeeds(held, null)).toEqual({ downKbps: 2621 });
+    expect(rungSpeeds({ state: "unmeasured" }, null)).toEqual({});
+    expect(rungSpeeds(null, sample)).toEqual({ downKbps: 6400 });
+  });
+
+  it("stays within the server's bounds", () => {
+    expect(rungSpeeds(null, { ...sample, downKbps: 1e9 })).toEqual({ downKbps: 10_000_000 });
+    expect(rungSpeeds(null, { ...sample, downKbps: 1234.6 })).toEqual({ downKbps: 1235 });
+  });
+});
+
+/** What the landed rung is remembered by once the sample is in: the
+ * slower direction still, with the sample's download in place of the
+ * check's -- never the download alone, which would have remembered an
+ * upload-held server as fast and led with it next time. */
+describe("rememberedKbpsWith", () => {
+  const sample = { downKbps: 6400, bytes: 1_200_000, ms: 1_500 };
+
+  it("keeps the check's upload when it is the slower direction", () => {
+    const moves = judgeDataCheck(GOOD);
+    expect(rememberedKbps(moves)).toBe(1748);
+    expect(rememberedKbpsWith(moves, sample)).toBe(1748);
+    expect(rememberedKbpsWith(moves, { ...sample, downKbps: 900 })).toBe(900);
+  });
+
+  it("leaves a held upload at nothing, however fast the download sampled", () => {
+    const held = judgeDataCheck({ ...GOOD, up: leg(null, 0, 8_000) });
+    expect(rememberedKbps(held)).toBe(0);
+    expect(rememberedKbpsWith(held, sample)).toBe(0);
+  });
+
+  it("touches nothing when the check measured nothing, or there is no sample", () => {
+    expect(rememberedKbpsWith({ state: "unmeasured" }, sample)).toBeNull();
+    expect(rememberedKbpsWith(null, sample)).toBeNull();
+    expect(rememberedKbpsWith(judgeDataCheck(GOOD), null)).toBeNull();
+  });
+});
+
 describe("slow rungs", () => {
   // A route is one server and one protocol: "germany-1 / VLESS+TLS".
-  const user = (id: string, host: string): ProtocolUser =>
-    ({ id, routeId: `${id}-route`, connection: { host } }) as unknown as ProtocolUser;
+  const user = (id: string, host: string, protocol = "XRAY_VLESS_REALITY", security?: string): ProtocolUser =>
+    ({ id, routeId: `${id}-route`, protocol, connection: { host, security } }) as unknown as ProtocolUser;
   const routes = [] as Array<{ id: string; exit: string | null }>;
   const uk = user("uk-reality", "198.51.100.1");
-  const ukTls = user("uk-tls", "198.51.100.1");
+  const ukTls = user("uk-tls", "198.51.100.1", "XRAY_VLESS_TLS");
   const tr = user("tr-reality", "198.51.100.2");
   const de = user("de-reality", "198.51.100.3");
 
@@ -119,5 +216,51 @@ describe("slow rungs", () => {
 
   it("has nothing to put back when nothing was slow", () => {
     expect(slowFallback(noSlowRungs())).toBeNull();
+  });
+
+  /** Which rungs show the network one of our own names: the TLS ones
+   * with our certificate behind them. REALITY borrows a name, and the
+   * rest present none. Stealth (legacy) only when carried over TLS. */
+  it("knows which protocols present our own server name", () => {
+    expect(presentsOwnName(user("a", "h", "XRAY_VLESS_TLS"))).toBe(true);
+    expect(presentsOwnName(user("b", "h", "XRAY_TROJAN"))).toBe(true);
+    expect(presentsOwnName(user("c", "h", "XRAY_VMESS", "TLS"))).toBe(true);
+    expect(presentsOwnName(user("d", "h", "XRAY_VMESS", "NONE"))).toBe(false);
+    for (const protocol of ["XRAY_VLESS_REALITY", "SHADOWSOCKS", "WIREGUARD", "OPENVPN", "IKEV2"]) {
+      expect(presentsOwnName(user("e", "h", protocol))).toBe(false);
+    }
+  });
+
+  /** Iran throttles by name as well as by address. A Stealth HTTPS rung
+   * held that way said nothing about Stealth or Shadowsocks on the same
+   * box -- the rungs built to get past exactly that -- and the ladder was
+   * skipping them on its strength. So its evidence reaches only the other
+   * rungs there that show our name. */
+  it("lets a slow own-name rung pass over only the other own-name rungs on its server", () => {
+    const ukWeb = user("uk-web", "198.51.100.1", "XRAY_VLESS_TLS");
+    const ukLite = user("uk-lite", "198.51.100.1", "XRAY_TROJAN");
+    const ukSs = user("uk-ss", "198.51.100.1", "SHADOWSOCKS");
+    const slow = noSlowRungs((u) => serverKey(u, routes));
+    noteSlow(slow, ukTls, { state: "slow", downKbps: 900, upKbps: 0 });
+    expect(passOverSlow(slow, ukWeb)).toBe(true);
+    expect(passOverSlow(slow, ukLite)).toBe(true);
+    expect(passOverSlow(slow, uk)).toBe(false);
+    expect(passOverSlow(slow, ukSs)).toBe(false);
+    expect(passOverSlow(slow, de)).toBe(false);
+    // Still the best slow rung to fall back on, and never passed over itself.
+    expect(slowFallback(slow)).toBe(ukTls);
+    expect(passOverSlow(slow, ukTls)).toBe(false);
+  });
+
+  /** A hold on the address slows every protocol there alike, measured
+   * twice: a slow REALITY or Shadowsocks rung is evidence against all of
+   * them, the own-name ones included. */
+  it("lets a slow address-level rung pass over everything on its server", () => {
+    const ukSs = user("uk-ss", "198.51.100.1", "SHADOWSOCKS");
+    const slow = noSlowRungs((u) => serverKey(u, routes));
+    noteSlow(slow, ukSs, { state: "slow", downKbps: 900, upKbps: 0 });
+    expect(passOverSlow(slow, uk)).toBe(true);
+    expect(passOverSlow(slow, ukTls)).toBe(true);
+    expect(passOverSlow(slow, de)).toBe(false);
   });
 });

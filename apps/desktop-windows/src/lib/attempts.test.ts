@@ -37,7 +37,9 @@ vi.mock("./api", () => ({
 /** The session held right now: whoever is signed in, or nobody. */
 const session: { current: { accessToken: string; refreshToken: string } | null } = { current: null };
 vi.mock("./session", () => ({ getTokens: async () => session.current }));
-vi.mock("./network-identity", () => ({ currentAttestation: () => null, currentClientIp: () => null }));
+/** The network attestation held right now: none, unless a test gives one. */
+const identity: { attestation: string | null } = { attestation: null };
+vi.mock("./network-identity", () => ({ currentAttestation: () => identity.attestation, currentClientIp: () => null }));
 
 type Attempts = typeof import("./attempts");
 let attempts: Attempts;
@@ -50,6 +52,7 @@ function sentBodies(): Record<string, unknown>[] {
 beforeEach(async () => {
   for (const data of files.values()) data.clear();
   session.current = null;
+  identity.attestation = null;
   invoke.mockReset();
   publicRequest.mockReset();
   publicRequest.mockResolvedValue({ ok: true, data: undefined });
@@ -201,6 +204,50 @@ describe("the length of apiEndpoint", () => {
     invoke.mockResolvedValue("windows");
     publicRequest.mockResolvedValue({ ok: false, error: "bad", status: 400 });
     await attempts.reportAttempt({ ...unreachable, apiEndpoint: "req: a.example=net@3" });
+    expect(publicRequest).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** The other field an old server refuses whole: the landed rung's speeds
+ * (`AttemptRung.downKbps` / `upKbps`), which go out with every report
+ * made under an attestation, and which a backend from before them
+ * answers with a 400 for the unknown fields. */
+describe("the landed rung's speeds", () => {
+  const landed = {
+    kind: "CONNECT" as const,
+    outcome: "SUCCESS" as const,
+    attempts: [
+      { protocol: "Stealth HTTPS", result: "failed", routeId: "r1", carried: false },
+      { protocol: "Stealth", result: "connected", routeId: "r2", carried: true, downKbps: 6400, upKbps: 1748 },
+    ],
+  };
+
+  it("are sent again without the speeds when an old server refuses them", async () => {
+    invoke.mockResolvedValue("windows");
+    identity.attestation = "net.v1.signed";
+    publicRequest
+      .mockResolvedValueOnce({ ok: false, error: "property downKbps should not exist", status: 400 })
+      .mockResolvedValue({ ok: true, data: undefined });
+
+    await attempts.reportAttempt(landed);
+
+    const bodies = sentBodies();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0].attempts).toEqual(landed.attempts);
+    expect(bodies[1].attempts).toEqual([
+      { protocol: "Stealth HTTPS", result: "failed", routeId: "r1", carried: false },
+      { protocol: "Stealth", result: "connected", routeId: "r2", carried: true },
+    ]);
+    // Everything else is the same report, under the same network.
+    expect({ ...bodies[1], attempts: null }).toEqual({ ...bodies[0], attempts: null });
+    expect(bodies[1].network).toBe("net.v1.signed");
+  });
+
+  it("are not resent when no rung carried one", async () => {
+    invoke.mockResolvedValue("windows");
+    identity.attestation = "net.v1.signed";
+    publicRequest.mockResolvedValue({ ok: false, error: "bad", status: 400 });
+    await attempts.reportAttempt({ ...landed, attempts: landed.attempts.map(({ protocol, result, routeId, carried }) => ({ protocol, result, routeId, carried })) });
     expect(publicRequest).toHaveBeenCalledTimes(1);
   });
 });

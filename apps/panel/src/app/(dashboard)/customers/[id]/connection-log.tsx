@@ -204,8 +204,28 @@ function RungLine({ rung, index }: { rung: CustomerAttemptRung; index: number })
       </span>
       {rung.carried === true && <span className="text-success">carried traffic</span>}
       {rung.carried === false && <span className="text-muted-foreground">carried nothing</span>}
+      {/* What the tunnel actually moved once it landed -- the figure that
+          tells a server that passed the check from one that is any use. */}
+      {speedLine(rung) && <span className="text-muted-foreground">{speedLine(rung)}</span>}
     </li>
   );
+}
+
+/** "about 12 Mbps down / 1.7 up", or null when nothing was measured. The
+ * download is the app's sample after it said "Connected", the upload the
+ * data check's; a rung with only one of them says that one. */
+function speedLine(rung: Pick<CustomerAttemptRung, "downKbps" | "upKbps">): string | null {
+  const down = rung.downKbps === null ? null : `${mbps(rung.downKbps)} Mbps down`;
+  const up = rung.upKbps === null ? null : `${mbps(rung.upKbps)}${down ? "" : " Mbps"} up`;
+  if (!down && !up) return null;
+  return `about ${[down, up].filter(Boolean).join(" / ")}`;
+}
+
+/** Kilobits a second as megabits, to one decimal under ten and whole
+ * above: "0.3", "1.7", "12", "240". */
+function mbps(kbps: number): string {
+  const value = kbps / 1000;
+  return value < 10 ? value.toFixed(1) : String(Math.round(value));
 }
 
 function rungTone(result: string): "slow" | "dead" | null {

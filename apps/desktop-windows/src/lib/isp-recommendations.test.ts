@@ -87,6 +87,17 @@ describe("attempt reports", () => {
     ]);
   });
 
+  /** The landed rung's speeds ride on its dial, and only the legs that
+   * were measured are said. */
+  it("puts the landed rung's speeds on it", () => {
+    expect(rungsFrom(["Stealth: connected"], [{ routeId: "r2", carried: true, downKbps: 6400, upKbps: 1748 }])).toEqual([
+      { protocol: "Stealth", result: "connected", routeId: "r2", carried: true, downKbps: 6400, upKbps: 1748 },
+    ]);
+    expect(rungsFrom(["Stealth: connected"], [{ routeId: "r2", carried: true, downKbps: 6400 }])).toEqual([
+      { protocol: "Stealth", result: "connected", routeId: "r2", carried: true, downKbps: 6400 },
+    ]);
+  });
+
   /** A quota or an engine fault is not the network's doing, and must not
    * count against a route for everybody else on that network. */
   it("records a failed dial only for a network failure", () => {

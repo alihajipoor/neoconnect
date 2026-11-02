@@ -831,6 +831,15 @@ ensure_fallback_site() {
       "        proxy_ssl_verify_depth 3;" \
       "        # Support threads and update downloads are the long ones." \
       "        proxy_read_timeout 120s;" \
+      "        # Paced by the customer, not read ahead. The apps' speed" \
+      "        # sample (/health/bulk with ms) streams for a window at" \
+      "        # whatever the line takes; buffered, this hop pulled the" \
+      "        # whole cap from the panel at datacentre speed into a temp" \
+      "        # file for every landed connect, while the customer took a" \
+      "        # few tens of KB. The panel answers it X-Accel-Buffering:" \
+      "        # no, but its own nginx hides that header unless told to" \
+      "        # pass it on, so this is set outright rather than relied on." \
+      "        proxy_buffering off;" \
       "    }"
   else
     echo "  Note: no panel URL on record, so this node will not mirror the API." >&2

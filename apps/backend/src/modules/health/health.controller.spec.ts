@@ -2,8 +2,17 @@ import { ConfigService } from "@nestjs/config";
 import { HealthController } from "./health.controller";
 import type { PrismaService } from "../../prisma/prisma.service";
 import type { Request, Response } from "express";
-import { Readable } from "node:stream";
-import { BULK_IN_FLIGHT, BULK_MAX_BYTES } from "./data-check";
+import { Readable, Writable } from "node:stream";
+import {
+  BULK_CHUNK_BYTES,
+  BULK_IN_FLIGHT,
+  BULK_MAX_BYTES,
+  BULK_TIMED_MAX_BYTES,
+  BULK_WINDOW_MAX_MS,
+  BULK_WINDOW_MIN_MS,
+  bulkWindow,
+  streamBulk,
+} from "./data-check";
 import { AsnLookupService } from "../network-identity/asn-lookup.service";
 import { AsnTable } from "../network-identity/asn-table";
 import { NetworkIdentityService } from "../network-identity/network-identity.service";
@@ -245,9 +254,10 @@ describe("HealthController bulk", () => {
 
   it("serves the bytes asked for, uncached and uncompressed", () => {
     const { res, sent } = response();
-    build().bulkDown("262144", res);
+    build().bulkDown("262144", undefined, res);
     expect(sent.status).toBe(200);
     expect((sent.body as Buffer).length).toBe(262_144);
+    expect(sent.headers["Content-Length"]).toBe("262144");
     expect(sent.headers["Cache-Control"]).toContain("no-store");
     expect(sent.headers["Cache-Control"]).toContain("no-transform");
     expect(sent.headers["Content-Type"]).toBe("application/octet-stream");
@@ -255,7 +265,111 @@ describe("HealthController bulk", () => {
 
   it.each([undefined, "", "0", "-1", "1e5", "524289", "abc"])("refuses %p bytes", (raw) => {
     const { res, sent } = response();
-    build().bulkDown(raw, res);
+    build().bulkDown(raw, undefined, res);
+    expect(sent.status).toBe(400);
+  });
+
+  /** A response that takes what is written at a pace of its own: a real
+   * Writable, so backpressure, `drain`, `close` and `writableEnded` are
+   * the stream's rather than a stand-in's. `perChunkMs` is how long the
+   * sink takes over each chunk -- a slow tunnel. */
+  function timedResponse(perChunkMs = 0) {
+    const sent: { status?: number; body?: unknown; headers: Record<string, string>; bytes: number } = { headers: {}, bytes: 0 };
+    const stream = new Writable({
+      write(chunk: Buffer, _encoding, done) {
+        sent.bytes += chunk.length;
+        // Infinity: a sink that never takes the chunk -- a client that
+        // opened the request and never reads.
+        if (perChunkMs === 0) done();
+        else if (Number.isFinite(perChunkMs)) setTimeout(done, perChunkMs);
+      },
+    });
+    const res = Object.assign(stream, {
+      status(code: number) {
+        sent.status = code;
+        return res;
+      },
+      set(name: string | Record<string, string>, value?: string) {
+        if (typeof name === "string") sent.headers[name] = value ?? "";
+        else Object.assign(sent.headers, name);
+        return res;
+      },
+      json(body: unknown) {
+        sent.body = body;
+        stream.end();
+        return res;
+      },
+    });
+    const finished = new Promise<void>((resolve) => stream.once("finish", resolve));
+    return { res: res as unknown as Response, sent, finished, destroy: () => stream.destroy() };
+  }
+
+  /** The apps' sample of a landed tunnel's speed: for the window asked,
+   * paced by what the connection takes, with no length announced. */
+  it("streams for the window asked, at the pace the response takes it", async () => {
+    const { res, sent, finished } = timedResponse(20);
+    const started = Date.now();
+    build().bulkDown("524288", "300", res);
+    await finished;
+    const took = Date.now() - started;
+    expect(sent.status).toBe(200);
+    expect(sent.headers["Content-Length"]).toBeUndefined();
+    expect(sent.headers["X-Accel-Buffering"]).toBe("no");
+    expect(sent.headers["Cache-Control"]).toContain("no-transform");
+    // About 300 ms of 64 KiB every 20 ms, give or take the timer; never
+    // the whole cap, which an unpaced write would have reached at once.
+    expect(sent.bytes).toBeGreaterThanOrEqual(5 * BULK_CHUNK_BYTES);
+    expect(sent.bytes).toBeLessThan(BULK_TIMED_MAX_BYTES / 2);
+    expect(took).toBeGreaterThanOrEqual(250);
+    expect(took).toBeLessThan(1_500);
+  });
+
+  it("sends no more than the cap, however long the window", async () => {
+    const { res, sent } = timedResponse();
+    const written = await streamBulk(res, Date.now() + 10_000, { maxBytes: 3 * BULK_CHUNK_BYTES });
+    expect(written).toBe(3 * BULK_CHUNK_BYTES);
+    expect(sent.bytes).toBe(3 * BULK_CHUNK_BYTES);
+    expect(res.writableEnded).toBe(true);
+  });
+
+  /** The app stops reading at its own deadline; the drain it was waiting
+   * for never comes, and the stream must not wait out the window for it. */
+  it("stops when the response closes under it", async () => {
+    const { res, sent, destroy } = timedResponse(20);
+    const started = Date.now();
+    const writing = streamBulk(res, Date.now() + 2_000);
+    setTimeout(destroy, 60);
+    await writing;
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(sent.bytes).toBeLessThan(BULK_TIMED_MAX_BYTES / 4);
+  });
+
+  /** A client that opens the request and never reads: the response's end
+   * waits on a socket that never drains, and the in-flight slot with it,
+   * for as long as nginx allows the socket. Cut after the grace instead,
+   * so the slot is bounded by the window and the grace, not the client. */
+  it("cuts a response nobody reads once the window and the grace are up", async () => {
+    const { res, sent } = timedResponse(Infinity);
+    const closed = new Promise<void>((resolve) => res.once("close", resolve));
+    const started = Date.now();
+    const written = await streamBulk(res, Date.now() + 100, { endGraceMs: 100 });
+    expect(written).toBe(BULK_CHUNK_BYTES);
+    expect(sent.bytes).toBe(BULK_CHUNK_BYTES);
+    expect(res.writableEnded).toBe(true);
+    expect(res.writableFinished).toBe(false);
+    await closed;
+    expect(res.destroyed).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("clamps the window to its bounds and refuses one that is not a number", () => {
+    expect(bulkWindow(undefined)).toBeUndefined();
+    expect(bulkWindow("10")).toBe(BULK_WINDOW_MIN_MS);
+    expect(bulkWindow("1500")).toBe(1_500);
+    expect(bulkWindow("999999")).toBe(BULK_WINDOW_MAX_MS);
+    for (const raw of ["", "abc", "-1", "1.5"]) expect(bulkWindow(raw)).toBeNull();
+    const { res, sent } = response();
+    build().bulkDown("1024", "abc", res);
     expect(sent.status).toBe(400);
   });
 
@@ -279,13 +393,13 @@ describe("HealthController bulk", () => {
   it("turns away transfers beyond the limit in flight, and frees the slot when one ends", () => {
     const controller = build();
     const open = Array.from({ length: BULK_IN_FLIGHT }, () => response());
-    for (const { res } of open) controller.bulkDown("1024", res);
+    for (const { res } of open) controller.bulkDown("1024", undefined, res);
     const over = response();
-    controller.bulkDown("1024", over.res);
+    controller.bulkDown("1024", undefined, over.res);
     expect(over.sent.status).toBe(503);
     open[0].close();
     const after = response();
-    controller.bulkDown("1024", after.res);
+    controller.bulkDown("1024", undefined, after.res);
     expect(after.sent.status).toBe(200);
   });
 });

@@ -5,7 +5,16 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { clientIpOf, verifiedClientIpOf } from "../../common/client-ip";
 import { CLOUDFLARE_ASN } from "../../common/cloudflare";
 import { NetworkIdentityService } from "../network-identity/network-identity.service";
-import { BULK_IN_FLIGHT, BULK_MAX_BYTES, bulkPayload, bulkSize, drainCounting, InFlight } from "./data-check";
+import {
+  BULK_IN_FLIGHT,
+  BULK_MAX_BYTES,
+  bulkPayload,
+  bulkSize,
+  bulkWindow,
+  drainCounting,
+  InFlight,
+  streamBulk,
+} from "./data-check";
 
 /** The caller's country, as a two-letter code, when the CDN told us.
  *
@@ -140,13 +149,27 @@ export class HealthController {
 
   /** `bytes` random bytes, for the apps' check that a tunnel moves data
    * (see data-check.ts). Never cached, never compressed: either would
-   * time something other than the tunnel. */
+   * time something other than the tunnel.
+   *
+   * With `ms` as well, random bytes for that long instead (clamped, see
+   * `bulkWindow`), with no length announced: the apps' sample of the
+   * speed a tunnel actually gives once it has landed. A size cannot ask
+   * that question -- the right amount differs four hundredfold between a
+   * held line and a good one -- so the app says how long, counts what
+   * arrives, and stops reading at its own deadline. `bytes` still has to
+   * be valid with it, and is what a server from before `ms` serves: the
+   * app's reading of that is a shorter sample, not an error. */
   @SkipThrottle()
   @Get("bulk")
-  bulkDown(@Query("bytes") raw: string | undefined, @Res() res: Response): void {
+  bulkDown(@Query("bytes") raw: string | undefined, @Query("ms") rawMs: string | undefined, @Res() res: Response): void {
     const bytes = bulkSize(raw);
     if (bytes === null) {
       res.status(400).json({ message: `bytes must be 1 to ${BULK_MAX_BYTES}` });
+      return;
+    }
+    const window = bulkWindow(rawMs);
+    if (window === null) {
+      res.status(400).json({ message: "ms must be a whole number" });
       return;
     }
     const release = this.bulk.enter();
@@ -158,9 +181,19 @@ export class HealthController {
     res.set({
       "Cache-Control": "no-store, no-transform",
       "Content-Type": "application/octet-stream",
-      "Content-Length": String(bytes),
     });
-    res.status(200).end(bulkPayload(bytes));
+    if (window === undefined) {
+      res.set("Content-Length", String(bytes));
+      res.status(200).end(bulkPayload(bytes));
+      return;
+    }
+    // A proxy that buffers responses would take the whole window's worth
+    // at once and hand it on at its own pace, which times the proxy.
+    res.set("X-Accel-Buffering", "no");
+    res.status(200);
+    // Released by the response closing, as the sized download is; the
+    // stream's own end is not awaited by the request.
+    void streamBulk(res, Date.now() + window);
   }
 
   /** Reads and discards what is sent, up to `BULK_MAX_BYTES`, and says

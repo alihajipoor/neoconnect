@@ -47,17 +47,24 @@ export interface AttemptRung {
   routeId?: string;
   /** Whether that dial carried traffic, by the egress check. */
   carried?: boolean;
+  /** What the rung moved once it landed, in kilobits a second: the
+   * download sampled after "Connected", or the data check's where none
+   * could be, and the check's upload (`rungSpeeds` in data-check.ts).
+   * Only on the landed rung, and only the legs that were measured. */
+  downKbps?: number;
+  upKbps?: number;
 }
 
 /** One rung's dial, for the per-ISP tags: which route was tried from
- * this network and whether traffic got through.
+ * this network and whether traffic got through -- and, on the rung that
+ * landed, how fast (`AttemptRung.downKbps` / `upKbps`).
  *
  * Null for a rung that says nothing about the network -- skipped before
  * dialling, or refused for a reason that is the account's or the
  * device's rather than the network's. Counting those against a route
  * would tell other customers a route is failing when it is this
  * customer's quota that ran out. */
-export type Dial = { routeId: string; carried: boolean } | null;
+export type Dial = { routeId: string; carried: boolean; downKbps?: number; upKbps?: number } | null;
 
 /** The dial a failed rung represents, by how it was classified.
  *
@@ -387,12 +394,18 @@ export async function forgetQueuedSessions(): Promise<void> {
  * that address, which makes it likelier still. Kept instead; the flush
  * stops at the first one, and the next contact carries on.
  *
- * And one allowance for a server older than this client. Until the
- * limit was raised, the backend refused an `apiEndpoint` over 200
- * characters with a 400, and an endpoint trace is often longer. Against
- * such a server -- production, until it is redeployed -- the report is
- * sent once more with the trace cut to fit, rather than lost whole over
- * its longest field. A current server never sees the second request.
+ * And two allowances for a server older than this client, each a field
+ * it refuses whole with a 400 -- which `send` would count as delivered.
+ * Until the limit was raised, the backend refused an `apiEndpoint` over
+ * 200 characters, and an endpoint trace is often longer: against such a
+ * server the report is sent once more with the trace cut to fit. And a
+ * backend from before the landed rung's speeds (`AttemptRung.downKbps`,
+ * `upKbps`) refuses any report carrying them, since it rejects fields it
+ * does not know; `withNetwork` cannot tell, because the attestation that
+ * marks a server as new enough for the per-ISP fields predates these,
+ * so the report goes again without them rather than every SUCCESS being
+ * lost until the backend is deployed. A current server never sees the
+ * second request.
  */
 async function send(queued: QueuedReport): Promise<boolean> {
   // Attached by hand rather than by using the authenticated helper. That
@@ -410,9 +423,14 @@ async function send(queued: QueuedReport): Promise<boolean> {
       headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
     });
 
-  let result = await post(report);
-  if (!result.ok && result.status === 400 && (report.apiEndpoint?.length ?? 0) > LEGACY_API_ENDPOINT_MAX) {
-    result = await post({ ...report, apiEndpoint: clipTrace(report.apiEndpoint!, LEGACY_API_ENDPOINT_MAX) });
+  let sent = report;
+  let result = await post(sent);
+  if (!result.ok && result.status === 400 && (sent.apiEndpoint?.length ?? 0) > LEGACY_API_ENDPOINT_MAX) {
+    sent = { ...sent, apiEndpoint: clipTrace(sent.apiEndpoint!, LEGACY_API_ENDPOINT_MAX) };
+    result = await post(sent);
+  }
+  if (!result.ok && result.status === 400 && carriesSpeeds(sent)) {
+    result = await post(withoutSpeeds(sent));
   }
 
   if (result.ok) return true;
@@ -428,6 +446,20 @@ async function send(queued: QueuedReport): Promise<boolean> {
   // answered and whose own request then was not is told it in other
   // words ("stopped responding"), and it never arrived either.
   return !result.noResponse;
+}
+
+/** Whether any rung of `report` carries a speed, the fields a server
+ * from before them refuses (see `send`). */
+function carriesSpeeds(report: Pick<AttemptReport, "attempts">): boolean {
+  return report.attempts?.some((rung) => rung.downKbps !== undefined || rung.upKbps !== undefined) ?? false;
+}
+
+/** `report` with every rung's speeds taken off, the rest of it as it was. */
+function withoutSpeeds<T extends Pick<AttemptReport, "attempts">>(report: T): T {
+  return {
+    ...report,
+    attempts: report.attempts?.map(({ downKbps: _down, upKbps: _up, ...rung }) => rung),
+  };
 }
 
 /** Attaches the network, or strips what only a new server understands.
@@ -725,6 +757,14 @@ export function rungsFrom(lines: string[], dials: Dial[] = []): AttemptRung[] {
     // Parallel to the lines, by index: the dashboards push one of each
     // per rung. A missing or null entry leaves the rung as it always was.
     const dial = dials[i];
-    return dial ? { ...rung, routeId: dial.routeId, carried: dial.carried } : rung;
+    if (!dial) return rung;
+    const { routeId, carried, downKbps, upKbps } = dial;
+    return {
+      ...rung,
+      routeId,
+      carried,
+      ...(downKbps !== undefined ? { downKbps } : {}),
+      ...(upKbps !== undefined ? { upKbps } : {}),
+    };
   });
 }
