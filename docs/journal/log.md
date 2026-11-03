@@ -7673,3 +7673,69 @@ the fastest before connecting. It needs a test path per concurrent exit
 in the Windows service and a test function in the phone engines.
 Speed memory (prefer what measured faster here) is the first step and
 is in.
+
+## 2026-11-02 — the apps measure the speed they land on (desktop 0.9.57, mobile 0.2.35)
+
+Why: an iPhone customer tried server after server by hand, and each one
+"connected" and was too slow. Automatic lands on the first server that
+passes the data check (128 KB down and 256 KB up within 8 s each, about
+0.13 / 0.26 Mbps). The check is pass/fail, so neither the app nor we knew
+how fast a landed tunnel actually was.
+
+**Live:** backend `ddb4328f` deployed first (dump
+`/root/db-backups/pre-speed-measure-20261102-0510*`). Desktop 0.9.57 and
+Android 0.2.35 come from the release workflows on main `7bf4d950`. iOS
+1.0.0 (17) is on TestFlight (below).
+
+**What changed:**
+- `/health/bulk?bytes=N&ms=250..2000` now streams for a fixed time
+  instead of a fixed size. The cap is 4 MiB. `bytes` is still required,
+  and `ms` alone gets a 400.
+- Its in-flight cap went from 8 to 48, because a full cap answered 503
+  and the connect then landed as "unmeasured".
+- After a tunnel lands, the app samples 1.5 s of download through it in
+  the background, so the connect is not slowed. The SUCCESS report waits
+  for the sample, and the landed rung carries `downKbps` / `upKbps`. The
+  panel's connection log shows "about X Mbps down / Y up".
+- Speed memory (per network, route and protocol, 24 h) keeps the lower of
+  the sampled download and the check's upload.
+- A slow own-name rung (Stealth Web/HTTPS/Lite) no longer marks its host
+  slow for REALITY. It now skips only the host's other own-name rungs.
+- Cancelled reports on mobile keep the server each rung dialled.
+- A backend too old for the speed fields answers 400, and the app sends
+  the report again without them.
+- Which server is chosen is unchanged. That is step B, after about a week
+  of speed data.
+
+**Proven on the VM:**
+- A Germany Stealth connect reported 22951 kbps down and 1945 up.
+- The row reached `client_attempts`, and the panel API returned the
+  figures.
+
+**Not proven:**
+- A speed report from a phone. None had arrived when this was written.
+  The phones run the same TypeScript and the same Rust check, but not on
+  a device yet.
+- The figures on a censored network.
+
+**Traps:**
+- When the network has no attestation (the baseline lookup came back
+  without an ASN), `withNetwork` strips each rung down to protocol and
+  result. The first VM build lost its speeds that way. `4c61e547` keeps
+  the landed rung's speeds through the strip.
+- The same strip still drops `routeId` and `carried`, which the per-ISP
+  tags and the block watch read. That is a separate fix.
+- The nginx template and `agent.sh` change (no buffering on the node
+  mirrors) is committed but not applied to the live hosts. It doesn't need
+  to be: the client times the bytes itself, so a buffering mirror cannot
+  inflate the figure.
+
+**iOS:** 1.0.0 (17) = mobile 0.2.35.
+- Built on the Mac from `7bf4d950` with the existing xcframework. The
+  engine has not changed since build 16.
+- Uploaded 2026-11-02 16:19 PST. Processed VALID, export compliance
+  false.
+- In external group "Neoxify". Beta review approved; in beta testing.
+- App Store version 1.0 is still waiting for review on build 15 and was
+  not touched.
+- The next build number is 18.
