@@ -486,7 +486,7 @@ html[lang="fa"] .site-footer__title{font-size:13px;letter-spacing:0;text-transfo
 .lamp--here{width:14px;height:14px;margin:-7px 0 0 -7px;background:var(--ok);box-shadow:0 0 0 3px var(--lamp-rim),0 0 0 10px var(--halo-ok),0 0 26px 8px var(--halo-ok)}
 .lamp--fi{left:55.53%;top:11.42%}.lamp--fr{left:50.57%;top:19.63%}.lamp--de{left:52.09%;top:18.69%}
 .lamp--tr{left:57.38%;top:25.54%}.lamp--sg{left:78.83%;top:55.93%}
-.lamp--gb{left:49.97%;top:17.66%}.lamp--nl{left:51.16%;top:17.03%}.lamp--us{left:31.13%;top:25.76%}.lamp--ae{left:64.93%;top:37.64%}
+.lamp--gb{left:49.97%;top:17.66%}.lamp--nl{left:51.16%;top:17.03%}.lamp--us{left:31.13%;top:25.76%}.lamp--ae{left:64.93%;top:37.64%}.lamp--in{left:70.67%;top:35.02%}
 /* Nothing on a map moves by itself. On the one map you can explore, a
    light grows and names itself when you hover it, focus it, or point at
    its country in the list beside it (.is-lit from site.js). */

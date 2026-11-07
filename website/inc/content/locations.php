@@ -11,8 +11,10 @@
  *  claim can be made honestly.
  *
  *  Source: docs/journal/HANDOVER-2026-08-22.md section 2 ("Fleet state"),
- *  which lists the nodes, every one of them live and carrying paying
- *  customers.
+ *  which listed the nodes, every one of them live and carrying paying
+ *  customers -- since changed: France retired, the UK added, Finland and
+ *  Singapore moved to replacement servers, and the Netherlands and India
+ *  added (2026-11-06).
  *
  *  Rules for editing:
  *    - Add a country here ONLY when a node is actually enrolled and
@@ -21,7 +23,7 @@
  *    - Remove one the day it is decommissioned. A stale location is a
  *      refund argument.
  *    - City is optional and only filled in where the repo actually
- *      records it. Three of the five are known; guessing the other two
+ *      records it. Three of the seven are known; guessing the others
  *      would be inventing detail for the sake of a tidier table.
  * ============================================================================
  *
@@ -47,15 +49,21 @@ return array(
         ),
 
         array(
-            'code' => 'fr',
-            'country' => array('en' => 'France', 'fa' => 'فرانسه'),
+            'code' => 'de',
+            'country' => array('en' => 'Germany', 'fa' => 'آلمان'),
+            'city' => array('en' => 'Frankfurt', 'fa' => 'فرانکفورت'),
+        ),
+
+        array(
+            'code' => 'gb',
+            'country' => array('en' => 'United Kingdom', 'fa' => 'بریتانیا'),
             'city' => null,
         ),
 
         array(
-            'code' => 'de',
-            'country' => array('en' => 'Germany', 'fa' => 'آلمان'),
-            'city' => array('en' => 'Frankfurt', 'fa' => 'فرانکفورت'),
+            'code' => 'nl',
+            'country' => array('en' => 'Netherlands', 'fa' => 'هلند'),
+            'city' => null,
         ),
 
         array(
@@ -65,6 +73,12 @@ return array(
                change -- it has always been ترکیه. */
             'country' => array('en' => 'Türkiye', 'fa' => 'ترکیه'),
             'city' => array('en' => 'Istanbul', 'fa' => 'استانبول'),
+        ),
+
+        array(
+            'code' => 'in',
+            'country' => array('en' => 'India', 'fa' => 'هند'),
+            'city' => null,
         ),
 
         array(

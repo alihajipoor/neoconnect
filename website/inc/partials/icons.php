@@ -278,6 +278,23 @@ function nx_flag_svg($code)
               . '<circle cx="1.1" cy="1" r=".45" fill="#fff"/>'
               . '<circle cx="1.24" cy="1" r=".36" fill="#e30a17"/>',
 
+        'GB' => '<rect width="3" height="2" fill="#012169"/>'
+              . '<path d="M0 0L3 2M3 0L0 2" stroke="#fff" stroke-width=".4"/>'
+              . '<path d="M0 0L3 2M3 0L0 2" stroke="#c8102e" stroke-width=".16"/>'
+              . '<path d="M1.5 0V2M0 1H3" stroke="#fff" stroke-width=".6"/>'
+              . '<path d="M1.5 0V2M0 1H3" stroke="#c8102e" stroke-width=".36"/>',
+
+        'NL' => '<rect width="3" height=".667" fill="#ae1c28"/>'
+              . '<rect y=".667" width="3" height=".666" fill="#fff"/>'
+              . '<rect y="1.333" width="3" height=".667" fill="#21468b"/>',
+
+        // The wheel is a ring and a hub: its spokes are a smudge at 30px.
+        'IN' => '<rect width="3" height=".667" fill="#ff9933"/>'
+              . '<rect y=".667" width="3" height=".666" fill="#fff"/>'
+              . '<rect y="1.333" width="3" height=".667" fill="#138808"/>'
+              . '<circle cx="1.5" cy="1" r=".25" fill="none" stroke="#000080" stroke-width=".07"/>'
+              . '<circle cx="1.5" cy="1" r=".06" fill="#000080"/>',
+
         'IR' => '<rect width="3" height=".667" fill="#239f40"/>'
               . '<rect y=".667" width="3" height=".666" fill="#fff"/>'
               . '<rect y="1.333" width="3" height=".667" fill="#da0000"/>',
