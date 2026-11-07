@@ -218,9 +218,10 @@ export class IspRecommendationsService {
    * many devices they use. Grouped in the database: the table holds a row
    * per credential per agent report, far too many to read.
    *
-   * Usage whose credential has since been removed (switching servers
-   * deletes it; the record outlives it with no route) is returned as a
-   * total, since it can be placed on no route.
+   * Usage whose credential has since been removed (signing a device out,
+   * or reclaiming an idle or over-limit one, removes its credentials; the
+   * record outlives them with no route) is returned as a total, since it
+   * can be placed on no route.
    *
    * The node list in the filter makes it an index range scan per node on
    * (nodeId, reportedAt), as CustomerActivityService.liveRows does, rather

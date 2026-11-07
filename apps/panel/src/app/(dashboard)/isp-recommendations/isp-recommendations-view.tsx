@@ -167,9 +167,9 @@ export function IspRecommendationsView({ summary }: { summary: IspRecommendation
         </p>
         <p className="text-xs text-muted-foreground">
           Traffic is what the servers metered on the route in the same window. Usage records carry no network, so each
-          hour of a customer&apos;s usage is placed by their latest report on that route: someone who switches networks
-          mid-window is counted under the network they reported from last. &ldquo;With upload&rdquo; counts customers
-          who sent at least 1 MB.
+          hour of a customer&apos;s usage goes to the network of their latest report on that route by then: someone who
+          switches networks mid-window is counted under whichever network they had reported from last at the time.
+          &ldquo;With upload&rdquo; counts customers who sent at least 1 MB.
         </p>
       </div>
 
@@ -300,7 +300,7 @@ export function IspRecommendationsView({ summary }: { summary: IspRecommendation
             <p className="px-4 py-3 text-xs text-muted-foreground">
               Also ↑ {formatBytes(withoutRoute.bytesUp)} ↓ {formatBytes(withoutRoute.bytesDown)} from{" "}
               {withoutRoute.customers} {withoutRoute.customers === 1 ? "customer" : "customers"} on credentials removed
-              since (switching servers replaces one), which name no route.
+              since (a device that signed out, or went idle, gives its credential back), which name no route.
             </p>
           ) : null}
         </div>
