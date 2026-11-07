@@ -508,20 +508,37 @@ export interface IspTag {
   windowHours: number;
 }
 
-/** One route's evidence on one network, as /isp-recommendations reports it.
- * Counts are distinct signed-in customers inside the window. */
-export interface IspRouteStats {
+/** What the servers metered on one route for the customers placed on one
+ * network, over the same window. Bytes are decimal strings. */
+export interface IspRouteTraffic {
+  bytesUp: string;
+  bytesDown: string;
+  /** Customers with any bytes. */
+  customers: number;
+  /** Customers who sent at least 1 MB: download alone is not use. */
+  withUpload: number;
+  /** Median up + down per customer with upload; null when none. */
+  typicalBytes: string | null;
+}
+
+export interface IspRoute {
   routeId: string;
   routeName: string | null;
   nodeName: string | null;
   protocol: string | null;
   transport: string | null;
   isRelay: boolean | null;
+}
+
+/** One route's evidence on one network, as /isp-recommendations reports it.
+ * Counts are distinct signed-in customers inside the window. */
+export interface IspRouteStats extends IspRoute {
   tried: number;
   carried: number;
   sustained: number;
   worked: number;
   tag: IspTag | null;
+  traffic: IspRouteTraffic;
 }
 
 export interface IspNetwork {
@@ -534,6 +551,10 @@ export interface IspRecommendationsSummary {
   windowHours: number;
   truncated: boolean;
   networks: IspNetwork[];
+  /** Traffic of customers with no report placing them on that route. */
+  unattributed: (IspRoute & { traffic: IspRouteTraffic })[];
+  /** Usage on credentials removed since, which names no route. */
+  withoutRoute: { bytesUp: string; bytesDown: string; customers: number };
   dataset: { loaded: boolean; ranges: number; loadedAt: string | null };
 }
 
