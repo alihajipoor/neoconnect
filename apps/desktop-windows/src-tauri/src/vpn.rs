@@ -356,6 +356,16 @@ async fn call_within(request: &Request, reply_timeout: Duration) -> Result<Respo
                 attempts += 1;
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
+            // Still busy after a second: the service is there and answering
+            // others, so this must not read as it being gone
+            // (`serviceGone` in src/lib/service-call.ts). On the VM a read
+            // that hit this during a connect put "Neoxify's service isn't
+            // answering" on screen over a running service (round 5).
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                return Err(format!(
+                    "The Neoxify background service is busy right now ({e}). Try again in a moment."
+                ))
+            }
             Err(e) => {
                 return Err(format!(
                     "Could not reach the Neoxify background service ({e}). Try restarting the app, or reinstalling if this keeps happening."

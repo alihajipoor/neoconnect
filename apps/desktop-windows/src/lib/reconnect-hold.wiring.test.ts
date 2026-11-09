@@ -96,7 +96,12 @@ describe("the reconnect hold's gate", () => {
     expect(status).toContain("holdStore.observeRead(mark, status.reconnectHold);");
     // Unanswered, decided by where connects were as the read was sent.
     expect(status).toContain("const dials = holdStore.dialMark();");
-    expect(status).toContain("holdStore.unanswered(serviceGone(err), dials);");
+    expect(status).toContain("holdStore.unanswered(serviceGone(err), occupied ? null : dials);");
+    // Nor by a call of ours that held the service's thread: a split-tunnel
+    // change, a probe -- running as it was sent, or begun since.
+    expect(status).toContain("const disturbed = statusDisturbances.mark();");
+    expect(status).toContain("const disturbedAtSend = statusDisturbances.busy();");
+    expect(status).toContain("const occupied = disturbedAtSend || statusDisturbances.since(disturbed);");
     expect(dash).not.toContain("holdStore.observe(status.reconnectHold);");
     const disconnect = dash.slice(dash.indexOf("function serviceDisconnect(): Promise<void> {"));
     expect(disconnect.slice(0, disconnect.indexOf("\n}\n"))).toContain("holdStore.released();");

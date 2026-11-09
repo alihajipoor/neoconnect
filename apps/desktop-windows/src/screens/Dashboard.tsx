@@ -292,6 +292,13 @@ function serviceStatus(): Promise<VpnStatus> {
   // And whether a connect was on the wire as it was sent: one that keeps
   // the service's thread is what leaves a read unanswered then.
   const dials = holdStore.dialMark();
+  // Or a call of ours that holds that thread as well -- a split-tunnel
+  // change, a probe (`statusDisturbances`): on the VM a read sent during a
+  // 28 s split-tunnel change came back after 9 s, and "Neoxify's service
+  // isn't answering" stood for 2 s over a service that was answering
+  // (round 5).
+  const disturbed = statusDisturbances.mark();
+  const disturbedAtSend = statusDisturbances.busy();
   return withTimeout(invoke<VpnStatus>("vpn_status"), "vpn_status").then(
     (status) => {
       // The service's word on the reconnect hold, from every read: the one
@@ -303,9 +310,11 @@ function serviceStatus(): Promise<VpnStatus> {
       // Unanswered -- a restart -- and whatever it last said about the hold
       // is no longer known: after a restart it is gone. Said as being
       // checked, never as blocked nor as open. Not for a read sent while a
-      // connect was on the wire, or before one went on or came off it,
-      // unless the service is not there at all.
-      holdStore.unanswered(serviceGone(err), dials);
+      // connect was on the wire, or before one went on or came off it, nor
+      // one sent while a call of ours held the service's thread or before
+      // one began -- unless the service is not there at all.
+      const occupied = disturbedAtSend || statusDisturbances.since(disturbed);
+      holdStore.unanswered(serviceGone(err), occupied ? null : dials);
       throw err;
     },
   );
