@@ -18,12 +18,16 @@ import { orbTone } from "./orb-caution";
 import {
   createStatusRelease,
   episodeEndReleases,
+  GAP_READ_EVERY_MS,
   gapTraffic,
   HOLD_HINTS,
   gapWord,
   hintKey,
   holdCovers,
+  holdInGap,
   holdSpoken,
+  keptGapReason,
+  releaseAwaited,
   switchBody,
   type GapWord,
   type HoldScene,
@@ -981,5 +985,81 @@ describe("the switch confirmation while it holds", () => {
     expect(DICTIONARIES.en["hold.unanswered"]).not.toMatch(/still|without Neoxify|not protected/);
     expect(DICTIONARIES.fa["hold.unanswered"]).toContain("در حال بررسی");
     expect(DICTIONARIES.fa["hold.unanswered"]).not.toMatch(/هنوز|بدون نئوکسیفای|محافظت نمی‌شود/);
+  });
+});
+
+// The VM, 2026-11-06 (the third capture): what the screen said around a
+// let-go ran ahead of or behind the service's own.
+describe("the third capture's screen faults", () => {
+  const NOT_PERMITTED: ReconnectHold = { state: "notHeld", problem: "tunnelNotPermitted" };
+  const ARMED_WORD: ReconnectHold = { state: "armed" };
+
+  it("reads the service's own word that it is letting go, and says neither", () => {
+    expect(readHold({ state: "lettingGo" })).toEqual({ state: "lettingGo" });
+    holdStore.observe({ state: "holding", held_secs: 2 });
+    holdStore.observe({ state: "lettingGo" });
+    const said = gapTraffic(holdStore.current(), true);
+    expect(said).not.toBe("blocked");
+    expect(said).not.toBe("open");
+    // Over a reconnect, once the word is late: checking, never blocked.
+    expect(holdHint(holdStore.current(), { reconnecting: true, dropped: false, setting: true })).toBe("hold.unconfirmed");
+  });
+
+  it("keeps why nothing is held over a later armed in the same gap, until the gap ends", () => {
+    // tunnelNotPermitted at the let-go, then the next WireGuard session armed.
+    let kept = keptGapReason(null, HOLDING, true);
+    expect(kept).toBeNull();
+    kept = keptGapReason(kept, NOT_PERMITTED, true);
+    expect(kept).toEqual(NOT_PERMITTED);
+    kept = keptGapReason(kept, ARMED_WORD, true);
+    expect(holdInGap(ARMED_WORD, kept)).toEqual(NOT_PERMITTED);
+    expect(gapTraffic(holdInGap(ARMED_WORD, kept), true)).toBe("open");
+    // Never "checking whether other connections ... are blocked" after it.
+    for (const wordLate of [false, true]) {
+      expect(holdHint(holdInGap(ARMED_WORD, kept), { reconnecting: true, dropped: false, setting: true, wordLate })).toBeNull();
+    }
+    expect(holdNotes(holdInGap(ARMED_WORD, kept), { inGap: true, setting: true })).toEqual(["hold.tunnelNotPermitted"]);
+    // Held again in the same gap: blocked, and the reason is over.
+    kept = keptGapReason(kept, HOLDING, true);
+    expect(kept).toBeNull();
+    expect(holdInGap(HOLDING, kept)).toEqual(HOLDING);
+    // The gap over: armed is armed again.
+    kept = keptGapReason(NOT_PERMITTED, ARMED_WORD, false);
+    expect(kept).toBeNull();
+    expect(holdInGap(ARMED_WORD, kept)).toEqual(ARMED_WORD);
+    // Nothing else is replaced by it.
+    for (const hold of [HOLDING, { state: "unanswered" } as ReconnectHold, { state: "lettingGo" } as ReconnectHold, null]) {
+      expect(holdInGap(hold, NOT_PERMITTED)).toEqual(hold);
+    }
+  });
+
+  it("says neither blocked nor not protected from a Disconnect press until its reply lets go", () => {
+    holdStore.observe({ state: "holding", held_secs: 9 });
+    const pressed: HoldScene = { reconnecting: false, dropped: false, disconnecting: true };
+    expect(releaseAwaited(holdStore.current(), true)).toBe(true);
+    expect(holdHint(holdStore.current(), { ...pressed, setting: true })).toBeNull();
+    expect(holdSpoken(holdStore.current(), pressed)).toBe(false);
+    // Even over a drop or a reconnect not yet cleared from the screen.
+    expect(holdHint(holdStore.current(), { ...pressed, dropped: true, setting: true })).toBeNull();
+    // The reply.
+    holdStore.released();
+    expect(releaseAwaited(holdStore.current(), true)).toBe(false);
+    // Unanswered or letting go: the reply decides those too; armed and
+    // nothing are a plain Disconnect; the setting off says nothing of a hold.
+    expect(releaseAwaited({ state: "unanswered" }, true)).toBe(true);
+    expect(releaseAwaited({ state: "lettingGo" }, true)).toBe(true);
+    expect(releaseAwaited(ARMED_WORD, true)).toBe(false);
+    expect(releaseAwaited(null, true)).toBe(false);
+    expect(releaseAwaited(HOLDING, false)).toBe(false);
+  });
+
+  it("asks for the word in a gap often enough to hear a let-go within half a second", () => {
+    expect(GAP_READ_EVERY_MS).toBeLessThanOrEqual(400);
+  });
+
+  it("has the neutral Disconnect sentence in both languages", () => {
+    for (const dictionary of Object.values(DICTIONARIES)) {
+      expect((dictionary as Record<string, string>)["dash.disconnectingHint"]).toBeTruthy();
+    }
   });
 });

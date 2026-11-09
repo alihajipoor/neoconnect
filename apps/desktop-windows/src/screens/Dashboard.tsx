@@ -30,7 +30,7 @@ import {
   HEADLINE_HINTS,
   headlineFor,
   isTunnelUp,
-  LIVENESS_POLL_MS,
+  livenessPollMs,
   noTunnelVerified,
   rungJudgedByHandshake,
   showsIpv6Escape,
@@ -141,6 +141,7 @@ import { appPrefs } from "../lib/app-prefs";
 import { autoConnectDecision, autoConnectLatch } from "../lib/auto-connect";
 import {
   createStatusRelease,
+  GAP_READ_EVERY_MS,
   gapTraffic,
   gapWord,
   HOLD_HINTS,
@@ -148,16 +149,20 @@ import {
   hintKey,
   holdCovers,
   holdHint,
+  holdInGap,
   holdNotes,
   holdService,
   holdSpoken,
   holdStore,
   holdWanted,
+  keptGapReason,
   landingReleases,
   passTeardown,
   readWhileDialling,
+  releaseAwaited,
   switchBody,
   type HoldScene,
+  type ReconnectHold,
 } from "../lib/reconnect-hold";
 import { NOTIFY_TEXT, notifyMemory, notifyStep } from "../lib/connection-notify";
 import { showNotification } from "../lib/notify";
@@ -887,8 +892,9 @@ export function Dashboard({
   reconnectingRef.current = reconnecting;
   /** What the service last said about "Block the internet while
    * reconnecting" (lib/reconnect-hold.ts), and the device's preferences
-   * (lib/app-prefs.ts). */
-  const hold = useSyncExternalStore(holdStore.subscribe, holdStore.current, holdStore.current);
+   * (lib/app-prefs.ts). The hold as the gap says it is `hold`, below
+   * (`holdInGap`). */
+  const heardHold = useSyncExternalStore(holdStore.subscribe, holdStore.current, holdStore.current);
   const prefs = useSyncExternalStore(appPrefs.subscribe, appPrefs.current, appPrefs.current);
   /** Whether the tray has a measured speed to show (lib/traffic-meter.ts). */
   const trafficShown = useTrafficShown();
@@ -2714,6 +2720,11 @@ export function Dashboard({
   // stall delays what the screen says, a dead tunnel's "You're protected"
   // included, and the reconnect, by its length; the first look after it
   // catches up.
+  //
+  // Every half second over a tunnel the hold has armed (`livenessPollMs`):
+  // an adapter taken away under it is found -- and its drop held -- only by
+  // a status read.
+  const armedUp = holdWanted(prefs.blockWhileReconnecting) && heardHold?.state === "armed";
   useEffect(() => {
     if (!isTunnelUp(connectionState)) return;
 
@@ -2743,9 +2754,9 @@ export function Dashboard({
       }
     };
 
-    const id = setInterval(() => void look(), LIVENESS_POLL_MS);
+    const id = setInterval(() => void look(), livenessPollMs(armedUp));
     return () => clearInterval(id);
-  }, [connectionState]);
+  }, [connectionState, armedUp]);
 
   // Is the way out the tunnel was proven over still there -- asked every
   // second, of the machine's own tables (`lib/uplink-watch.ts`).
@@ -2852,12 +2863,20 @@ export function Dashboard({
 
   // While an automatic reconnect runs, or after a drop nothing reconnects,
   // nothing else asks the service, so its word on the reconnect hold is
-  // asked here -- at once, then every two seconds -- for the line and the
-  // notification that say the internet is blocked, or why it is not
-  // (`gapTraffic`): until it answers they say neither. Only with the
-  // setting on: off, there is nothing to say.
+  // asked here -- at once, then every GAP_READ_EVERY_MS -- for the line and
+  // the notification that say the internet is blocked, or why it is not
+  // (`gapTraffic`): until it answers they say neither. A let-go is heard
+  // within one of these. Only with the setting on: off, there is nothing
+  // to say.
   const gapDropped = tunnelDropped || failoverLost || reconnectLost(reconnect, sessionGeneration());
   const inHoldGap = reconnectRunning || gapDropped || failoverRunning;
+  // Why nothing is held, once a read in this gap has said it, kept over a
+  // later "armed" until the gap ends (`holdInGap`): the reconnect's next
+  // session armed as it comes up is no hold. Written during render, from
+  // the same inputs each time, so a render repeated gives the same answer.
+  const gapReasonRef = useRef<Extract<ReconnectHold, { state: "notHeld" }> | null>(null);
+  gapReasonRef.current = keptGapReason(gapReasonRef.current, heardHold, inHoldGap);
+  const hold = holdInGap(heardHold, gapReasonRef.current);
   useEffect(() => {
     if (!inHoldGap || !holdWanted(prefs.blockWhileReconnecting)) return;
     let asking = false;
@@ -2872,7 +2891,7 @@ export function Dashboard({
         });
     };
     look();
-    const id = setInterval(look, 2_000);
+    const id = setInterval(look, GAP_READ_EVERY_MS);
     return () => clearInterval(id);
   }, [inHoldGap, prefs.blockWhileReconnecting]);
 
@@ -4954,7 +4973,10 @@ export function Dashboard({
   // connection lost" is this screen's own word at the drop, or the
   // episode's once it has stopped without a tunnel; "Reconnecting..."
   // while one runs.
-  const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting, unconfined: ipv4NotConfined, waitingForNetwork });
+  // A Disconnect over a hold says neither blocked nor not protected until
+  // its reply has let go (`releaseAwaited`).
+  const disconnectHeld = releaseAwaited(hold, holdWanted(prefs.blockWhileReconnecting));
+  const headline = headlineFor(connectionState, { dropped: tunnelDropped || reconnectLost(reconnect, sessionGeneration()), customMode: splitTunnelActive, reconnecting, unconfined: ipv4NotConfined, waitingForNetwork, releaseAwaited: disconnectHeld });
 
   // Only for the first load of a session, and only on the main page: a page
   // of the shell opened before it ends (Plans, after a sign-up through the
@@ -5025,6 +5047,7 @@ export function Dashboard({
     holdKept: holdPassRunning,
     tunnelUp: isTunnelUp(connectionState),
     degraded: connectionState === "degraded",
+    disconnecting: connectionState === "disconnecting",
   };
   const heldNotes = holdNotes(hold, { inGap: holdSpoken(hold, holdScene), setting: holdSetting });
   const heldHint = holdHint(hold, { ...holdScene, setting: holdSetting, wordLate: holdWordLate });

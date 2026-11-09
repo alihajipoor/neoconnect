@@ -106,6 +106,18 @@ describe("the reconnect hold's gate", () => {
     const dash = source("../screens/Dashboard.tsx");
     expect(dash).toContain("const failover = options.automatic === true && options.reconnect === undefined;");
     expect(dash).toContain("const inHoldGap = reconnectRunning || gapDropped || failoverRunning;");
+    // The words read the hold as the gap says it (the VM, 2026-11-06: a
+    // later "armed" said "checking" after tunnelNotPermitted), and the gap
+    // reads every GAP_READ_EVERY_MS, not every two seconds.
+    expect(dash).toContain("gapReasonRef.current = keptGapReason(gapReasonRef.current, heardHold, inHoldGap);");
+    expect(dash).toContain("const hold = holdInGap(heardHold, gapReasonRef.current);");
+    expect(dash).toContain("const id = setInterval(look, GAP_READ_EVERY_MS);");
+    expect(dash).not.toContain("const id = setInterval(look, 2_000);");
+    // A Disconnect over a hold says neither until its reply; and the look
+    // runs twice a second over an armed tunnel.
+    expect(dash).toContain("const disconnectHeld = releaseAwaited(hold, holdWanted(prefs.blockWhileReconnecting));");
+    expect(dash).toContain('const armedUp = holdWanted(prefs.blockWhileReconnecting) && heardHold?.state === "armed";');
+    expect(dash).toContain("}, [connectionState, armedUp]);");
     expect(dash).toContain("const failoverSaid = failoverRunning && holdWanted(prefs.blockWhileReconnecting);");
     expect(dash).toContain("const notifyReconnecting = reconnectRunning || failoverSaid;");
     expect(dash).toContain("      reconnecting: notifyReconnecting,\n      failover: failoverSaid && !reconnectRunning,\n      gap: gapSaid,");
@@ -120,7 +132,7 @@ describe("the reconnect hold's gate", () => {
     expect(dash).toContain("const hintFailed = connectionError !== null && hintSaid === connectionError.messageKey;");
     expect(dash).toContain("<Hint tone={hintTone(calmTone, { failed: hintFailed })} reserve={hintReserve}>");
     expect(dash).not.toContain("failed: connectionError !== null })} reserve=");
-    expect(dash).toContain('    degraded: connectionState === "degraded",\n  };');
+    expect(dash).toContain('    degraded: connectionState === "degraded",\n    disconnecting: connectionState === "disconnecting",\n  };');
     const hero = source("../components/main/Hero.tsx");
     const announcer = hero.slice(hero.indexOf("export function StateAnnouncer"));
     const body = announcer.slice(0, announcer.indexOf("\n}\n"));

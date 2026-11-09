@@ -600,6 +600,9 @@ const en = {
   "dash.connectedNotConfinedHint": "Your traffic goes through Neoxify, but some connections on this computer may still go around it.",
   "dash.notProtected": "You're not protected",
   "dash.notProtectedHint": "Connect to encrypt your traffic and hide your IP.",
+  // Disconnect pressed while other connections were blocked: nothing is
+  // said either way about them until Neoxify's reply has lifted the block.
+  "dash.disconnectingHint": "Neoxify is closing the VPN connection.",
   // A tunnel the screen was vouching for closed without anyone asking.
   // "You're not protected / Connect to encrypt..." above is written for
   // somebody who has not connected yet; this is somebody whose traffic
@@ -1875,6 +1878,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.connectedNotConfinedHint": "ترافیک شما از نئوکسیفای می‌گذرد، ولی ممکن است بعضی اتصال‌های این کامپیوتر هنوز بیرون از آن بروند.",
   "dash.notProtected": "ترافیک شما محافظت نمی‌شود",
   "dash.notProtectedHint": "وصل شوید تا ترافیکتان رمزگذاری و آی‌پی شما پنهان شود.",
+  "dash.disconnectingHint": "نئوکسیفای در حال بستن اتصال وی‌پی‌ان است.",
   "dash.dropped": "اتصال وی‌پی‌ان قطع شد",
   "dash.droppedHint":
     "اتصال وی‌پی‌ان بسته شد. ترافیک شما الان بدون نئوکسیفای به اینترنت می‌رود و محافظت نمی‌شود. برای محافظت، دوباره وصل شوید.",

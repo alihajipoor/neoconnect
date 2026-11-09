@@ -91,11 +91,14 @@ export type ReconnectHold =
    * unanswered -- the service restarting, or not running -- so nothing is
    * known about the hold, either way (`holdStore.unanswered`). */
   | { readonly state: "unanswered" }
-  /** The app's own word, never the service's: a connect the hold does not
-   * cover has been sent, which the service lets go of the hold before it
-   * dials -- if it runs at all -- and the service has not yet said so
-   * (`holdStore.lettingGo`). Neither blocked nor open: only the service's
-   * own "not held" says traffic goes out without Neoxify. */
+  /** About to be let go of, and not yet: neither blocked nor open -- only
+   * the service's own "not held" says traffic goes out without Neoxify. The
+   * app's word when a connect the hold does not cover has been sent, which
+   * the service lets go of the hold before it dials -- if it runs at all --
+   * and the service has not yet said so (`holdStore.lettingGo`). And the
+   * service's own, said before a let-go the app cannot see coming (a
+   * WireGuard server it cannot name, the service stopping), so the screen
+   * never says "blocked" over a machine no longer held. */
   | { readonly state: "lettingGo" };
 
 const PROBLEMS: ReadonlySet<string> = new Set(["filtersRefused", "tunnelNotPermitted", "timedOut", "notCovered"]);
@@ -125,10 +128,41 @@ export function readHold(raw: unknown): ReconnectHold | null {
         state: "notHeld",
         problem: typeof field.problem === "string" && PROBLEMS.has(field.problem) ? (field.problem as ReconnectHoldProblem) : "other",
       };
+    case "lettingGo":
+      return { state: "lettingGo" };
     default:
       return null;
   }
 }
+
+type NotHeld = Extract<ReconnectHold, { state: "notHeld" }>;
+
+/** The reason a gap keeps (`holdInGap`), from the one it kept before and
+ * the service's word now: a read in the gap that says why nothing is held
+ * is kept until the gap ends, or the service holds again in it. */
+export function keptGapReason(kept: NotHeld | null, hold: ReconnectHold | null, inGap: boolean): NotHeld | null {
+  if (!inGap) return null;
+  if (hold?.state === "notHeld") return hold;
+  if (hold?.state === "holding") return null;
+  return kept;
+}
+
+/** The hold as a gap's words say it (`gapTraffic`, `holdHint`, `holdNotes`,
+ * the notifications): the service's word -- except "armed" after a read in
+ * the same gap said why nothing is held, which keeps that reason until the
+ * gap ends (`keptGapReason`). The reconnect's next session is armed as it
+ * comes up, which on the service's side clears the reason; said as armed,
+ * the gap read it as "unconfirmed" and, 1.5 s on, "checking whether other
+ * connections are blocked" over a machine nothing held (the VM, 2026-11-06,
+ * after `tunnelNotPermitted`). Nothing is held until the gap ends. */
+export function holdInGap(hold: ReconnectHold | null, kept: NotHeld | null): ReconnectHold | null {
+  return kept !== null && hold?.state === "armed" ? kept : hold;
+}
+
+/** How often the gap asks for the service's word on the hold: a let-go is
+ * heard within about one of these. At two seconds "blocked" stood 1.7 s
+ * over a hold a service restart had already taken out (the VM, 2026-11-06). */
+export const GAP_READ_EVERY_MS = 400;
 
 /** Which teardown a pass's own "take down what is up" uses. */
 export function passTeardown({
@@ -364,6 +398,20 @@ export interface HoldScene {
   /** That tunnel is shown degraded, whose own line says "Your traffic is
    * NOT protected": never over a machine the service holds, landed or not. */
   readonly degraded?: boolean;
+  /** The customer pressed Disconnect, and its reply has not come: the
+   * headline says it (`releaseAwaited`), and the hold's words say nothing. */
+  readonly disconnecting?: boolean;
+}
+
+/** Whether a Disconnect pressed over this hold waits for its reply before
+ * anything is said of other traffic: the service holds, or may (unanswered,
+ * letting go) -- what the reply drops (`holdStore.released`). The service
+ * lets go on receipt and replies after its teardown, so "blocked" kept until
+ * the reply was 1.2 s stale, and "not protected" from the press stood 0.3 s
+ * over a machine still held (the VM, 2026-11-06): neither is said meanwhile. */
+export function releaseAwaited(hold: ReconnectHold | null, setting: boolean): boolean {
+  if (!setting || hold === null) return false;
+  return hold.state === "holding" || hold.state === "unanswered" || hold.state === "lettingGo";
 }
 
 /** Whether a tunnel shown up keeps its own words over a hold: one that
@@ -379,6 +427,7 @@ function tunnelSpeaks(hold: ReconnectHold | null, scene: HoldScene): boolean {
  * landed under it (or is shown degraded). The notes under the state read
  * this. */
 export function holdSpoken(hold: ReconnectHold | null, scene: HoldScene): boolean {
+  if (scene.disconnecting === true) return false;
   if (scene.reconnecting || scene.dropped) return true;
   if (scene.holdKept === true && hold?.state === "notHeld") return true;
   if (hold?.state !== "holding") return false;
@@ -409,6 +458,9 @@ export function holdSpoken(hold: ReconnectHold | null, scene: HoldScene): boolea
  * reconnect, a pass waiting for a network, a drop): a pass's own headline,
  * and a tunnel's, claim nothing about other traffic.
  *
+ * A Disconnect pressed: nothing here -- the headline says it, neither
+ * blocked nor not protected until the reply has let go (`releaseAwaited`).
+ *
  * Null leaves the headline's own hint, which says traffic is going out
  * without Neoxify only where the service has said nothing is held. */
 export function holdHint(
@@ -419,10 +471,12 @@ export function holdHint(
     checking = false,
     tunnelUp = false,
     degraded = false,
+    disconnecting = false,
     setting,
     wordLate = true,
   }: HoldScene & { setting: boolean; wordLate?: boolean },
 ): HoldHintKey | "pending" | null {
+  if (disconnecting) return null;
   if (!reconnecting && !dropped && !checking && !tunnelUp) return null;
   /** The headline says the tunnel closed. */
   const gapShown = (reconnecting || dropped) && !tunnelUp;

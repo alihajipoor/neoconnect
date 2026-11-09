@@ -402,6 +402,19 @@ export function showsIpv6Escape(
  * has stopped being able to. */
 export const LIVENESS_POLL_MS = 1_000;
 
+/** The same look while "Block the internet while reconnecting" has armed
+ * the tunnel that is up (the service's `armed`): a tunnel adapter taken
+ * away under a live engine is found, and held, only by a status read, and
+ * at one a second the status said the tunnel ended up to 1.77 s after the
+ * adapter was disabled (the VM, 2026-11-06). Only while armed: off, nothing
+ * is held, and nothing waits on the read. */
+export const ARMED_LIVENESS_POLL_MS = 500;
+
+/** How often the liveness look runs: faster over an armed tunnel. */
+export function livenessPollMs(armed: boolean): number {
+  return armed ? ARMED_LIVENESS_POLL_MS : LIVENESS_POLL_MS;
+}
+
 /** Whether a status answer's "no tunnel" is the service's verified word.
  *
  * `connected: false` comes from two very different places. Usually the
@@ -564,6 +577,7 @@ export const HEADLINE_HINTS: readonly TranslationKey[] = [
   "dash.unknownHint",
   "dash.droppedHint",
   "dash.notProtectedHint",
+  "dash.disconnectingHint",
 ];
 
 /** The headline and the sentence under it, for every state the screen
@@ -599,6 +613,7 @@ export function headlineFor(
     reconnecting = null,
     unconfined = false,
     waitingForNetwork = false,
+    releaseAwaited = false,
   }: {
     dropped: boolean;
     customMode: boolean;
@@ -607,6 +622,10 @@ export function headlineFor(
     /** A pass is waiting on its rung for a network to dial over
      * (`lib/network-wait.ts`). */
     waitingForNetwork?: boolean;
+    /** A Disconnect's reply is awaited over a hold the service holds, or
+     * may (`releaseAwaited` in lib/reconnect-hold.ts): "not protected" is
+     * not said until that reply has let go. */
+    releaseAwaited?: boolean;
   },
 ): Headline {
   // A verified tunnel whose IPv4 the service could not confine to it
@@ -655,6 +674,11 @@ export function headlineFor(
         ? { title: "dash.dropped", hint: "dash.droppedHint", tone: "destructive" }
         : { title: "dash.notProtected", hint: "dash.notProtectedHint", tone: "plain" };
     case "disconnecting":
-      return { title: "dash.notProtected", hint: "dash.notProtectedHint", tone: "plain" };
+      // Over a hold, neither blocked nor not protected until the reply: the
+      // service lets go on receipt and replies after its teardown, and on
+      // the VM "You're not protected" stood 0.3 s over a machine still held.
+      return releaseAwaited
+        ? { title: "dash.disconnecting", hint: "dash.disconnectingHint", tone: "plain" }
+        : { title: "dash.notProtected", hint: "dash.notProtectedHint", tone: "plain" };
   }
 }
