@@ -1887,13 +1887,23 @@ fn gaming_response(report: crate::gaming::Report) -> Response {
 /// Polls rather than reacting to a connection closing, because the app
 /// does not hold one open -- every request is its own short-lived
 /// connection, so "connected" is not a state this service can observe.
-/// What it can observe is silence.
+/// What it can observe is silence -- and a tick of its own that came late,
+/// which is the machine stopping, not the app (`idle_tick`).
 fn spawn_idle_watchdog(engines: Supervisor<Engines>, last_seen: Arc<Mutex<Instant>>) {
     tokio::spawn(async move {
         loop {
+            let slept_from = Instant::now();
             tokio::time::sleep(IDLE_POLL).await;
-            if last_seen.lock().await.elapsed() < IDLE_GRACE {
-                continue;
+            {
+                let mut seen = last_seen.lock().await;
+                match idle_tick(slept_from.elapsed(), seen.elapsed()) {
+                    IdleTick::Heard => continue,
+                    IdleTick::Stalled => {
+                        *seen = Instant::now();
+                        continue;
+                    }
+                    IdleTick::Silent => {}
+                }
             }
 
             // The whole body is one job, and that is not a tidiness
@@ -1937,7 +1947,25 @@ fn spawn_idle_watchdog(engines: Supervisor<Engines>, last_seen: Arc<Mutex<Instan
                 // goes first: an app that is gone ends no reconnect, and the
                 // check below skips every moment no tunnel is up -- which
                 // is when a hold is holding the whole machine.
-                engines.release_reconnect_hold("the app went silent", true);
+                //
+                // Let go of as one that could not go on, over a hold held or
+                // a session armed, so the status says nothing is held, and
+                // why: an app that was only frozen comes back to a gap that
+                // keeps that reason. Let go of with nothing said, the next
+                // session armed in that gap read as a hold not yet confirmed
+                // -- "checking whether other connections are blocked" over a
+                // machine nothing held (the VM, round 4).
+                let hold = engines.reconnect_hold_handle();
+                let said = hold.holding_or_armed().then(|| {
+                    crate::engines::reconnect_hold::Release::Failed(
+                        neoconnect_ipc::ReconnectHoldProblem::Other,
+                        "the app went silent".to_string(),
+                    )
+                });
+                if let Some(why) = said.clone() {
+                    hold.release(why);
+                }
+                hold.disarm();
 
                 // A session whose tunnel adapter is gone is said to have
                 // ended, and its engine still runs: torn down all the same.
@@ -1949,7 +1977,86 @@ fn spawn_idle_watchdog(engines: Supervisor<Engines>, last_seen: Arc<Mutex<Instan
                 if let Err(err) = engines.disconnect() {
                     crate::cleanup_log::note("tear the tunnel down after the app went away", &err);
                 }
+                // That teardown lets go as asked, which forgets why: said again.
+                if let Some(why) = said {
+                    hold.release(why);
+                }
             });
         }
     });
+}
+
+/// What one tick of the idle watchdog makes of the app's silence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleTick {
+    /// Heard from within `IDLE_GRACE`.
+    Heard,
+    /// The tick itself took more than twice `IDLE_POLL`: the machine
+    /// stopped -- a VM paused, a laptop asleep, the service starved -- and
+    /// the app's silence was the machine's, not its own. Its grace starts
+    /// again.
+    Stalled,
+    /// Silent for `IDLE_GRACE` on a machine that ran: gone, or frozen.
+    Silent,
+}
+
+/// `tick`: how long the watchdog's last sleep of `IDLE_POLL` took. `silent`:
+/// how long since the app was last heard from.
+///
+/// Both are read off `Instant`, which on the VM counted a 72 s freeze of the
+/// whole guest (round 4): at resume the tick ran before the app's first
+/// request was served, called the app silent and let go of the hold the app
+/// was reading every 400 ms -- and the episode's next connect dialled unheld.
+/// A laptop's sleep is unverified: if the clock does not count it, neither
+/// reading does, and nothing is let go of for it either.
+fn idle_tick(tick: Duration, silent: Duration) -> IdleTick {
+    if tick > IDLE_POLL * 2 {
+        IdleTick::Stalled
+    } else if silent < IDLE_GRACE {
+        IdleTick::Heard
+    } else {
+        IdleTick::Silent
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    /// The watchdog's loop over a run of ticks, as `spawn_idle_watchdog`
+    /// keeps it: when it lets go, in seconds from the start. `ticks`: how
+    /// long each sleep took; the app is heard from only at the start.
+    fn lets_go_after(ticks: &[u64]) -> Option<u64> {
+        let (mut now, mut seen) = (0, 0);
+        for &tick in ticks {
+            now += tick;
+            match idle_tick(Duration::from_secs(tick), Duration::from_secs(now - seen)) {
+                IdleTick::Heard => {}
+                IdleTick::Stalled => seen = now,
+                IdleTick::Silent => return Some(now),
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_machine_that_stopped_is_not_an_app_gone_silent() {
+        // The VM, round 4: the guest froze for 72 s and the tick at resume
+        // called the app silent.
+        assert_eq!(idle_tick(Duration::from_secs(75), Duration::from_secs(73)), IdleTick::Stalled);
+        assert_eq!(idle_tick(Duration::from_secs(21), Duration::from_secs(61)), IdleTick::Stalled);
+        // Late, but not by a stall: an app silent for the grace is let go of.
+        assert_eq!(idle_tick(Duration::from_secs(20), Duration::from_secs(60)), IdleTick::Silent);
+        assert_eq!(idle_tick(IDLE_POLL, Duration::from_secs(59)), IdleTick::Heard);
+        // Its grace starts again at the stall: the app reading again after
+        // the resume is heard long before it ends.
+        assert_eq!(lets_go_after(&[10, 10, 75, 10, 10]), None);
+    }
+
+    #[test]
+    fn an_app_frozen_on_a_machine_that_runs_is_still_let_go_of_after_the_grace() {
+        assert_eq!(lets_go_after(&[10; 10]), Some(60));
+        // A stall on the way gives a full grace from it, and no more.
+        assert_eq!(lets_go_after(&[10, 10, 30, 10, 10, 10, 10, 10, 10, 10]), Some(110));
+    }
 }

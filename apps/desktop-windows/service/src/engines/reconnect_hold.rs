@@ -1703,6 +1703,13 @@ impl Hold {
         self.lock().holding()
     }
 
+    /// Whether a drop is being held, or a session is armed for one: what
+    /// letting go and disarming would change.
+    pub fn holding_or_armed(&self) -> bool {
+        let state = self.lock();
+        state.holding() || state.armed.is_some()
+    }
+
     /// The plan in force, while one is.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn held_plan(&self) -> Option<Plan> {

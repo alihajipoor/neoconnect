@@ -8198,7 +8198,8 @@ mod helper_tests {
             ("pipe.rs", "dispatch", ".disarm()", 1, "the customer's Disconnect"),
             ("pipe.rs", "dispatch", "release_reconnect_hold(", 2, "the customer's Disconnect; Gaming mode"),
             ("pipe.rs", "dispatch", ".turn_off()", 2, "the setting off"),
-            ("pipe.rs", "spawn_idle_watchdog", "release_reconnect_hold(", 1, "the app gone silent"),
+            ("pipe.rs", "spawn_idle_watchdog", "reconnect_hold::Release::", 1, "the app gone silent, said as not held"),
+            ("pipe.rs", "spawn_idle_watchdog", ".disarm()", 1, "the app gone silent"),
         ];
         let mut seen: Vec<(&str, String, &str, usize)> = Vec::new();
         for (file, source) in sources {
