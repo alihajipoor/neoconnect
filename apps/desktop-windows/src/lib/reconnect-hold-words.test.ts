@@ -18,6 +18,7 @@ import {
   holdNote,
   holdStore,
   readWhileDialling,
+  releaseAwaited,
   switchBody,
 } from "./reconnect-hold";
 import { serviceGone } from "./service-call";
@@ -295,5 +296,96 @@ describe("the switch confirmation in a gap the service has not yet spoken of", (
       expect(words, language).not.toContain(notProtected);
       expect(words, language).not.toContain(blocked);
     }
+  });
+});
+
+/** The VM's fourth round of the hold proof (2026-11-09). */
+describe("the fourth round", () => {
+  // gate5, fo and foall: an IKEv2 connect ran from +134.54 to +141.52; a read
+  // sent at +135.75 timed out at +141.75, after it had answered, and "the
+  // service isn't answering" stood 0.41 s over a service that had dialled.
+  it("decides a read went unanswered by where connects were when it was sent, not when it timed out", async () => {
+    holdStore.observe({ state: "holding", held_secs: 30 });
+    let answer!: () => void;
+    const dial = holdStore.dialling(new Promise<void>((resolve) => (answer = resolve)));
+    const sentWhileDialling = holdStore.dialMark();
+    expect(sentWhileDialling).toBeNull();
+    answer();
+    await dial;
+    holdStore.unanswered(false, sentWhileDialling);
+    expect(holdStore.current()?.state).toBe("holding");
+    // Sent before a connect went on the wire, timed out after it came off.
+    const sentBefore = holdStore.dialMark();
+    let again!: () => void;
+    const second = holdStore.dialling(new Promise<void>((resolve) => (again = resolve)));
+    again();
+    await second;
+    holdStore.unanswered(false, sentBefore);
+    expect(holdStore.current()?.state).toBe("holding");
+    // The service stopped or killed, nothing dialling: not answering, at once
+    // -- and its pipe gone says so whenever the read was sent.
+    holdStore.unanswered(false, holdStore.dialMark());
+    expect(holdStore.current()?.state).toBe("unanswered");
+    holdStore.observe({ state: "holding", held_secs: 31 });
+    holdStore.unanswered(true, sentWhileDialling);
+    expect(holdStore.current()?.state).toBe("unanswered");
+  });
+
+  it("never says the service is not answering over its reason for holding nothing", () => {
+    holdStore.observe({ state: "notHeld", problem: "notCovered" });
+    holdStore.unanswered();
+    holdStore.unanswered(true);
+    expect(holdStore.current()).toEqual({ state: "notHeld", problem: "notCovered" });
+  });
+
+  // gate5, foerr: the failed failover's teardown is a plain Disconnect, which
+  // the service lets go of the hold on receipt; the screen said "blocked"
+  // 0.41 s after the let-go, until the reply.
+  it("says a plain Disconnect over a hold as being let go of before it is sent, and takes no 'holding' read until the reply", async () => {
+    holdStore.observe({ state: "holding", held_secs: 30 });
+    const before = holdStore.decisionMark();
+    const seen: (string | undefined)[] = [];
+    const stop = holdStore.subscribe(() => seen.push(holdStore.current()?.state));
+    let reply!: () => void;
+    let sentAs: string | undefined;
+    const sent = holdStore.disconnecting(() => {
+      sentAs = holdStore.current()?.state;
+      return new Promise<void>((resolve) => (reply = resolve));
+    });
+    expect(sentAs).toBe("lettingGo");
+    const hold = holdStore.current();
+    // Neither blocked nor open: no held sentence, no note, no "not protected".
+    expect(gapTraffic(hold, true)).toBe("unconfirmed");
+    expect(holdNote(hold, { inGap: true, setting: true })).toBeNull();
+    expect(holdHint(hold, { reconnecting: false, dropped: false, checking: true, holdKept: true, setting: true })).toBeNull();
+    // A read sent before it, and one answered before it got there: older.
+    holdStore.observeRead(before, { state: "holding", held_secs: 31 });
+    holdStore.observeRead(holdStore.decisionMark(), { state: "holding", held_secs: 31 });
+    expect(holdStore.current()?.state).toBe("lettingGo");
+    reply();
+    await sent;
+    holdStore.released();
+    stop();
+    expect(holdStore.current()).toBeNull();
+    expect(seen).toEqual(["lettingGo", undefined]);
+  });
+
+  it("keeps the customer's Disconnect saying 'Disconnecting...' and nothing of the hold until the reply", () => {
+    holdStore.observe({ state: "holding", held_secs: 30 });
+    void holdStore.disconnecting(() => new Promise<void>(() => undefined));
+    const hold = holdStore.current();
+    expect(releaseAwaited(hold, true)).toBe(true);
+    expect(holdHint(hold, { reconnecting: false, dropped: false, tunnelUp: false, disconnecting: true, setting: true })).toBeNull();
+  });
+
+  it("believes the service again once a Disconnect that failed has settled, and leaves an armed tunnel armed", async () => {
+    holdStore.observe({ state: "holding", held_secs: 30 });
+    await holdStore.disconnecting(() => Promise.reject(new Error("vpn_disconnect did not answer in time (6000ms)"))).catch(() => undefined);
+    holdStore.observeRead(holdStore.decisionMark(), { state: "holding", held_secs: 37 });
+    expect(holdStore.current()?.state).toBe("holding");
+    holdStore.resetForTests();
+    holdStore.observe({ state: "armed" });
+    await holdStore.disconnecting(() => Promise.resolve());
+    expect(holdStore.current()).toEqual({ state: "armed" });
   });
 });

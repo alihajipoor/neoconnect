@@ -24,8 +24,8 @@
  *    `createStatusRelease`): a pass that landed a verified tunnel, or one
  *    that holds the machine itself, an episode that ended without one, a
  *    drop that began none -- and, from status reads alone, only a tunnel
- *    the service says landed under the hold, verified, on two reads a
- *    second apart;
+ *    the service says landed under the hold, verified, on two reads half
+ *    a second apart;
  *  - what the screen and the notifications say about the customer's other
  *    traffic in the gap (`gapTraffic`, `holdHint`, `holdNote`), from the
  *    service's own facts -- never from the setting alone, and never "going
@@ -46,8 +46,15 @@ import { serviceGone, withTimeout } from "./service-call";
  * customer can turn on and then be told other connections are blocked. So
  * Settings does not draw it (an unhonoured setting is not drawn), every
  * connect tells the service it is off, and nothing on screen speaks of it.
- * Flipped in a commit of its own. */
-export const RECONNECT_HOLD_PROVEN = false;
+ * Flipped in a commit of its own.
+ *
+ * True since desktop 0.9.59, when the owner chose to ship it as an opt-in
+ * beta: off by default (`blockWhileReconnecting`), tagged Beta in
+ * Settings. The VM's captures showed no leak while held (2026-11-09).
+ * What they could not reach -- a real machine stall, laptop sleep, IPv6,
+ * a censored network -- is listed in docs/reconnect-hold-proof.md and
+ * stays unproven. */
+export const RECONNECT_HOLD_PROVEN = true;
 
 /** Whether this build offers it: once proved, or in a test installer built
  * for the VM with `VITE_RECONNECT_HOLD=1` (build-test-installer.yml's
@@ -91,11 +98,16 @@ export type ReconnectHold =
    * unanswered -- the service restarting, or not running -- so nothing is
    * known about the hold, either way (`holdStore.unanswered`). */
   | { readonly state: "unanswered" }
-  /** The app's own word, never the service's: a connect the hold does not
-   * cover has been sent, which the service lets go of the hold before it
-   * dials -- if it runs at all -- and the service has not yet said so
-   * (`holdStore.lettingGo`). Neither blocked nor open: only the service's
-   * own "not held" says traffic goes out without Neoxify. */
+  /** About to be let go of, and not yet: neither blocked nor open -- only
+   * the service's own "not held" says traffic goes out without Neoxify. The
+   * app's word when a connect the hold does not cover has been sent, which
+   * the service lets go of the hold before it dials -- if it runs at all --
+   * and the service has not yet said so (`holdStore.lettingGo`); and when a
+   * plain Disconnect has been sent, which it lets go of the hold on, and has
+   * not answered (`holdStore.disconnecting`). And the
+   * service's own, said before a let-go the app cannot see coming (a
+   * WireGuard server it cannot name, the service stopping), so the screen
+   * never says "blocked" over a machine no longer held. */
   | { readonly state: "lettingGo" };
 
 const PROBLEMS: ReadonlySet<string> = new Set(["filtersRefused", "tunnelNotPermitted", "timedOut", "notCovered"]);
@@ -125,10 +137,41 @@ export function readHold(raw: unknown): ReconnectHold | null {
         state: "notHeld",
         problem: typeof field.problem === "string" && PROBLEMS.has(field.problem) ? (field.problem as ReconnectHoldProblem) : "other",
       };
+    case "lettingGo":
+      return { state: "lettingGo" };
     default:
       return null;
   }
 }
+
+type NotHeld = Extract<ReconnectHold, { state: "notHeld" }>;
+
+/** The reason a gap keeps (`holdInGap`), from the one it kept before and
+ * the service's word now: a read in the gap that says why nothing is held
+ * is kept until the gap ends, or the service holds again in it. */
+export function keptGapReason(kept: NotHeld | null, hold: ReconnectHold | null, inGap: boolean): NotHeld | null {
+  if (!inGap) return null;
+  if (hold?.state === "notHeld") return hold;
+  if (hold?.state === "holding") return null;
+  return kept;
+}
+
+/** The hold as a gap's words say it (`gapTraffic`, `holdHint`, `holdNotes`,
+ * the notifications): the service's word -- except "armed" after a read in
+ * the same gap said why nothing is held, which keeps that reason until the
+ * gap ends (`keptGapReason`). The reconnect's next session is armed as it
+ * comes up, which on the service's side clears the reason; said as armed,
+ * the gap read it as "unconfirmed" and, 1.5 s on, "checking whether other
+ * connections are blocked" over a machine nothing held (the VM, 2026-11-06,
+ * after `tunnelNotPermitted`). Nothing is held until the gap ends. */
+export function holdInGap(hold: ReconnectHold | null, kept: NotHeld | null): ReconnectHold | null {
+  return kept !== null && hold?.state === "armed" ? kept : hold;
+}
+
+/** How often the gap asks for the service's word on the hold: a let-go is
+ * heard within about one of these. At two seconds "blocked" stood 1.7 s
+ * over a hold a service restart had already taken out (the VM, 2026-11-06). */
+export const GAP_READ_EVERY_MS = 400;
 
 /** Which teardown a pass's own "take down what is up" uses. */
 export function passTeardown({
@@ -188,8 +231,16 @@ export function landingReleases(
   return fresh !== null && landedUnderHold(fresh.hold, fresh.status);
 }
 
-/** How far apart the two reads that let go from status alone must be. */
-export const RELEASE_READS_APART_MS = 1_000;
+/** How far apart the two reads that let go from status alone must be,
+ * timed by when each reply came.
+ *
+ * Half a second: while the hold holds, the app reads once a second
+ * (`LIVENESS_POLL_MS`), and a reply's own time varies. At a full second, on
+ * the VM (round 4), reads sent 1.007 s apart were answered 0.897 s apart --
+ * the first reply 133 ms, the second 22 ms -- the second read was refused,
+ * and the hold over a landed WireGuard tunnel went only on the third. Still
+ * far above the same status answered twice, which came within 0.1 s. */
+export const RELEASE_READS_APART_MS = 500;
 
 /** Letting go of a hold from status reads alone -- the net under the
  * explicit releases (a pass that landed, an episode's end), for a hold the
@@ -364,6 +415,20 @@ export interface HoldScene {
   /** That tunnel is shown degraded, whose own line says "Your traffic is
    * NOT protected": never over a machine the service holds, landed or not. */
   readonly degraded?: boolean;
+  /** The customer pressed Disconnect, and its reply has not come: the
+   * headline says it (`releaseAwaited`), and the hold's words say nothing. */
+  readonly disconnecting?: boolean;
+}
+
+/** Whether a Disconnect pressed over this hold waits for its reply before
+ * anything is said of other traffic: the service holds, or may (unanswered,
+ * letting go) -- what the reply drops (`holdStore.released`). The service
+ * lets go on receipt and replies after its teardown, so "blocked" kept until
+ * the reply was 1.2 s stale, and "not protected" from the press stood 0.3 s
+ * over a machine still held (the VM, 2026-11-06): neither is said meanwhile. */
+export function releaseAwaited(hold: ReconnectHold | null, setting: boolean): boolean {
+  if (!setting || hold === null) return false;
+  return hold.state === "holding" || hold.state === "unanswered" || hold.state === "lettingGo";
 }
 
 /** Whether a tunnel shown up keeps its own words over a hold: one that
@@ -379,6 +444,7 @@ function tunnelSpeaks(hold: ReconnectHold | null, scene: HoldScene): boolean {
  * landed under it (or is shown degraded). The notes under the state read
  * this. */
 export function holdSpoken(hold: ReconnectHold | null, scene: HoldScene): boolean {
+  if (scene.disconnecting === true) return false;
   if (scene.reconnecting || scene.dropped) return true;
   if (scene.holdKept === true && hold?.state === "notHeld") return true;
   if (hold?.state !== "holding") return false;
@@ -409,6 +475,9 @@ export function holdSpoken(hold: ReconnectHold | null, scene: HoldScene): boolea
  * reconnect, a pass waiting for a network, a drop): a pass's own headline,
  * and a tunnel's, claim nothing about other traffic.
  *
+ * A Disconnect pressed: nothing here -- the headline says it, neither
+ * blocked nor not protected until the reply has let go (`releaseAwaited`).
+ *
  * Null leaves the headline's own hint, which says traffic is going out
  * without Neoxify only where the service has said nothing is held. */
 export function holdHint(
@@ -419,10 +488,12 @@ export function holdHint(
     checking = false,
     tunnelUp = false,
     degraded = false,
+    disconnecting = false,
     setting,
     wordLate = true,
   }: HoldScene & { setting: boolean; wordLate?: boolean },
 ): HoldHintKey | "pending" | null {
+  if (disconnecting) return null;
   if (!reconnecting && !dropped && !checking && !tunnelUp) return null;
   /** The headline says the tunnel closed. */
   const gapShown = (reconnecting || dropped) && !tunnelUp;
@@ -508,6 +579,13 @@ let decisions = 0;
  * with them, and a status read it leaves unanswered meanwhile says nothing
  * about whether it runs. */
 let connecting = 0;
+/** How many times a connect has gone on or come off the wire: a read sent
+ * before one of them is one a connect may have kept waiting (`dialMark`). */
+let dialMoves = 0;
+/** Plain Disconnects sent and not yet settled (`disconnecting`): the
+ * service lets go of the hold on receipt, so a read that still says
+ * "holding" meanwhile was answered before it got there. */
+let disconnectsSent = 0;
 /** A connect the hold does not cover has been sent (`lettingGo`) and has
  * not answered: until it has, a read that still says "holding" was
  * answered before that connect reached the service's thread -- queued
@@ -555,23 +633,32 @@ export const holdStore = {
   observeRead(mark: number, raw: unknown): void {
     if (mark !== decisions) return;
     const next = readHold(raw);
-    if (lettingGoSent && next?.state === "holding") return;
+    if ((lettingGoSent || disconnectsSent > 0) && next?.state === "holding") return;
     set(next);
+  },
+  /** Where connects are as a status read is sent, for `unanswered`: null
+   * while one is on the wire. */
+  dialMark(): number | null {
+    return dialMarkNow();
   },
   /** A status read went unanswered: whatever the service last said about
    * the hold is no longer known -- after a restart it is gone -- so it is
    * said to be being checked, never blocked nor open. Nothing said before
-   * stays nothing.
+   * stays nothing, and a reason the service gave for holding nothing
+   * stays that reason: nothing held is still nothing held.
    *
-   * Not while a connect is on the wire (`dialling`), unless the service is
-   * gone (`gone`: its pipe is not there, or it is shutting down): its one
-   * thread is dialling, and a read it answers late says nothing about
+   * Not for a read sent while a connect was on the wire, or before one went
+   * on or came off it (`sent`, the read's `dialMark`), unless the service
+   * is gone (`gone`: its pipe is not there, or it is shutting down): its
+   * one thread was dialling, and a read it answers late says nothing about
    * whether it runs. On the VM an IKEv2 connect left every read unanswered
    * for its six seconds, and "Neoxify's service isn't answering" stood
-   * over a service that was dialling. */
-  unanswered(gone = false): void {
-    if (held === null) return;
-    if (connecting > 0 && !gone) return;
+   * over a service that was dialling -- and, asked when the read timed out
+   * rather than when it was sent, for 0.4 s more after that connect had
+   * answered (round 4). */
+  unanswered(gone = false, sent: number | null = dialMarkNow()): void {
+    if (held === null || held.state === "notHeld") return;
+    if (!gone && (sent === null || sent !== dialMoves)) return;
     set({ state: "unanswered" });
   },
   /** The service answered a request that lets go of the hold: the
@@ -603,6 +690,29 @@ export const holdStore = {
     lettingGoSent = true;
     set({ state: "lettingGo" });
   },
+  /** A plain Disconnect -- the customer's, or a pass's own teardown, the
+   * failed failover's among them -- is sent by `send`. The service lets go
+   * of the hold on receipt and answers after its teardown, so a hold the
+   * screen says is held, or may be (`unanswered`), is said as being let go
+   * of from before it is sent (`lettingGo`): neither blocked nor open,
+   * until its reply drops it (`released`). The failed failover's teardown
+   * said nothing of its own, and "blocked" stood 0.41 s after the service
+   * had let go (the VM, round 4). Until it settles, a read that still says
+   * "holding" was answered before the Disconnect got there and is not
+   * taken. Returns what `send` does. */
+  disconnecting<T>(send: () => Promise<T>): Promise<T> {
+    if (held?.state === "holding" || held?.state === "unanswered") {
+      decisions += 1;
+      set({ state: "lettingGo" });
+    }
+    disconnectsSent += 1;
+    const done = () => {
+      disconnectsSent -= 1;
+    };
+    const work = send();
+    work.then(done, done);
+    return work;
+  },
   /** A reconnect's teardown (`vpn_disconnect_for_reconnect`) answered over
    * a tunnel the service had said was armed: it holds the gap from that
    * teardown on (`hold_for_reconnect`). Said on that answer, not at the
@@ -620,8 +730,10 @@ export const holdStore = {
    * `work`. */
   dialling<T>(work: Promise<T>): Promise<T> {
     connecting += 1;
+    dialMoves += 1;
     const done = () => {
       connecting -= 1;
+      dialMoves += 1;
       if (connecting === 0) lettingGoSent = false;
     };
     work.then(done, done);
@@ -633,10 +745,16 @@ export const holdStore = {
     changes = 0;
     decisions = 0;
     connecting = 0;
+    dialMoves = 0;
+    disconnectsSent = 0;
     lettingGoSent = false;
     listeners.clear();
   },
 };
+
+function dialMarkNow(): number | null {
+  return connecting > 0 ? null : dialMoves;
+}
 
 function set(next: ReconnectHold | null): void {
   if (sameHold(next, held)) return;

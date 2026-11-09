@@ -1498,6 +1498,12 @@ pub enum ReconnectHold {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         standing_refused: bool,
     },
+    /// Holding still, and about to let go -- a connect that cannot dial
+    /// under it, the service stopping -- once this has been read: neither
+    /// blocked nor open for the app to say, the moment before it is either.
+    /// Said before the let-go so the screen never says "blocked" over a
+    /// machine no longer held. An older app reads it as nothing.
+    LettingGo,
     /// It should be holding and is not, and why. The internet is not
     /// blocked: the service fails open rather than strand the machine or
     /// stop a tunnel from carrying.
@@ -3222,6 +3228,7 @@ mod reconnect_hold_wire_tests {
             json
         };
         assert_eq!(round(ReconnectHold::Armed), serde_json::json!({"state": "armed"}));
+        assert_eq!(round(ReconnectHold::LettingGo), serde_json::json!({"state": "lettingGo"}));
         assert_eq!(
             round(ReconnectHold::Holding { held_secs: 12, dns_anywhere: false, landed: false, standing_refused: false }),
             serde_json::json!({"state": "holding", "held_secs": 12})

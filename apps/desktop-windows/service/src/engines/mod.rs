@@ -615,7 +615,20 @@ impl Engines {
         let hold_ops: Arc<dyn reconnect_hold::HoldOps> = if cfg!(test) {
             Arc::new(reconnect_hold::Inert)
         } else {
-            Arc::new(reconnect_hold::System { exe_dir: exe_dir.clone(), data_dir: config_dir.clone() })
+            // A roam's new address, heard as it comes, so a plan in force
+            // follows it at the next status read. Without it the plan
+            // follows every REREAD_EVERY, as before.
+            let address_watch = match reconnect_hold::AddressWatch::start() {
+                Ok(watch) => Some(watch),
+                Err(err) => {
+                    crate::cleanup_log::note(
+                        "watch the machine's addresses for the reconnect hold",
+                        &format!("NotifyUnicastIpAddressChange failed with {err}; the hold reads the network every {}s instead", reconnect_hold::REREAD_EVERY.as_secs()),
+                    );
+                    None
+                }
+            };
+            Arc::new(reconnect_hold::System { exe_dir: exe_dir.clone(), data_dir: config_dir.clone(), address_watch })
         };
         let reconnect_hold = reconnect_hold::Hold::new(hold_ops, Some(&config_dir));
         ledger.note_reconnect_hold(Arc::clone(&reconnect_hold));
@@ -826,6 +839,13 @@ impl Engines {
         self.reconnect_hold.report(live)
     }
 
+    /// The reconnect hold itself, for the service's stop to say it is being
+    /// let go of before the teardown does (`Hold::warn_of_letting_go`),
+    /// without waiting for the owning thread.
+    pub fn reconnect_hold_handle(&self) -> Arc<reconnect_hold::Hold> {
+        Arc::clone(&self.reconnect_hold)
+    }
+
     /// Lets go of the reconnect hold, for `why`. `disarm` also forgets the
     /// live session's plan for one: every teardown that is not a
     /// reconnect's -- a Disconnect, the app going away -- so nothing that
@@ -949,8 +969,11 @@ impl Engines {
 
     /// A plan for the hold: our tunnel adapters as they are now, `tunnel`
     /// among them whatever the listing says; Neoxify's programs; the
-    /// servers the app named and `servers`; the LAN. `None` when our
-    /// adapters could not be listed, since no plan could then name a tunnel.
+    /// servers the app named and `servers`; the LAN; the resolvers, or --
+    /// a read that found none, as a network cut reads (an adapter that is
+    /// down is skipped) -- those in force (`Plan::keeping_resolvers`). `None`
+    /// when our adapters could not be listed, since no plan could then name
+    /// a tunnel.
     fn reconnect_hold_plan(&self, tunnel: Option<u64>, servers: &[Ipv4Addr]) -> Option<reconnect_hold::Plan> {
         let ops = self.reconnect_hold.ops();
         let mut tunnels = ops.our_tunnels()?;
@@ -959,7 +982,11 @@ impl Engines {
         let mut nodes = self.hold_nodes.clone();
         nodes.extend_from_slice(servers);
         let dns = ops.dns_servers().unwrap_or_default();
-        Some(reconnect_hold::Plan::new(tunnels, ops.programs(), nodes, lan, dhcp_servers).with_dns(dns))
+        Some(
+            reconnect_hold::Plan::new(tunnels, ops.programs(), nodes, lan, dhcp_servers)
+                .with_dns(dns)
+                .keeping_resolvers(&self.reconnect_hold.resolvers_in_force()),
+        )
     }
 
     /// What a connect does about the hold before it takes down the session
@@ -978,6 +1005,11 @@ impl Engines {
     /// under the hold. One that cannot be named as an IPv4 address lets go
     /// of the hold before it dials, said, as a connect the hold does not
     /// cover does: a protocol is never stopped for the hold's sake.
+    ///
+    /// Either let-go is said in the status first and made once a read has
+    /// carried it, at most `LET_GO_SAID_WITHIN` on (`Hold::let_go_once_said`):
+    /// the app cannot see it coming, and told at its next read it said
+    /// "blocked" 0.41 s over traffic leaving on the VM.
     fn hold_through_connect(&mut self, profile: &ConnectProfile, known_nodes: &[String], limits: &crate::lifecycle::budget::Limits) {
         let named: Vec<Ipv4Addr> =
             known_nodes.iter().take(MAX_KNOWN_NODES).filter_map(|host| host.trim().parse().ok()).collect();
@@ -992,16 +1024,17 @@ impl Engines {
         }
         let passive = self.split_tunnel.wants_passive_tunnel();
         if !reconnect_hold::covers(profile, passive) {
-            if hold.holding() {
-                hold.release(reconnect_hold::Release::Failed(
+            hold.let_go_once_said(
+                reconnect_hold::Release::Failed(
                     neoconnect_ipc::ReconnectHoldProblem::NotCovered,
                     format!(
                         "the next connection ({}{}) is one the hold does not cover, so it was let go of before that one dialled",
                         profile.protocol_name(),
                         if passive { ", Custom mode" } else { "" }
                     ),
-                ));
-            }
+                ),
+                reconnect_hold::LET_GO_SAID_WITHIN,
+            );
             hold.disarm();
             return;
         }
@@ -1009,11 +1042,14 @@ impl Engines {
             let wireguard = matches!(profile, ConnectProfile::Wireguard(_));
             let server = self.hold_server_for(profile, limits);
             if wireguard && server.is_none() {
-                hold.release(reconnect_hold::Release::Failed(
-                    neoconnect_ipc::ReconnectHoldProblem::TunnelNotPermitted,
-                    "the WireGuard server could not be named as an IPv4 address to put in the hold's plan, so it was let go of before that connection dialled"
-                        .to_string(),
-                ));
+                hold.let_go_once_said(
+                    reconnect_hold::Release::Failed(
+                        neoconnect_ipc::ReconnectHoldProblem::TunnelNotPermitted,
+                        "the WireGuard server could not be named as an IPv4 address to put in the hold's plan, so it was let go of before that connection dialled"
+                            .to_string(),
+                    ),
+                    reconnect_hold::LET_GO_SAID_WITHIN,
+                );
                 hold.disarm();
                 return;
             }
@@ -7127,6 +7163,9 @@ mod helper_tests {
         /// The confinement's closes, to read as each hold goes in.
         confinement_closed: Option<Arc<std::sync::Mutex<Vec<isize>>>>,
         confinements_closed_at_install: std::sync::Mutex<Vec<usize>>,
+        /// The machine's resolvers, as the test says they are now: unread
+        /// unless it says.
+        dns: std::sync::Mutex<Option<Vec<IpAddr>>>,
     }
 
     const HELD_TUNNEL: u64 = 0x0035_0000_0100_0000;
@@ -7141,6 +7180,7 @@ mod helper_tests {
                 tunnel: std::sync::Mutex::new(Some(HELD_TUNNEL)),
                 confinement_closed: confinement.map(|fake| Arc::clone(&fake.closed)),
                 confinements_closed_at_install: std::sync::Mutex::default(),
+                dns: std::sync::Mutex::new(None),
             })
         }
         fn installs(&self) -> Vec<reconnect_hold::Plan> {
@@ -7176,6 +7216,9 @@ mod helper_tests {
         }
         fn programs(&self) -> Vec<PathBuf> {
             vec![PathBuf::from(r"C:\Program Files\Neoxify\resources\xray.exe")]
+        }
+        fn dns_servers(&self) -> Option<Vec<IpAddr>> {
+            self.dns.lock().unwrap().clone()
         }
     }
 
@@ -7377,6 +7420,103 @@ mod helper_tests {
         engines.hold_through_connect(&reality_profile(), &[], &fresh_limits());
         assert!(!engines.reconnect_hold.holding());
         assert_eq!(engines.reconnect_hold_status(), None, "the setting off is not a problem to report");
+    }
+
+    /// A network cut reads no resolvers -- the adapter that is down is
+    /// skipped -- and that must not open port 53: the setting said again as
+    /// the reconnect begins, every connect of the reconnect during the cut,
+    /// and the tunnel that comes up each plan with the resolvers in force.
+    /// On the VM each of those planned with none, and every cut leaked port
+    /// 53 to a resolver the machine was not configured with (2026-11-06).
+    #[test]
+    fn a_network_cut_keeps_the_resolvers_in_force_through_every_plan() {
+        let resolver = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 53));
+        let fake = FakeConfinement::new();
+        let hold = FakeHold::new(Some(&fake));
+        *hold.dns.lock().unwrap() = Some(vec![resolver]);
+        let mut engines = engines_for_test();
+        engines.set_confinement_ops_for_test(fake.clone());
+        engines.set_reconnect_hold_ops_for_test(hold.clone());
+        engines.reconnect_hold.set_wanted(true);
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        assert!(engines.confine_for_test());
+        engines.arm_reconnect_hold(&reality_profile(), false, &[]);
+
+        // The cut.
+        *hold.dns.lock().unwrap() = Some(Vec::new());
+        engines.arm_live_session_for_reconnect_hold();
+        assert!(engines.hold_for_reconnect());
+        assert_eq!(hold.installs().last().map(|p| p.dns.clone()), Some(vec![resolver]), "the drop was held with port 53 open");
+        end_test_session(&mut engines);
+
+        engines.hold_through_connect(&reality_profile(), &[], &fresh_limits());
+        assert_eq!(engines.reconnect_hold.held_plan().map(|p| p.dns), Some(vec![resolver]), "a connect during the cut opened port 53");
+        assert!(matches!(
+            engines.reconnect_hold_status(),
+            Some(neoconnect_ipc::ReconnectHold::Holding { dns_anywhere: false, .. })
+        ));
+
+        engines.begin_test_session_for(&reality_profile(), "XRAY_VLESS_REALITY", engine_stand_in());
+        engines.arm_reconnect_hold(&reality_profile(), false, &[]);
+        assert_eq!(hold.installs().last().map(|p| p.dns.clone()), Some(vec![resolver]), "the tunnel that came up opened port 53");
+
+        // A network with resolvers again is read as it is.
+        let new_resolver = IpAddr::V4(Ipv4Addr::new(10, 20, 30, 1));
+        *hold.dns.lock().unwrap() = Some(vec![new_resolver]);
+        engines.hold_through_connect(&reality_profile(), &[], &fresh_limits());
+        assert_eq!(engines.reconnect_hold.held_plan().map(|p| p.dns), Some(vec![new_resolver]));
+        end_test_session(&mut engines);
+    }
+
+    /// A connect that lets go of the hold before it dials -- one the hold
+    /// does not cover here -- says so in the status first, while a reader
+    /// reads the ledger as the app's reads do during a connect: holding,
+    /// then letting go, then why it was let go of, never "not held" before
+    /// "letting go". Told only at its next read, the app said "blocked"
+    /// over traffic already leaving (the VM, 2026-11-06).
+    #[test]
+    fn a_connect_that_lets_go_of_the_hold_says_so_in_the_status_first() {
+        let (mut engines, _fake, _hold, _g) = armed_session();
+        assert!(engines.hold_for_reconnect());
+        end_test_session(&mut engines);
+        let ledger = engines.ledger();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < deadline {
+                    let said = ledger.reconnect_hold_status();
+                    let over = matches!(said, Some(neoconnect_ipc::ReconnectHold::NotHeld { .. }));
+                    seen.push(said);
+                    if over {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                seen
+            })
+        };
+        engines.hold_through_connect(&test_profile(), &[], &fresh_limits());
+        assert!(!engines.reconnect_hold.holding(), "an IKEv2 connect was dialled under the hold");
+        // One read after the let-go, for a reader that was between two.
+        std::thread::sleep(Duration::from_millis(50));
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let seen = reader.join().unwrap();
+        let warned = seen
+            .iter()
+            .position(|s| matches!(s, Some(neoconnect_ipc::ReconnectHold::LettingGo)))
+            .unwrap_or_else(|| panic!("never said it was letting go: {seen:?}"));
+        let let_go = seen
+            .iter()
+            .position(|s| matches!(s, Some(neoconnect_ipc::ReconnectHold::NotHeld { problem: neoconnect_ipc::ReconnectHoldProblem::NotCovered, .. })))
+            .unwrap_or_else(|| panic!("never said why it let go: {seen:?}"));
+        assert!(warned < let_go);
+        assert!(
+            seen[..warned].iter().all(|s| matches!(s, Some(neoconnect_ipc::ReconnectHold::Holding { .. }))),
+            "{seen:?}"
+        );
     }
 
     /// A drop report the engine contradicts lets go of the hold that report
@@ -8037,8 +8177,8 @@ mod helper_tests {
             ("engines/reconnect_hold.rs", "arm_dialling", ".ops.close(", 2, "the plan before, once the new one is in"),
             ("engines/reconnect_hold.rs", "disarm", "close_locked(", 1, "a session not to be held: its callers are listed above"),
             ("engines/reconnect_hold.rs", "engage", ".ops.close(", 1, "a plan replaced, once the hold is in"),
-            ("engines/reconnect_hold.rs", "replan", ".ops.close(", 1, "the plan before, once the new one is in"),
-            ("engines/reconnect_hold.rs", "replan", "release_locked(", 1, "a tunnel that came up that the plan cannot permit: a protocol is never stopped for it"),
+            ("engines/reconnect_hold.rs", "replan_over", ".ops.close(", 1, "the plan before, once the new one is in"),
+            ("engines/reconnect_hold.rs", "replan_over", "release_locked(", 1, "a tunnel that came up that the plan cannot permit: a protocol is never stopped for it"),
             ("engines/reconnect_hold.rs", "release", "let_go_locked(", 1, "the helper every Release above calls"),
             ("engines/reconnect_hold.rs", "release_locked", "release_locked(", 1, "its own line"),
             ("engines/reconnect_hold.rs", "release_locked", "let_go_locked(", 1, "the helper the rest call"),
@@ -8047,6 +8187,7 @@ mod helper_tests {
             ("engines/reconnect_hold.rs", "close_locked", "close_locked(", 1, "its own line"),
             ("engines/reconnect_hold.rs", "close_locked", ".ops.close(", 1, "the one close of what is in force"),
             ("engines/reconnect_hold.rs", "release_if_engaged_by", "let_go_locked(", 1, "the engine reported gone is running: no drop"),
+            ("engines/reconnect_hold.rs", "let_go_once_said", "let_go_locked(", 1, "a connect's let-go before it dials (hold_through_connect), said in the status first"),
             ("engines/reconnect_hold.rs", "settle_standing", "close_locked(", 1, "filters standing for a session another has replaced, or the setting off"),
             ("engines/reconnect_hold.rs", "let_go_if_unfollowed", "release_locked(", 1, "the backstop: no reconnect followed the drop"),
             ("engines/reconnect_hold.rs", "expire_if_due", "release_locked(", 1, "the backstop: 40 minutes with no tunnel"),
@@ -8057,7 +8198,8 @@ mod helper_tests {
             ("pipe.rs", "dispatch", ".disarm()", 1, "the customer's Disconnect"),
             ("pipe.rs", "dispatch", "release_reconnect_hold(", 2, "the customer's Disconnect; Gaming mode"),
             ("pipe.rs", "dispatch", ".turn_off()", 2, "the setting off"),
-            ("pipe.rs", "spawn_idle_watchdog", "release_reconnect_hold(", 1, "the app gone silent"),
+            ("pipe.rs", "spawn_idle_watchdog", "reconnect_hold::Release::", 1, "the app gone silent, said as not held"),
+            ("pipe.rs", "spawn_idle_watchdog", ".disarm()", 1, "the app gone silent"),
         ];
         let mut seen: Vec<(&str, String, &str, usize)> = Vec::new();
         for (file, source) in sources {

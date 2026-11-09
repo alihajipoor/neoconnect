@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  ARMED_LIVENESS_POLL_MS,
   combineEvidence,
   customModePollState,
   droppedFromPoll,
@@ -12,6 +13,7 @@ import {
   heldOverItsDrop,
   isTunnelUp,
   LIVENESS_POLL_MS,
+  livenessPollMs,
   noTunnelVerified,
   rungJudgedByHandshake,
   showsIpv6Escape,
@@ -507,6 +509,15 @@ describe("noticing that the tunnel has gone", () => {
     expect(LIVENESS_POLL_MS).toBeLessThanOrEqual(1_000);
   });
 
+  // The VM, 2026-11-06: an adapter disabled under an armed Xray tunnel was
+  // found -- and its drop held -- at the next read, 0.37 to 1.77 s after the
+  // disable at one read a second.
+  it("asks twice a second over a tunnel the hold has armed, and only then", () => {
+    expect(livenessPollMs(true)).toBe(ARMED_LIVENESS_POLL_MS);
+    expect(ARMED_LIVENESS_POLL_MS).toBeLessThanOrEqual(500);
+    expect(livenessPollMs(false)).toBe(LIVENESS_POLL_MS);
+  });
+
   describe("for a screen that was away when it went", () => {
     // Settings unmounts the dashboard and both polls with it. The screen
     // mounted on return shows nothing yet; whether the app was vouching
@@ -669,7 +680,9 @@ describe("the headline", () => {
           for (const unconfined of [false, true]) {
             for (const waitingForNetwork of [false, true]) {
               for (const reconnecting of [null, { offline: false, waiting: true }, { offline: true, waiting: true }]) {
-                said.add(headlineFor(state, { dropped, customMode, unconfined, waitingForNetwork, reconnecting }).hint);
+                for (const releaseAwaited of [false, true]) {
+                  said.add(headlineFor(state, { dropped, customMode, unconfined, waitingForNetwork, reconnecting, releaseAwaited }).hint);
+                }
               }
             }
           }
@@ -677,6 +690,24 @@ describe("the headline", () => {
       }
     }
     expect([...said].sort()).toEqual([...HEADLINE_HINTS].sort());
+  });
+
+  // The VM, 2026-11-06: Disconnect pressed over a hold said "You're not
+  // protected" 0.3 s before the service had let go. Until the reply, the
+  // press says only that it is closing the connection.
+  it("says neither blocked nor not protected for a Disconnect awaiting its release", () => {
+    expect(headlineFor("disconnecting", { dropped: false, customMode: false, releaseAwaited: true })).toEqual({
+      title: "dash.disconnecting",
+      hint: "dash.disconnectingHint",
+      tone: "plain",
+    });
+    expect(headlineFor("disconnecting", { dropped: false, customMode: false }).title).toBe("dash.notProtected");
+    // Only the press: no other state changes its words for it.
+    for (const state of EVERY.filter((s) => s !== "disconnecting")) {
+      expect(headlineFor(state, { dropped: false, customMode: false, releaseAwaited: true }), state).toEqual(
+        headlineFor(state, { dropped: false, customMode: false }),
+      );
+    }
   });
 
   it("gives Custom mode its narrower unconfirmed sentence", () => {
@@ -784,7 +815,7 @@ describe("a connect waiting for a network", () => {
 describe("the liveness wiring the pure functions cannot check", () => {
   const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
   const start = dashboard.indexOf("const look = async () => {");
-  const end = dashboard.indexOf("const id = setInterval(() => void look(), LIVENESS_POLL_MS);", start);
+  const end = dashboard.indexOf("const id = setInterval(() => void look(), livenessPollMs(armedUp));", start);
   const look = dashboard.slice(start, end);
   const checkStart = dashboard.indexOf("const measure = async (): Promise<boolean> => {");
   const check = dashboard.slice(

@@ -5,18 +5,19 @@ import { ATTEMPT_MAX_MS, BLOCKED_WAIT_MAX_MS } from "./auto-reconnect";
 import { DICTIONARIES } from "./i18n";
 import { RECONNECT_HOLD_OFFERED, RECONNECT_HOLD_PROVEN } from "./reconnect-hold";
 
-/** "Block the internet while reconnecting" is not offered until a capture
- * has proved it (`RECONNECT_HOLD_PROVEN`). These hold the gate where it is
- * read: a release build draws no switch, tells every connect the setting
- * is off, and says nothing of a hold -- whatever a test build saved. */
+/** "Block the internet while reconnecting" was not offered until the owner
+ * chose to ship it as an opt-in beta in 0.9.59 (`RECONNECT_HOLD_PROVEN`).
+ * These hold the gate where it is read: with it shut, a build draws no
+ * switch, tells every connect the setting is off, and says nothing of a
+ * hold -- whatever a test build saved. */
 
 const source = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
 const repo = (path: string) => source(`../../../../${path}`);
 
 describe("the reconnect hold's gate", () => {
-  it("is shut in a build that sets nothing, as a release is built", () => {
-    expect(RECONNECT_HOLD_PROVEN).toBe(false);
-    expect(RECONNECT_HOLD_OFFERED).toBe(false);
+  it("is open in a build that sets nothing, as a release is built, since 0.9.59", () => {
+    expect(RECONNECT_HOLD_PROVEN).toBe(true);
+    expect(RECONNECT_HOLD_OFFERED).toBe(true);
   });
 
   it("draws the switch only in a build that offers it", () => {
@@ -94,10 +95,22 @@ describe("the reconnect hold's gate", () => {
     // word on the hold that came after it (`observeRead`).
     expect(status).toContain("const mark = holdStore.decisionMark();");
     expect(status).toContain("holdStore.observeRead(mark, status.reconnectHold);");
-    expect(status).toContain("holdStore.unanswered(serviceGone(err));");
+    // Unanswered, decided by where connects were as the read was sent.
+    expect(status).toContain("const dials = holdStore.dialMark();");
+    expect(status).toContain("holdStore.unanswered(serviceGone(err), occupied ? null : dials);");
+    // Nor by a call of ours that held the service's thread: a split-tunnel
+    // change, a probe -- running as it was sent, or begun since.
+    expect(status).toContain("const disturbed = statusDisturbances.mark();");
+    expect(status).toContain("const disturbedAtSend = statusDisturbances.busy();");
+    expect(status).toContain("const occupied = disturbedAtSend || statusDisturbances.since(disturbed);");
     expect(dash).not.toContain("holdStore.observe(status.reconnectHold);");
     const disconnect = dash.slice(dash.indexOf("function serviceDisconnect(): Promise<void> {"));
     expect(disconnect.slice(0, disconnect.indexOf("\n}\n"))).toContain("holdStore.released();");
+    // And said as being let go of before it is sent: every plain Disconnect,
+    // the failed failover's teardown among them (the VM, round 4).
+    expect(disconnect.slice(0, disconnect.indexOf("\n}\n"))).toContain(
+      'return holdStore.disconnecting(() => withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect")).then(',
+    );
     const hold = source("./reconnect-hold.ts");
     expect(hold).toContain("released: () => holdStore.released(),");
   });
@@ -106,6 +119,18 @@ describe("the reconnect hold's gate", () => {
     const dash = source("../screens/Dashboard.tsx");
     expect(dash).toContain("const failover = options.automatic === true && options.reconnect === undefined;");
     expect(dash).toContain("const inHoldGap = reconnectRunning || gapDropped || failoverRunning;");
+    // The words read the hold as the gap says it (the VM, 2026-11-06: a
+    // later "armed" said "checking" after tunnelNotPermitted), and the gap
+    // reads every GAP_READ_EVERY_MS, not every two seconds.
+    expect(dash).toContain("gapReasonRef.current = keptGapReason(gapReasonRef.current, heardHold, inHoldGap);");
+    expect(dash).toContain("const hold = holdInGap(heardHold, gapReasonRef.current);");
+    expect(dash).toContain("const id = setInterval(look, GAP_READ_EVERY_MS);");
+    expect(dash).not.toContain("const id = setInterval(look, 2_000);");
+    // A Disconnect over a hold says neither until its reply; and the look
+    // runs twice a second over an armed tunnel.
+    expect(dash).toContain("const disconnectHeld = releaseAwaited(hold, holdWanted(prefs.blockWhileReconnecting));");
+    expect(dash).toContain('const armedUp = holdWanted(prefs.blockWhileReconnecting) && heardHold?.state === "armed";');
+    expect(dash).toContain("}, [connectionState, armedUp]);");
     expect(dash).toContain("const failoverSaid = failoverRunning && holdWanted(prefs.blockWhileReconnecting);");
     expect(dash).toContain("const notifyReconnecting = reconnectRunning || failoverSaid;");
     expect(dash).toContain("      reconnecting: notifyReconnecting,\n      failover: failoverSaid && !reconnectRunning,\n      gap: gapSaid,");
@@ -120,7 +145,7 @@ describe("the reconnect hold's gate", () => {
     expect(dash).toContain("const hintFailed = connectionError !== null && hintSaid === connectionError.messageKey;");
     expect(dash).toContain("<Hint tone={hintTone(calmTone, { failed: hintFailed })} reserve={hintReserve}>");
     expect(dash).not.toContain("failed: connectionError !== null })} reserve=");
-    expect(dash).toContain('    degraded: connectionState === "degraded",\n  };');
+    expect(dash).toContain('    degraded: connectionState === "degraded",\n    disconnecting: connectionState === "disconnecting",\n  };');
     const hero = source("../components/main/Hero.tsx");
     const announcer = hero.slice(hero.indexOf("export function StateAnnouncer"));
     const body = announcer.slice(0, announcer.indexOf("\n}\n"));
