@@ -7896,3 +7896,46 @@ installer, its signature and checksums, and the API's update manifest
 offers 0.9.58 to a 0.9.57 client (signature for
 `Neoxify_0.9.58_x64-setup.exe`) and nothing to 0.9.58. The Android
 release holds the signed 0.2.36 APK and AAB.
+
+## 2026-11-09 — desktop 0.9.59: the kill switch, as an opt-in beta
+
+**Live:** desktop 0.9.59 comes from Release Desktop run 42717480303 on
+main `c6a7a876`. It is desktop only, with no backend deploy and no mobile
+release. CI on main passed (run 42717476820). The customer note is the
+tag annotation, in English and Persian.
+
+**What shipped:** `claude/reconnect-hold-r5`, merged as `d2b856ca`, with
+the round-four write-up from `claude/reconnect-hold-r4` inside it.
+"Block the internet while reconnecting" is in Settings, tagged Beta, and
+off until a customer turns it on (`RECONNECT_HOLD_PROVEN = true`, in a
+commit of its own, `4e89d4dd`). This was the owner's decision, put to
+them with the gaps below.
+
+**What the VM showed** (the fifth capture, in
+`docs/reconnect-hold-proof.md`): no leaker frame while any hold was in
+force, across kills, a stopped and a killed service, network cuts and
+failed failovers. Two wrong "service isn't answering" frames during a
+failover, of 2 s and 0.25 s, were fixed in `643631c9` after the capture.
+That fix is unit-tested only.
+
+**Unproven, and must not be called proven:**
+- the words fix, on the VM;
+- one WireGuard reconnect in eight that stayed blocked 25 s longer than
+  needed (the safe direction, cause unknown);
+- a real machine stall and laptop sleep. A VirtualBox pause freezes the
+  guest's clock, so the stall check never ran. If it fails, the hold
+  lets go, which is how the app behaves with the setting off;
+- a real IPv6 path, a censored network and a physical laptop;
+- OpenVPN TCP, which has no server;
+- the attempts limit and Gaming mode mid-hold;
+- the device limit's refusal from the slot API;
+- refused confinement.
+
+**Not done:** the endpoint lists are still not re-signed on the Mac, and
+the dead fi1/fr1 updater endpoints are still in the desktop
+`tauri.conf.json`. Both are as in the 0.9.58 entry.
+
+**Checked after release:** the desktop release holds the 0.9.59
+installer, its signature, the bootstrapper and checksums. The API's
+update manifest offers 0.9.59 to a 0.9.58 client (signature for
+`Neoxify_0.9.59_x64-setup.exe`, 23:15Z) and nothing to 0.9.59.
