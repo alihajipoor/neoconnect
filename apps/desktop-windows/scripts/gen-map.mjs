@@ -185,18 +185,20 @@ for (let j = 0; j < ROWS; j++) {
 }
 
 /* ---------- display anchors: one city per country the app can name (route-place.ts) ----------
-   `listed`: in the route list when this was generated (2026-10-19). The app
-   fits the box around those into the hero, and widens it for any other
-   country its list names. Never a node's location. */
+   `listed`: in the route list (2026-11-06: France gone, the Netherlands and
+   India added; first generated 2026-10-19). The app fits the box around
+   those into the hero, and widens it for any other country its list names.
+   Never a node's location. */
 const ANCHORS = [
   { cc: "gb", city: "London", lat: 51.5074, lon: -0.1278, listed: true },
-  { cc: "fr", city: "Paris", lat: 48.8566, lon: 2.3522, listed: true },
+  { cc: "fr", city: "Paris", lat: 48.8566, lon: 2.3522, listed: false },
   { cc: "de", city: "Frankfurt", lat: 50.1109, lon: 8.6821, listed: true },
   { cc: "fi", city: "Helsinki", lat: 60.1699, lon: 24.9384, listed: true },
   { cc: "tr", city: "Istanbul", lat: 41.0082, lon: 28.9784, listed: true },
   { cc: "ir", city: "Tehran", lat: 35.6892, lon: 51.389, listed: true, role: "relay-entry" },
   { cc: "sg", city: "Singapore", lat: 1.3521, lon: 103.8198, listed: true },
-  { cc: "nl", city: "Amsterdam", lat: 52.3676, lon: 4.9041, listed: false },
+  { cc: "in", city: "New Delhi", lat: 28.6139, lon: 77.209, listed: true },
+  { cc: "nl", city: "Amsterdam", lat: 52.3676, lon: 4.9041, listed: true },
   { cc: "ae", city: "Dubai", lat: 25.2048, lon: 55.2708, listed: false },
   { cc: "us", city: "New York", lat: 40.7128, lon: -74.006, listed: false },
 ];

@@ -78,7 +78,7 @@ describe("naming the place", () => {
   });
 
   it("names every country the app draws a flag for, in both languages", () => {
-    for (const code of ["ir", "de", "fr", "fi", "tr", "nl", "sg", "ae", "us", "gb"]) {
+    for (const code of ["ir", "de", "fr", "fi", "tr", "nl", "sg", "ae", "us", "gb", "in"]) {
       expect(countryName(`${code}-x`, "en")).not.toBe(`${code}-x`);
       expect(countryName(`${code}-x`, "fa")).toMatch(/[؀-ۿ]/);
     }
@@ -153,5 +153,15 @@ describe("the route flag", () => {
     const html = renderToStaticMarkup(createElement(RouteFlag, { region: "fi-finland", exitRegion: null }));
     expect(html.match(/<svg/g)?.length).toBe(1);
     expect(html).toContain("#002f6c");
+  });
+
+  /** Every country with servers draws its own flag; the globe is for a
+   * country nobody has taught the app yet. */
+  it("draws a flag, not the globe, for every country with servers", () => {
+    for (const region of ["de-germany", "tr-turkey", "gb-united-kingdom", "fi-finland", "nl-netherlands", "sg-singapore", "in-india"]) {
+      const html = renderToStaticMarkup(createElement(RouteFlag, { region, exitRegion: null }));
+      expect(html, region).toContain('viewBox="0 0 4 3"');
+    }
+    expect(renderToStaticMarkup(createElement(RouteFlag, { region: "in-india", exitRegion: null }))).toContain("#ff9933");
   });
 });

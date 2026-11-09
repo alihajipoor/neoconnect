@@ -107,6 +107,18 @@ const FLAGS: Record<string, React.ReactNode> = {
       <rect width="1.7" height={(3 / 13) * 7} fill="#3c3b6e" />
     </>
   ),
+  // Saffron, white, green, and the wheel in navy. Its twenty-four spokes
+  // are a smudge at this size, so it is the rim and the hub: a ring with a
+  // dot, which is what reads as the wheel.
+  in: (
+    <>
+      <rect width="4" height="1" fill="#ff9933" />
+      <rect y="1" width="4" height="1" fill="#fff" />
+      <rect y="2" width="4" height="1" fill="#138808" />
+      <circle cx="2" cy="1.5" r="0.36" fill="none" stroke="#000080" strokeWidth="0.09" />
+      <circle cx="2" cy="1.5" r="0.09" fill="#000080" />
+    </>
+  ),
   gb: (
     <>
       <rect width="4" height="3" fill="#012169" />

@@ -203,9 +203,10 @@ const ROUTES: RouteOption[] = [
   route("de-stealth", "de-germany", "node-de-1", "XRAY_VLESS_TLS", "WS", { ispTag: { code: "worksOnYourIsp", customers: 14, outOf: 17, windowHours: 24 } }),
   route("de-wg", "de-germany", "node-de-1", "WIREGUARD", undefined),
   route("fi-reality", "fi-finland", "node-fi-1", "XRAY_VLESS_REALITY", undefined),
-  route("fr-ss", "fr-france", "node-fr-1", "SHADOWSOCKS", undefined),
+  route("nl-ss", "nl-netherlands", "node-nl-1", "SHADOWSOCKS", undefined),
   route("gb-reality", "gb-united-kingdom", "node-gb-1", "XRAY_VLESS_REALITY", undefined),
   route("sg-reality", "sg-singapore", "node-sg-1", "XRAY_VLESS_REALITY", undefined),
+  route("in-reality", "in-india", "node-in-1", "XRAY_VLESS_REALITY", undefined),
   route("tr-ikev2", "tr-turkey", "node-tr-1", "IKEV2", undefined, {
     ispTag: { code: "failingOnYourIsp", customers: 9, outOf: 11, windowHours: 24 },
   }),
@@ -218,7 +219,7 @@ const PREVIEW_NET = "asn:preview";
 const OWN: [string, boolean, number][] = [
   ["fi-reality", true, 2 * 60],
   ["sg-reality", true, 5 * 60],
-  ["fr-ss", false, 60],
+  ["nl-ss", false, 60],
 ];
 
 function sampleHistory(routes: RouteOption[]): ConnectHistory {

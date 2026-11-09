@@ -64,38 +64,15 @@ const LEGACY_API_BASE_URLS: readonly string[] = [
   // CDN. It has been removed deliberately: the whole point of the second
   // domain is that losing one registrable name cannot take the product
   // down, and a fallback on a domain we might not keep is a dependency
-  // wearing the costume of a safety net. The node mirrors below are the
-  // real answer to "the CDN is unavailable" -- different addresses,
-  // different domain, already proven from Iran.
+  // wearing the costume of a safety net.
 
-  // The nodes, mirroring the API on the ports their VPN inbounds already
-  // listen on.
-  //
-  // These are also derived from cached credentials at runtime, which
-  // covers a returning customer. They are listed here as well because
-  // the case that actually broke is the one derivation cannot help:
-  // somebody installing for the first time has no cache and therefore no
-  // mirrors, so a blocked panel left them with nothing at all -- exactly
-  // when they most need another way in. Registering has to work before
-  // there is anything to remember.
-  //
-  // Different addresses from the panel, so a block on its IP does not
-  // touch them. Last, because a node is a detour and the direct paths
-  // above are quicker when they work.
-  //
-  // On .site, and that is the whole point of moving them. While these
-  // were .com subdomains the mirrors shared a registrable domain with
-  // the panel origin, so a name-based block -- DNS poisoning or SNI
-  // filtering on neoxify.com, neither of which cares about IP addresses
-  // -- would have taken out the panel and every fallback together. That
-  // is exactly the single point of failure the second domain exists to
-  // remove, and the nodes had been left outside it.
-  //
-  // The certificates on both nodes were expanded to cover the .site name
-  // alongside the .com one before this changed; a name the certificate
-  // does not carry fails the handshake before any request is sent.
-  "https://fi1.neoxify.site:2053/api",
-  "https://fr1.neoxify.site:2053/api",
+  // Two node mirrors followed here, on fi1 and fr1 under .site, for the
+  // first install that has no cached credentials to derive mirrors from.
+  // Both servers are gone (2026-11-06), so the names were dead addresses
+  // to time out on. A first install now gets its node mirrors from the
+  // signed bundle it ships with (the same seed, read by
+  // endpoint-bundle-store.ts), and a returning customer also from mirrors
+  // derived from cached credentials at runtime.
 ];
 
 /** Dev talks to the local backend port; a real build talks to the public

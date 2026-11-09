@@ -144,6 +144,26 @@ export function clearOf(square: Square, points: readonly { x: number; y: number 
   );
 }
 
+/** The wanted square shrunk by tenths towards its top-right corner rather
+ * than its centre, until it covers no light; null under `min`, as
+ * `placeRibbon`.
+ *
+ * For the column layouts, which put the mark in the map's north-east. That
+ * corner was empty until India was listed (2026-11-06): with India's light
+ * under the middle of the mark, shrinking around its centre never cleared
+ * it, and the mark stepped aside on every phone. The corner, above Siberia,
+ * is still empty. The map never mirrors, so this is the physical corner in
+ * either reading direction. */
+export function placeRibbonNorthEast(wanted: Square, points: readonly { x: number; y: number }[], min: number = RIBBON_MIN): Square | null {
+  const right = wanted.x + wanted.s;
+  let square = { ...wanted };
+  for (let i = 0; i < 12 && !clearOf(square, points); i++) {
+    const s = square.s * 0.9;
+    square = { x: right - s, y: wanted.y, s };
+  }
+  return square.s >= min && clearOf(square, points) ? square : null;
+}
+
 /** The ribbon's place: the wanted square, shrunk by tenths around its centre
  * until it covers no light; null -- it steps aside -- when that leaves it
  * under `min` (`RIBBON_MIN`, or `RIBBON_MIN_WINDOW` in a desktop window's
