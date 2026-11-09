@@ -371,6 +371,55 @@ which no customer can reach mid-hold. The next capture runs item 1 (kills
 and cuts, every engine), 1b's `unname-wireguard-server`, item 5's three
 failures and item 6 again, with a WFP dump at each new plan.
 
+### What changed for those six (branch `claude/reconnect-hold-r4`)
+
+Unit-tested, none of it has carried a packet:
+
+1. **An empty resolver read keeps the resolvers in force**
+   (`Plan::keeping_resolvers`): in `Hold::reread`, in
+   `Engines::reconnect_hold_plan` (the resolvers of the plan in force), and
+   in `Plan::widened_by` (the plan armed before, when the setting is said
+   again over a link that is down). Port 53 to anywhere now comes only from
+   a first read that found none, or a failed read with none held. Item 7 is
+   restated below to match.
+2. **The plan follows a new address**: the service registers
+   `NotifyUnicastIpAddressChange`, and for 5 s after any address change
+   (`FOLLOW_A_CHANGE_FOR`) every status read reads the network again,
+   whatever the 10 s `REREAD_EVERY` says -- a roam's resolvers are written
+   after its address, so one read at the change is not enough. A plan WFP
+   refuses in that time is not tried at every read for the same change.
+   The 10 s re-read stays as the backstop (and is all there is if the
+   registration fails, which `cleanup.log` says).
+3. **The app reads status every 500 ms while an armed tunnel is up**
+   (`ARMED_LIVENESS_POLL_MS`; 1 s otherwise, and with the setting off). The
+   adapter-gone check still runs only on a status read, so item 1's "within
+   a second" is restated below as the first read after the adapter is gone.
+4. **The reason stays for the gap**: once a read in a gap has said why
+   nothing is held, a later "armed" in the same gap -- the next session
+   armed as it comes up -- keeps that reason until the gap ends
+   (`keptGapReason`, `holdInGap`); a new hold in the gap ends it.
+5. **Disconnect says neither until its reply**: from the press, while the
+   store says holding (or unanswered, or letting go), the headline is
+   "Disconnecting... / Neoxify is closing the VPN connection." and the hold's
+   words say nothing (`releaseAwaited`); the reply's `holdStore.released()`
+   brings "You're not protected", true by then.
+6. **The service says it is letting go before it does**: a new status word,
+   `lettingGo` (`Report::LettingGo`), which the app says as neither blocked
+   nor open. `hold_through_connect`'s two let-gos (a connect the hold does
+   not cover, a WireGuard server it cannot name) and the service's stop set
+   it, wait for one status read to have carried it -- at most 0.6 s
+   (`LET_GO_SAID_WITHIN`), the pipe still answering on a stop -- and only
+   then let go. The app reads every 400 ms in a gap now (was 2 s) and while
+   it dials, so a read comes inside that. **A crash or a kill of the service
+   cannot warn the app first**: there the screen says "blocked" until its
+   next read finds the service gone (about 0.4 s in a gap), over traffic
+   already leaving. That stays a gap, and the release note says so.
+
+`thirty_two_let_goes_said_first_against_readers_and_disconnects` races 32
+holds' let-gos against status readers and the customer's Disconnect: no
+reader sees "not held" before "letting go", none sees "holding" after it,
+and every WFP session is closed once. A unit test, not a capture.
+
 ## Method
 
 As the 2026-10-05 entry in the journal: `pktmon start --capture --comp nics`
@@ -409,8 +458,14 @@ filters are named `Neoxify reconnect hold: ...`, in their own sublayer.
    disable to the next tunnel; `reconnect-hold.log` shows the hold put in
    by "the tunnel adapter is gone" and nothing let go of before the next
    tunnel is up (no "could not be named", no `tunnelNotPermitted` on
-   screen); the status says the tunnel ended within a second of the
-   disable, not "Connected".
+   screen); the status says the tunnel ended at the first status read after
+   the adapter is gone, not "Connected" -- the app reads every 500 ms while
+   an armed tunnel is up. **(restated, fourth round)** This said "within a
+   second of the disable". `Disable-NetAdapter` itself takes 0.4 to 0.7 s,
+   and the adapter-gone check runs only on a status read (it was every
+   second, and the status said the tunnel ended 0.37 to 1.77 s after the
+   command), so the measure is the read: no read after the adapter is gone
+   may still say connected.
    **(new)** WireGuard, both ways the second capture leaked: the tunnel
    service stopped from outside (`Stop-Service 'WireGuardTunnel$neoconnect'`,
    at least 7 times, so some take seconds -- `sc query` shows `STOP_PENDING`),
@@ -528,16 +583,49 @@ filters are named `Neoxify reconnect hold: ...`, in their own sublayer.
    "Checking connection..." from the moment the service says it, and sends
    a plain "lost" toast after the held one. A one-second re-check of the
    state is not spoken again by the screen reader.
+   **(new, fourth round)** The three timing failures of the third capture,
+   frame by frame against the service log:
+   - Disconnect mid-hold: from the press to the reply, "Disconnecting...
+     Neoxify is closing the VPN connection." -- neither "blocked" nor "not
+     protected" -- then "You're not protected", never before the service's
+     let-go line.
+   - The service stopped mid-hold (`Stop-Service`): the status says
+     `lettingGo` (`reconnect-hold.log`: "letting go" before "let go of"), the
+     screen says neither, and no "blocked" stands after the let-go line.
+     Then "isn't answering ... checking". A kill of the service process
+     cannot warn first: run it once and record how long "blocked" stood
+     after the kill (expected: up to one 400 ms gap read), as the stated
+     gap.
+   - A WireGuard rung let go partway (`unname-wireguard-server`): `lettingGo`
+     before the let-go (no "blocked" after it), then the reason, and the
+     reason kept through the next session's "armed" until the tunnel is
+     proved -- never "checking whether other connections ... are blocked"
+     after `tunnelNotPermitted`.
 6. **The LAN while held, and after roaming.** A LAN host (the VirtualBox
    gateway, a share on the host-only network) answers while held. Then
    change the guest's network during a long wait (switch the adapter to
    another NAT network or host-only subnet): within ~10 s the new LAN's
    hosts answer and the new network's resolver is permitted; the old
    LAN's is not.
+   **(restated, fourth round)** Within about a second of the new address
+   (`NotifyUnicastIpAddressChange`, then every status read for 5 s), not
+   10 s: the old LAN's frames and lookups to the old resolvers end within
+   1 s of the new address, with a WFP dump at each "new plan" log line. And
+   the cable-out moments keep the old resolvers -- no `dns_anywhere` on
+   status or screen, no port 53 to a resolver the guest is not configured
+   with.
 7. **Resolvers unread.** With DNS removed from every non-tunnel adapter
-   (static, no servers): the status says `dns_anywhere`, the app shows
-   the port-53 note, and the capture shows port 53 to anywhere permitted
-   -- the stated broad rule, nothing wider.
+   (static, no servers) **before the connect**: the status says
+   `dns_anywhere`, the app shows the port-53 note, and the capture shows
+   port 53 to anywhere permitted -- the stated broad rule, nothing wider.
+   **(restated, fourth round)** The third capture removed DNS mid-hold. A
+   read that finds no resolvers while some are in force now keeps those
+   (that is what a network cut reads: an adapter that is down is skipped,
+   and every cut opened port 53 to anywhere that way), so mid-hold it no
+   longer says `dns_anywhere`. Removed before the connect, the first read
+   finds none and the broad rule is said; removed mid-hold, check the
+   opposite: the resolvers in force stay, and nothing is said about port
+   53 to anywhere.
 8. **Off is off.** Setting off (the default), each drop above leaves the
    machine fail-open exactly as before: no hold, no filter, no note --
    and in a release build there is no switch at all.
