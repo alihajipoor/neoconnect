@@ -289,6 +289,9 @@ function serviceStatus(): Promise<VpnStatus> {
   // a release answered, a connect the hold does not cover sent -- is older
   // than that, and its "holding" is not taken over it (`observeRead`).
   const mark = holdStore.decisionMark();
+  // And whether a connect was on the wire as it was sent: one that keeps
+  // the service's thread is what leaves a read unanswered then.
+  const dials = holdStore.dialMark();
   return withTimeout(invoke<VpnStatus>("vpn_status"), "vpn_status").then(
     (status) => {
       // The service's word on the reconnect hold, from every read: the one
@@ -299,16 +302,19 @@ function serviceStatus(): Promise<VpnStatus> {
     (err: unknown) => {
       // Unanswered -- a restart -- and whatever it last said about the hold
       // is no longer known: after a restart it is gone. Said as being
-      // checked, never as blocked nor as open. Not for a read a connect on
-      // the wire left unanswered, unless the service is not there at all.
-      holdStore.unanswered(serviceGone(err));
+      // checked, never as blocked nor as open. Not for a read sent while a
+      // connect was on the wire, or before one went on or came off it,
+      // unless the service is not there at all.
+      holdStore.unanswered(serviceGone(err), dials);
       throw err;
     },
   );
 }
 
 function serviceDisconnect(): Promise<void> {
-  return withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect").then(
+  // Said as being let go of before it is sent, over a hold: the service lets
+  // go on receipt, and only the reply says it has (`holdStore.disconnecting`).
+  return holdStore.disconnecting(() => withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect")).then(
     () => {
       // A Disconnect lets go of the hold on receipt: dropped from the screen
       // with its reply, not at the next status (`holdStore.released`).

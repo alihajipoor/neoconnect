@@ -94,10 +94,17 @@ describe("the reconnect hold's gate", () => {
     // word on the hold that came after it (`observeRead`).
     expect(status).toContain("const mark = holdStore.decisionMark();");
     expect(status).toContain("holdStore.observeRead(mark, status.reconnectHold);");
-    expect(status).toContain("holdStore.unanswered(serviceGone(err));");
+    // Unanswered, decided by where connects were as the read was sent.
+    expect(status).toContain("const dials = holdStore.dialMark();");
+    expect(status).toContain("holdStore.unanswered(serviceGone(err), dials);");
     expect(dash).not.toContain("holdStore.observe(status.reconnectHold);");
     const disconnect = dash.slice(dash.indexOf("function serviceDisconnect(): Promise<void> {"));
     expect(disconnect.slice(0, disconnect.indexOf("\n}\n"))).toContain("holdStore.released();");
+    // And said as being let go of before it is sent: every plain Disconnect,
+    // the failed failover's teardown among them (the VM, round 4).
+    expect(disconnect.slice(0, disconnect.indexOf("\n}\n"))).toContain(
+      'return holdStore.disconnecting(() => withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect")).then(',
+    );
     const hold = source("./reconnect-hold.ts");
     expect(hold).toContain("released: () => holdStore.released(),");
   });

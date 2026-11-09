@@ -95,7 +95,9 @@ export type ReconnectHold =
    * the service's own "not held" says traffic goes out without Neoxify. The
    * app's word when a connect the hold does not cover has been sent, which
    * the service lets go of the hold before it dials -- if it runs at all --
-   * and the service has not yet said so (`holdStore.lettingGo`). And the
+   * and the service has not yet said so (`holdStore.lettingGo`); and when a
+   * plain Disconnect has been sent, which it lets go of the hold on, and has
+   * not answered (`holdStore.disconnecting`). And the
    * service's own, said before a let-go the app cannot see coming (a
    * WireGuard server it cannot name, the service stopping), so the screen
    * never says "blocked" over a machine no longer held. */
@@ -570,6 +572,13 @@ let decisions = 0;
  * with them, and a status read it leaves unanswered meanwhile says nothing
  * about whether it runs. */
 let connecting = 0;
+/** How many times a connect has gone on or come off the wire: a read sent
+ * before one of them is one a connect may have kept waiting (`dialMark`). */
+let dialMoves = 0;
+/** Plain Disconnects sent and not yet settled (`disconnecting`): the
+ * service lets go of the hold on receipt, so a read that still says
+ * "holding" meanwhile was answered before it got there. */
+let disconnectsSent = 0;
 /** A connect the hold does not cover has been sent (`lettingGo`) and has
  * not answered: until it has, a read that still says "holding" was
  * answered before that connect reached the service's thread -- queued
@@ -617,23 +626,32 @@ export const holdStore = {
   observeRead(mark: number, raw: unknown): void {
     if (mark !== decisions) return;
     const next = readHold(raw);
-    if (lettingGoSent && next?.state === "holding") return;
+    if ((lettingGoSent || disconnectsSent > 0) && next?.state === "holding") return;
     set(next);
+  },
+  /** Where connects are as a status read is sent, for `unanswered`: null
+   * while one is on the wire. */
+  dialMark(): number | null {
+    return dialMarkNow();
   },
   /** A status read went unanswered: whatever the service last said about
    * the hold is no longer known -- after a restart it is gone -- so it is
    * said to be being checked, never blocked nor open. Nothing said before
-   * stays nothing.
+   * stays nothing, and a reason the service gave for holding nothing
+   * stays that reason: nothing held is still nothing held.
    *
-   * Not while a connect is on the wire (`dialling`), unless the service is
-   * gone (`gone`: its pipe is not there, or it is shutting down): its one
-   * thread is dialling, and a read it answers late says nothing about
+   * Not for a read sent while a connect was on the wire, or before one went
+   * on or came off it (`sent`, the read's `dialMark`), unless the service
+   * is gone (`gone`: its pipe is not there, or it is shutting down): its
+   * one thread was dialling, and a read it answers late says nothing about
    * whether it runs. On the VM an IKEv2 connect left every read unanswered
    * for its six seconds, and "Neoxify's service isn't answering" stood
-   * over a service that was dialling. */
-  unanswered(gone = false): void {
-    if (held === null) return;
-    if (connecting > 0 && !gone) return;
+   * over a service that was dialling -- and, asked when the read timed out
+   * rather than when it was sent, for 0.4 s more after that connect had
+   * answered (round 4). */
+  unanswered(gone = false, sent: number | null = dialMarkNow()): void {
+    if (held === null || held.state === "notHeld") return;
+    if (!gone && (sent === null || sent !== dialMoves)) return;
     set({ state: "unanswered" });
   },
   /** The service answered a request that lets go of the hold: the
@@ -665,6 +683,29 @@ export const holdStore = {
     lettingGoSent = true;
     set({ state: "lettingGo" });
   },
+  /** A plain Disconnect -- the customer's, or a pass's own teardown, the
+   * failed failover's among them -- is sent by `send`. The service lets go
+   * of the hold on receipt and answers after its teardown, so a hold the
+   * screen says is held, or may be (`unanswered`), is said as being let go
+   * of from before it is sent (`lettingGo`): neither blocked nor open,
+   * until its reply drops it (`released`). The failed failover's teardown
+   * said nothing of its own, and "blocked" stood 0.41 s after the service
+   * had let go (the VM, round 4). Until it settles, a read that still says
+   * "holding" was answered before the Disconnect got there and is not
+   * taken. Returns what `send` does. */
+  disconnecting<T>(send: () => Promise<T>): Promise<T> {
+    if (held?.state === "holding" || held?.state === "unanswered") {
+      decisions += 1;
+      set({ state: "lettingGo" });
+    }
+    disconnectsSent += 1;
+    const done = () => {
+      disconnectsSent -= 1;
+    };
+    const work = send();
+    work.then(done, done);
+    return work;
+  },
   /** A reconnect's teardown (`vpn_disconnect_for_reconnect`) answered over
    * a tunnel the service had said was armed: it holds the gap from that
    * teardown on (`hold_for_reconnect`). Said on that answer, not at the
@@ -682,8 +723,10 @@ export const holdStore = {
    * `work`. */
   dialling<T>(work: Promise<T>): Promise<T> {
     connecting += 1;
+    dialMoves += 1;
     const done = () => {
       connecting -= 1;
+      dialMoves += 1;
       if (connecting === 0) lettingGoSent = false;
     };
     work.then(done, done);
@@ -695,10 +738,16 @@ export const holdStore = {
     changes = 0;
     decisions = 0;
     connecting = 0;
+    dialMoves = 0;
+    disconnectsSent = 0;
     lettingGoSent = false;
     listeners.clear();
   },
 };
+
+function dialMarkNow(): number | null {
+  return connecting > 0 ? null : dialMoves;
+}
 
 function set(next: ReconnectHold | null): void {
   if (sameHold(next, held)) return;
