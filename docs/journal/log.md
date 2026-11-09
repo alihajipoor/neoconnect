@@ -7797,3 +7797,60 @@ empty read, re-read on an address change, the disable's read cadence or
 the item restated, two screen fixes, tell the app before letting go),
 then a fourth capture of items 1, 1b (`unname-wireguard-server`), 5 and 6.
 The constant flips only when every gate passes, in a commit of its own.
+
+## 2026-11-09 — the kill switch's fourth VM proof
+
+The reconnect hold ("Block the internet while reconnecting") was captured
+a fourth time, on `claude/reconnect-hold-r4` at `b8bf40a` (desktop 0.9.57
+test installer), in `Neoxify-Test` at the NIC. **Not proven.**
+`RECONNECT_HOLD_PROVEN` stays false and nothing shipped. Per-item results
+and the fixes are in `docs/reconnect-hold-proof.md`.
+
+Gates: item 1 Xray PASS; item 1 WireGuard and OpenVPN PARTIAL (OpenVPN
+TCP has no server); items 1b and 2 PASS; items 3 and 4 FAIL; item 5 FAIL;
+items 6 to 8 PASS.
+
+**What held:** every engine drop, again. 123 kills, stops and adapter
+disables and 14 network cuts on Reality, TLS, Trojan, Shadowsocks,
+Stealth Web, OpenVPN UDP and WireGuard sent no leaker frame, no port 53
+elsewhere and no stray IPv6, from the drop to the next confined tunnel --
+two natural slow WireGuard stops (2.5 and 3.3 s pending) among them. Every
+failure of the third round passed: no port 53 elsewhere after a cut, the
+roam's plan followed the new address in 0.42 s, no status read said
+connected after a disable, the reason after `tunnelNotPermitted` stayed,
+and Disconnect, the service stop and a WireGuard rung let go partway said
+neither before the let-go. With the setting off, every drop leaked as
+before.
+
+**What failed:**
+- A WireGuard "not confirmed" landing let go on the third read: two reads
+  a second apart measured 0.90 s by reply. The safe side.
+- A 72 s stall of the whole guest during a held cut: the service's idle
+  watchdog took it for the app going silent and let go, and the reconnect
+  then dialled unheld -- 94 leaker frames before the confinement.
+- In a failover, a status read that timed out during an IKEv2 connect put
+  "isn't answering" over the reason for 0.41 s; and after a failover's own
+  teardown, "blocked" stood 0.42 s past the let-go while traffic left.
+
+**Not run or unverified:** OpenVPN TCP (no server in any location), the
+attempts limit and Gaming mode (no customer can reach them mid-hold), the
+device limit's server refusal, the refused confinement (no switch), the
+release installer on the guest, whether a laptop's sleep trips the same
+watchdog, a real ISP's IPv6 path, a censored network, a physical laptop.
+
+**Traps:**
+- The guest stalled five times (18 s to about 8 minutes, heartbeat flat,
+  cause unknown; one hard reset). A stall is what found the watchdog
+  fault.
+- A network cut removes the guest's fake IPv6 address; `ipv6-setup.ps1`
+  puts it back.
+- A `tail -f` on the host blocked a run script's `Add-Content` twice.
+
+**Next:** the four fixes in the proof doc (two reads 500 ms apart, a
+machine stall is not silence, no "isn't answering" for a read sent during
+a connect, the app's own teardown says neither until its reply), then a
+fifth capture of items 3, 4 and 5 with the VM paused during a held cut.
+Before any capture can say proven, the owner decides OpenVPN TCP (a
+server that offers it, or stated unproven in the release note) and how
+the checklist states the attempts limit and Gaming mode. The constant
+flips only when every gate passes, in a commit of its own.
