@@ -1302,12 +1302,27 @@ impl Hold {
     /// tunnel. Otherwise the plan in force stays. Nothing in force, nothing
     /// done.
     pub fn replan(&self, plan: Plan, needed: bool) -> bool {
+        self.replan_over(None, plan, needed) == Some(true)
+    }
+
+    /// `replan`, and with `from` only over that plan: the one a re-read was
+    /// made from (`reread`), which reads the network with the lock let go.
+    /// A plan moved meanwhile -- a connect's replan with the server it
+    /// dials, the hold moved onto the tunnel that came up -- is newer than
+    /// one made from the plan before it, and is left in force: `None`, for
+    /// the next read to read again from it. Put over it, the re-read's plan
+    /// dropped what the connect had added, and a WireGuard server the hold
+    /// was meant to let through was refused under it.
+    fn replan_over(&self, from: Option<&Plan>, plan: Plan, needed: bool) -> Option<bool> {
         let mut state = self.lock();
         if state.engine == 0 {
-            return false;
+            return Some(false);
+        }
+        if from.is_some_and(|from| state.held.as_ref() != Some(from)) {
+            return None;
         }
         if state.held.as_ref() == Some(&plan) {
-            return true;
+            return Some(true);
         }
         match self.ops.install(&plan) {
             Ok(installed) => {
@@ -1321,7 +1336,7 @@ impl Hold {
                     self.note(&format!("the plan before was closed with {err:#010x}; its session ends with the process"));
                 }
                 self.note(&format!("{what}, with a new plan: {} filters", installed.filters));
-                true
+                Some(true)
             }
             Err(e) if needed => {
                 self.release_locked(
@@ -1331,12 +1346,12 @@ impl Hold {
                         format!("the tunnel that came up could not be put in the hold's plan, so the hold was let go of: {e}"),
                     ),
                 );
-                false
+                Some(false)
             }
             Err(e) => {
                 drop(state);
                 self.note(&format!("a new plan would not go in, so the one in force stays: {e}"));
-                false
+                Some(false)
             }
         }
     }
@@ -1579,9 +1594,18 @@ impl Hold {
         if next == held {
             return false;
         }
-        if self.replan(next, false) {
-            self.note("the network changed while filters were in force, so the LAN, resolvers and tunnels they permit were read again");
-            return true;
+        match self.replan_over(Some(&held), next, false) {
+            Some(true) => {
+                self.note("the network changed while filters were in force, so the LAN, resolvers and tunnels they permit were read again");
+                return true;
+            }
+            Some(false) => {}
+            // Moved while this read the network: not a refusal, and the
+            // network is read again from the plan in force at the next read.
+            None => {
+                self.lock().reread_at = None;
+                return false;
+            }
         }
         let mut state = self.lock();
         if state.engine != 0 {
@@ -2124,6 +2148,9 @@ mod tests {
         changed: Mutex<Option<Instant>>,
         /// Every install asked for, refused or not.
         tries: std::sync::atomic::AtomicUsize,
+        /// Run once as the LAN is next read: what another thread does while
+        /// a re-read reads the network.
+        while_lan_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     impl HoldOps for Fake {
@@ -2156,6 +2183,10 @@ mod tests {
             Some(TUNNEL)
         }
         fn lan(&self) -> Option<(Vec<Prefix>, Vec<Ipv4Addr>)> {
+            let meanwhile = self.while_lan_read.lock().unwrap().take();
+            if let Some(meanwhile) = meanwhile {
+                meanwhile();
+            }
             Some(self.lan.lock().unwrap().clone())
         }
         fn programs(&self) -> Vec<PathBuf> {
@@ -2500,6 +2531,45 @@ mod tests {
         let at3 = at2 + Duration::from_secs(1);
         *fake.changed.lock().unwrap() = Some(at3);
         assert!(hold.reread(at3 + Duration::from_millis(100)), "a new change was not followed after a refusal");
+    }
+
+    /// A re-read reads the network with the lock let go, from the plan in
+    /// force when it began. A connect's replan that lands meanwhile -- the
+    /// WireGuard server a reconnect dials, during a roam whose new address
+    /// has every status read re-reading -- is newer, and stays: put over
+    /// it, the re-read's plan dropped that server, and the hold refused the
+    /// tunnel it was meant to let carry. The next read follows the network
+    /// from the plan in force.
+    #[test]
+    fn a_reread_never_undoes_a_replan_made_while_it_read_the_network() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan().with_dns(resolvers()), false);
+        assert!(hold.engage(7, "a drop"));
+        let server = Ipv4Addr::new(203, 0, 113, 8);
+        let before = plan();
+        let mut nodes = before.nodes.clone();
+        nodes.push(server);
+        let dialled = Plan::new(before.tunnels.clone(), before.programs.clone(), nodes, before.lan.clone(), before.dhcp_servers.clone())
+            .with_dns(resolvers());
+        let roamed = Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24);
+        *fake.lan.lock().unwrap() = (vec![roamed], Vec::new());
+        {
+            let hold = Arc::clone(&hold);
+            let dialled = dialled.clone();
+            *fake.while_lan_read.lock().unwrap() = Some(Box::new(move || assert!(hold.replan(dialled, true))));
+        }
+        let tries = fake.tries.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(!hold.reread(Instant::now()), "a re-read went in over a plan moved while it read");
+        assert_eq!(fake.tries.load(std::sync::atomic::Ordering::SeqCst), tries + 1, "only the connect's replan went in");
+        assert_eq!(hold.held_plan(), Some(dialled.clone()), "a re-read undid the connect's replan");
+        assert!(hold.holding());
+
+        // Not a refusal: the next read reads again, from the plan in force.
+        assert!(hold.reread(Instant::now()), "the roam was not followed after the race");
+        let held = hold.held_plan().unwrap();
+        assert!(held.nodes.contains(&server), "the server the connect dials was dropped");
+        assert_eq!(held.lan, vec![roamed]);
     }
 
     /// A let-go the app cannot see coming is said first: from the moment it
