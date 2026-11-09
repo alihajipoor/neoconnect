@@ -46,8 +46,15 @@ import { serviceGone, withTimeout } from "./service-call";
  * customer can turn on and then be told other connections are blocked. So
  * Settings does not draw it (an unhonoured setting is not drawn), every
  * connect tells the service it is off, and nothing on screen speaks of it.
- * Flipped in a commit of its own. */
-export const RECONNECT_HOLD_PROVEN = false;
+ * Flipped in a commit of its own.
+ *
+ * True since desktop 0.9.59, when the owner chose to ship it as an opt-in
+ * beta: off by default (`blockWhileReconnecting`), tagged Beta in
+ * Settings. The VM's captures showed no leak while held (2026-11-09).
+ * What they could not reach -- a real machine stall, laptop sleep, IPv6,
+ * a censored network -- is listed in docs/reconnect-hold-proof.md and
+ * stays unproven. */
+export const RECONNECT_HOLD_PROVEN = true;
 
 /** Whether this build offers it: once proved, or in a test installer built
  * for the VM with `VITE_RECONNECT_HOLD=1` (build-test-installer.yml's

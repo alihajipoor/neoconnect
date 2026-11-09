@@ -454,11 +454,11 @@ describe("a drop the real reconnect does not take up", () => {
 });
 
 describe("whether this build offers it", () => {
-  it("does not until a capture has proved it: a release build carries no switch", () => {
+  it("does in a release build since 0.9.59, and holds only for a customer who turned it on", () => {
     // Tests run as a release is built: no VITE_RECONNECT_HOLD.
-    expect(RECONNECT_HOLD_PROVEN).toBe(false);
-    expect(RECONNECT_HOLD_OFFERED).toBe(false);
-    expect(holdWanted(true)).toBe(false);
+    expect(RECONNECT_HOLD_PROVEN).toBe(true);
+    expect(RECONNECT_HOLD_OFFERED).toBe(true);
+    expect(holdWanted(true)).toBe(true);
     expect(holdWanted(false)).toBe(false);
   });
 });

@@ -5,18 +5,19 @@ import { ATTEMPT_MAX_MS, BLOCKED_WAIT_MAX_MS } from "./auto-reconnect";
 import { DICTIONARIES } from "./i18n";
 import { RECONNECT_HOLD_OFFERED, RECONNECT_HOLD_PROVEN } from "./reconnect-hold";
 
-/** "Block the internet while reconnecting" is not offered until a capture
- * has proved it (`RECONNECT_HOLD_PROVEN`). These hold the gate where it is
- * read: a release build draws no switch, tells every connect the setting
- * is off, and says nothing of a hold -- whatever a test build saved. */
+/** "Block the internet while reconnecting" was not offered until the owner
+ * chose to ship it as an opt-in beta in 0.9.59 (`RECONNECT_HOLD_PROVEN`).
+ * These hold the gate where it is read: with it shut, a build draws no
+ * switch, tells every connect the setting is off, and says nothing of a
+ * hold -- whatever a test build saved. */
 
 const source = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
 const repo = (path: string) => source(`../../../../${path}`);
 
 describe("the reconnect hold's gate", () => {
-  it("is shut in a build that sets nothing, as a release is built", () => {
-    expect(RECONNECT_HOLD_PROVEN).toBe(false);
-    expect(RECONNECT_HOLD_OFFERED).toBe(false);
+  it("is open in a build that sets nothing, as a release is built, since 0.9.59", () => {
+    expect(RECONNECT_HOLD_PROVEN).toBe(true);
+    expect(RECONNECT_HOLD_OFFERED).toBe(true);
   });
 
   it("draws the switch only in a build that offers it", () => {
