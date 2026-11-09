@@ -12,6 +12,27 @@
 # system-wide.
 $ErrorActionPreference = "Stop"
 
+# Every download, tried again on failure: GitHub's release downloads
+# answered 504 for anonymous traffic for hours (2026-11-09), and one 504
+# failed the whole fetch -- and with it CI's desktop job and a release.
+# What is kept is still checked against its pinned hash below, so a
+# retry can only cost time.
+function Save-Download([string]$Uri, [string]$OutFile) {
+    $attempts = 6
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $Uri -OutFile $OutFile
+            return
+        } catch {
+            if ($attempt -ge $attempts) { throw }
+            $wait = 10 * $attempt
+            Write-Host "  attempt $attempt of $attempts failed ($($_.Exception.Message)); trying again in $wait s"
+            if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
+            Start-Sleep -Seconds $wait
+        }
+    }
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $resourcesDir = Join-Path $scriptDir "..\resources"
 $tempDir = Join-Path $env:TEMP "neoconnect-wireguard-fetch"
@@ -24,7 +45,7 @@ $msiUrl = "https://download.wireguard.com/windows-client/wireguard-amd64-1.1.msi
 $msiPath = Join-Path $tempDir "wireguard-amd64-1.1.msi"
 
 Write-Host "Downloading $msiUrl ..."
-Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath
+Save-Download -Uri $msiUrl -OutFile $msiPath
 
 $extractDir = Join-Path $tempDir "extract"
 Write-Host "Extracting (administrative install, not a real install)..."
@@ -70,7 +91,7 @@ New-Item -ItemType Directory -Force -Path $xrayTemp | Out-Null
 $xrayZip = Join-Path $xrayTemp "xray.zip"
 $xrayUrl = "https://github.com/XTLS/Xray-core/releases/download/$xrayVersion/Xray-windows-64.zip"
 Write-Host "Downloading $xrayUrl ..."
-Invoke-WebRequest -Uri $xrayUrl -OutFile $xrayZip
+Save-Download -Uri $xrayUrl -OutFile $xrayZip
 # Hashed with .NET, not the Utility module's file-hash cmdlet:
 # `pnpm run fetch-binaries` from a pwsh step (the release and the
 # test-installer workflows) starts this Windows PowerShell with
@@ -116,7 +137,7 @@ New-Item -ItemType Directory -Force -Path $ovpnTemp | Out-Null
 $ovpnMsi = Join-Path $ovpnTemp "openvpn.msi"
 $ovpnUrl = "https://swupdate.openvpn.org/community/releases/OpenVPN-$ovpnVersion-I001-amd64.msi"
 Write-Host "Downloading $ovpnUrl ..."
-Invoke-WebRequest -Uri $ovpnUrl -OutFile $ovpnMsi
+Save-Download -Uri $ovpnUrl -OutFile $ovpnMsi
 
 $ovpnExtract = Join-Path $ovpnTemp "extract"
 $proc = Start-Process msiexec.exe -ArgumentList "/a `"$ovpnMsi`" /qn TARGETDIR=`"$ovpnExtract`"" -Wait -PassThru
@@ -172,7 +193,7 @@ New-Item -ItemType Directory -Force -Path $divertTemp | Out-Null
 $divertZip = Join-Path $divertTemp "windivert.zip"
 $divertUrl = "https://github.com/basil00/WinDivert/releases/download/v$divertVersion/WinDivert-$divertVersion-A.zip"
 Write-Host "Downloading $divertUrl ..."
-Invoke-WebRequest -Uri $divertUrl -OutFile $divertZip
+Save-Download -Uri $divertUrl -OutFile $divertZip
 Expand-Archive -Path $divertZip -DestinationPath (Join-Path $divertTemp "extract") -Force
 
 # Located by search rather than a hardcoded "WinDivert-x.y.z-A\x64\"
@@ -211,7 +232,7 @@ New-Item -ItemType Directory -Force -Path $wstunnelTemp | Out-Null
 $wstunnelTgz = Join-Path $wstunnelTemp "wstunnel.tar.gz"
 $wstunnelUrl = "https://github.com/erebe/wstunnel/releases/download/v$wstunnelVersion/wstunnel_${wstunnelVersion}_windows_amd64.tar.gz"
 Write-Host "Downloading $wstunnelUrl ..."
-Invoke-WebRequest -Uri $wstunnelUrl -OutFile $wstunnelTgz
+Save-Download -Uri $wstunnelUrl -OutFile $wstunnelTgz
 # The release is a .tar.gz, not a zip, so Expand-Archive cannot be
 # reused. Windows 10+ ships tar, but it must be called by full path:
 # on a machine with Git for Windows on PATH, a bare `tar` resolves to
