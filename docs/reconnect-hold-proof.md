@@ -4,13 +4,21 @@ The Windows kill switch (`service/src/engines/reconnect_hold.rs`, the
 app's `lib/reconnect-hold.ts`) is built, unit-tested and checked against
 the real filtering platform on CI (`wfp_accepts_the_hold_then_aborts`,
 which fails rather than skips wherever the filtering engine will not open,
-unless `NEOXIFY_SKIP_WFP_TESTS=1` is set off CI). Until every item below
-has passed in `Neoxify-Test`, recorded in `docs/journal/log.md`, it stays
-off:
+unless `NEOXIFY_SKIP_WFP_TESTS=1` is set off CI).
 
-- `RECONNECT_HOLD_PROVEN = false` in `apps/desktop-windows/src/lib/reconnect-hold.ts`.
-  Settings does not draw the switch, every connect sends
-  `blockWhileReconnecting: false`, and no screen speaks of a hold.
+**Since desktop 0.9.59 it is offered as an opt-in beta**, off by default
+and tagged Beta in Settings. The owner decided that on 2026-11-09, after
+the fifth capture below showed no leak while held, with what the VM
+could not prove stated there. It is not proven, and nothing may call it
+proven, until the gaps listed under that capture are closed.
+
+Before that, it stayed off until every item below had passed in
+`Neoxify-Test`, recorded in `docs/journal/log.md`:
+
+- `RECONNECT_HOLD_PROVEN = false` in `apps/desktop-windows/src/lib/reconnect-hold.ts`
+  (true since 0.9.59). With it false, Settings does not draw the switch,
+  every connect sends `blockWhileReconnecting: false`, and no screen
+  speaks of a hold.
   `reconnect-hold.wiring.test.ts` fails if the row is bound some other way
   or the release workflow sets the build flag.
 - A VM build that offers it: run **Build test installer (unsigned)**
@@ -748,6 +756,61 @@ is in the list the VM cannot prove, and three rounds have not run them:
 The next capture runs items 3, 4 and 5 again in full, with a paused VM
 during a held cut, and one kill and one cut per engine for item 1 to show
 nothing else moved.
+
+## The second 2026-11-09 capture (build `de9ffbb`): no leak, shipped as a beta
+
+Round five reran only round four's failures, plus one kill per engine as
+a smoke check. It used `claude/reconnect-hold-r5` at `de9ffbb` (desktop
+0.9.58 plus the four round-four fixes: reads 500 ms apart, the
+unanswered rule judged when a read is sent, the watchdog's stall
+check, and the teardown's let-go word), from **Build test installer
+(unsigned)** run 42693220216. The method was round four's. Defender in
+the guest, with real-time protection on, scanned both installers clean
+before the install. (A first rebuild had been flagged by its machine
+learning and was not used; Defender was not changed.) The tooling is in
+`C:\Users\aliha\Claude\vm\tools\hold5b`, and the raw results in
+`C:\Users\aliha\Claude\vm\results\hold5b`.
+
+**No leaker frame while any hold was in force, in any run.**
+
+- **Smoke.** The Xray taskkill held 0.59 s after the kill, reconfined,
+  and let go after 13 s. The WireGuard hard kill held 112 standing
+  filters and let go after 8 s. Neither had leaker frames, traffic
+  outside the tunnel, or DNS sent elsewhere.
+- **Not-confirmed WireGuard (item 2).** Of 8 kills, 6 landed not
+  confirmed. Five of those let go on the second fresh read, with the
+  reads 0.89 to 1.03 s apart. One let go on the 20th read, 25 s after
+  landing. That is the safe direction, and the cause is not established.
+- **Machine stall (item 3).** Unverified. `VBoxManage controlvm pause`
+  freezes the guest's clock as well: 75 s of pause moved the guest
+  counter 1.8 s, so the watchdog's stall path never ran. The hold stood
+  throughout. A frozen app was let go after 66 s with "the app went
+  silent", as designed.
+- **Words (item 5).** The failover case (`fo`) had two
+  "Neoxify's service isn't answering" frames over a service that was
+  answering:
+  - 2 s from a read sent during a 28 s split-tunnel change;
+  - 0.25 s from a pipe that stayed busy for its whole second of retries
+    during a connect, which the app read as the service being gone.
+
+  Both were fixed in `643631c` (a call of ours that holds the service's
+  thread now excuses an unanswered read, and a busy pipe now says busy).
+  That is unit-tested only. The other cases got the right words:
+  `foall`, a stopped service, a killed service, three failed failovers,
+  and the customer's Disconnect.
+
+Shipped in 0.9.59 as an opt-in beta. Still unproven:
+
+- the words fix on the VM;
+- the 25 s outlier;
+- a real machine stall and laptop sleep (the round-four leak's cause,
+  fixed in code). If the stall path fails, the hold lets go, which is
+  how the app behaves with the setting off;
+- a real IPv6 path, a censored network, and a physical laptop;
+- OpenVPN TCP, which has no server;
+- the attempts limit and Gaming mode mid-hold;
+- the device limit's refusal from the slot API;
+- refused confinement.
 
 ## Method
 
