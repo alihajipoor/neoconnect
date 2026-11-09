@@ -131,6 +131,246 @@ failed on:
 None of these fixes has carried a packet. Items 1, 1b, 2 and 5 below are to
 be run again for every engine, with the additions marked **(new)**.
 
+## The 2026-11-06 capture (build `47914a7`): not proven
+
+The third round ran against `main` at `47914a7` (desktop 0.9.57): a test
+installer from **Build test installer (unsigned)** with the hold offered
+and the test switches compiled in, on `Neoxify-Test`, captured at the NIC
+with `pktmon --comp nics`, the leakers running. Tooling and raw results are
+outside the repo, in `C:\Users\aliha\Claude\vm\tools\hold3` and
+`C:\Users\aliha\Claude\vm\results\hold3`.
+
+Two things differ from the earlier captures:
+
+- **The guest has IPv6 now**, through VirtualBox NAT: TCP over IPv6
+  completes and answers come back. The IPv6 checks ran on a live path, not
+  only "packets sent". A real ISP's IPv6 path is still unverified.
+- **The guest's wall clock cannot be trusted.** VirtualBox time sync was
+  measured moving it 27% fast. Every log line was stamped with the guest's
+  performance counter, the clock pktmon stamps frames with, and marker
+  frames tied each capture to the logs (residuals 0.4 ms or less).
+
+With the setting off, one forced drop per engine leaked in every gap (75 to
+175 leaker frames, the first 0.45 to 0.70 s after the drop), with no hold
+filter and the screen saying traffic goes out without Neoxify, which was
+true. So the capture sees the leak.
+
+**The hold held every engine drop.** 125 kills, stops and adapter disables
+on Reality, TLS, Trojan, Shadowsocks, Stealth Web, OpenVPN UDP and
+WireGuard: no leaker frame, no port 53 to another host and no IPv6 outside
+the allowed set, from the drop to the next confined tunnel. It failed on
+three other things: port 53 after any network change, the old network kept
+open after a roam, and the screen running ahead of or behind the service's
+release.
+
+**Item 1, Xray: FAIL.**
+- 75 kills that reconnected, 15 per protocol: every one held, no leak.
+  `cleanup.log` shows the "tunnel adapter is gone" path in 12 of 76 kills,
+  all held first. One TLS kill was a third quick death (the slow guest
+  clock); the app let go of it as designed, with nothing out before.
+- 15 disables of `neoconnect0` under a live xray.exe, 3 per protocol: no
+  leak. Held by "the tunnel adapter is gone" every time, let go of only
+  after the next confined tunnel, no "could not be named", no
+  `tunnelNotPermitted`. **But** the status said the tunnel ended 0.37 to
+  1.77 s after the disable command, over a second in 4 of 15, and the
+  screen said "Connected" until then. The confinement stayed in, so
+  nothing left.
+- 10 network cuts of 30 s, 2 per protocol: **10 of 10 leaked port 53** to a
+  resolver the guest is not configured with (a leaker's), over UDP and TCP,
+  1 to 8 frames each, 2.4 to 4.2 s after the network came back. WFP at that
+  moment shows "permit name lookups to anywhere (the resolvers could not be
+  read)". The screen had the port-53 note. Nothing else left.
+- Next confined tunnel: a median of 5.4 to 5.7 s after a kill (slowest
+  39.1 s), 5.2 to 7.7 s after a cut's network came back, and 43.8 to
+  63.6 s after a disable -- because after every disable (16 of 16) the
+  redial on the same protocol failed after 38 to 40 s (`ipv6-block.log`:
+  "neoconnect0 did not appear within 5s") and the ladder moved to another
+  protocol. Not analysed yet.
+- The refused-confinement item: unverified, as stated above.
+
+**Item 1, WireGuard and OpenVPN UDP: FAIL.**
+- WireGuard, 25 drops, no leak: 8 hard kills of wireguard.exe, 14 stops of
+  the tunnel service, 3 adapter disables with wireguard.exe running. Each
+  was held at once by the standing filters, with no "standing filters
+  taken out" and no "could not be named".
+- No stop took seconds on its own (the slowest `STOP_PENDING` of 10 was
+  913 ms). The slow stop the second capture leaked on was emulated instead,
+  by suspending wireguard.exe once the stop was pending: 3 stops pending
+  4.7 s, no leak. A natural slow stop stays **unverified**.
+- OpenVPN UDP, 10 drops, no leak: 8 kills of openvpn.exe and 2 disables of
+  its adapter. After a disable the adapter was gone until the next
+  Compatible connect, so both reconnects landed on Stealth HTTPS.
+- 4 network cuts, 2 per engine: all leaked port 53 as above, 1 to 7 frames,
+  2.4 to 4.0 s after the network came back.
+- OpenVPN TCP: not run. No server offers it.
+- 37 tunnel-up windows between drops: nothing outside the allowed set.
+
+**Items 1b and 2: FAIL, on one screen item.**
+- Standing over WireGuard: 116 filters in force before any drop. Exit IP =
+  node, downloads 29 to 38 Mbps against 29 to 39 with the setting off. None
+  after Disconnect, none with the setting turned off over a live tunnel
+  (which stayed up). A failing connect of the customer's own (88 rungs, each
+  dial sent to a documentation address by a page hook) left nothing
+  blocked. The guest's firewall could not make it fail: its address rules
+  do not stop wireguard-nt's UDP.
+- A hostname endpoint (`wg-gate.neoxify.test` in the guest's hosts file):
+  the standing filters permit the resolved address, the tunnel carries at
+  21 to 25 Mbps, and a drop redials under the hold with no leak.
+- `refuse-standing`: "not standing" in the log and no filters while up. The
+  drop was held late (`standing_refused`); the screen gave the held sentence
+  with the late note, and the "lost" toast its late words. No leaker frame
+  in that moment.
+- `unname-wireguard-server`: armed without standing. The reconnect let go
+  before it dialled (`tunnelNotPermitted` on status and screen) and
+  WireGuard came up. The 32 leaker frames between the let-go and
+  WireGuard's own block are the stated cost. **Fail:** 1.3 s after the
+  let-go the reason left the screen, and from 2.8 to 4.3 s after it the
+  screen said "checking whether other connections ... are blocked" with no
+  hold filter in force. Nothing leaked then: WireGuard's own block was up.
+- Item 2: every engine dialled and carried under the hold, exit IP = node,
+  no leak frame: WireGuard-NT at 17 to 19 Mbps (18.3 before the drop),
+  Reality, TLS, Trojan, Shadowsocks and Stealth Web at 32 to 38, OpenVPN UDP
+  at 16.1. OpenVPN TCP not run (no server). Built-in (IKEv2) is not covered,
+  by design.
+
+**Items 3 and 4: PARTIAL.** Let go with no filter left on: the tunnel
+proved; the customer's Disconnect (mid-reconnect, the pill's Stop
+connecting); Stop reconnecting; the episode's budget (3 passes, 138 s); a
+third quick death (no leaker frame over its three holds); the plan stopping
+(simulated in the page); a sign-out; the setting turned off mid-hold; IKEv2
+and Custom mode (each let go before it dialled); Repair; the app killed; the
+service restarted; a reboot (shutdown closed the app first, so the
+boot-time sweep had nothing to do); and a "not confirmed" landing (Xray let
+go 0.77 s after its first confined read, WireGuard 13 ms after its first
+fresh handshake). Item 4: the app frozen after a drop was let go after
+121 s with "no reconnect followed" and no leaker frame in the hold; a
+5-minute cut held 310 s and let go after the tunnel was back; the 40-minute
+limit, shortened to 150 s by a VM switch, let go at 151 s. Not passed:
+
+- The attempts limit: not run. It cannot be reached: one pass is 88 rungs,
+  about 40 s even when every connect fails at once, so the 120 s budget
+  always ends the episode first.
+- Gaming mode: not run. Its control is disabled while reconnecting, so no
+  customer can turn it on mid-hold.
+- The device limit: unverified. Only the app's path for the error's words
+  was made, not the slot API's own refusal.
+- A "not confirmed" landing whose confinement is refused, held until
+  Disconnect: could not be made, unverified.
+- The 5-minute cut leaked 2 port-53 frames 4.1 to 4.6 s after the network
+  came back, the same cause as item 1.
+- Seen, not judged: after a sign-out the still-running pass held again for
+  2.7 s until the sign-out's teardown, and after a service restart the
+  continuing reconnect held again 13 s later.
+
+None of these gaps is one this file accepts as unverifiable on the VM (a
+real IPv6 path, a censored network, a physical laptop, the refused
+confinement).
+
+**Item 5: FAIL, on timing; no leaker frame while any hold was in.** Passed:
+a held drop with the window behind (held sentence at +1.23 s, the held
+"lost" toast, "back" at the release), and no claim of traffic going out
+over a hold in ~100 earlier kills read again; the third quick death; the
+failover with its node blocked in the guest's firewall (held sentence
+under "Checking connection..." from 0.63 s after the hold went in to the
+release, then "back"); between attempts (never "Couldn't connect."); Stop
+reconnecting; the switch confirmation; a failover whose every rung fails
+(made by page-hook errors, not the firewall); the IKEv2 rung let go
+partway; the `role=status` region; 1.5 s of nothing, then "checking"; and
+no release before the next tunnel was up and confined. Failed:
+
+- **Disconnect mid-hold:** at the press the held sentence went and
+  "DISCONNECTING You're not protected" stood up to 0.30 s before the
+  service let go (1.5 s before its reply). Nothing left in that time.
+- **Service restarted mid-hold:** "blocked" stood 1.7 to 1.8 s after the
+  stop had taken the hold out, while 34 leaker frames left the NIC.
+- **A WireGuard rung let go partway** (`unname-wireguard-server`):
+  "blocked" stood 0.41 s after the let-go, with 7 leaker frames.
+
+Smaller: "Connected" stood 0.87 s over the third quick death's hold before
+the app read the drop, and a dialog already open kept its plain words 0.5
+to 0.7 s into a hold. Not run: the plan stopping under a capture, and the
+"hasn't yet confirmed" toast (no gap brought the toast before the
+service's word).
+
+**Items 6 to 8: FAIL, on the roam.**
+- 6, the LAN while held: the VirtualBox gateway answered ping and TCP every
+  second, port 53 went only to the configured resolver, nothing else left.
+- 6, the roam (cable out 1.5 s, the adapter moved to another NAT network
+  with other resolvers, then back): the end state was right. The new LAN
+  answered 7.3 s after the new address, its resolvers were permitted, and
+  after the next re-read nothing went to the old network. Before that, two
+  faults. Each cable-out read found no resolvers, so port 53 was open to
+  anywhere (said on status and screen) until the next re-read, and lookups
+  to resolvers the network did not have left both ways. And a new plan at the reconnect's connect, read
+  0.23 s before the new address, kept the old network for 6.3 s: ping and
+  TCP to the old gateway and 51 lookups to the old IPv6 resolver left the
+  NIC until the 10 s re-read.
+- 7, resolvers unread: pass. Static IPv4 with no servers and IPv6 router
+  discovery off (static alone kept DHCP's resolvers): `dns_anywhere` 3.4 s
+  later, the port-53 note 0.07 s after that, and port 53 to anywhere at the
+  NIC, nothing wider.
+- 8, off is off: a 30 s cut, an adapter disable under xray and a WireGuard
+  kill with the setting off left no hold filter, no hold in status or log
+  and no hold words, and leaked as before (85, 1152 and 93 leaker frames).
+  That a release build has no switch was read from the code and the wiring
+  test, not run. The 0.9.57 release installer was not put on the guest.
+
+**What has to change before the next capture** (from a read-only
+diagnosis of these logs and the code):
+
+1. **An empty resolver read must not open port 53.** `adapters::dns_servers`
+   skips adapters that are down, so during a cut it returns an empty list,
+   not "unread", and `Plan::with_dns([])` means `dns_anywhere`. Three
+   places build that plan: `Engines::reconnect_hold_plan`
+   (`unwrap_or_default()`), `Hold::reread` (it keeps the held resolvers only
+   when the read failed) and `Plan::widened_by` (it keeps the new, empty
+   list). An empty read should keep the resolvers in force; `dns_anywhere`
+   should come only from a first read that found none, or a failed read.
+   Item 7 then removes DNS before the connect, or is restated. Proof: the
+   same cuts and the roam with no port 53 to an unconfigured host, the
+   status never `dns_anywhere`, and WFP at cut+5 s and net-on+0.5 s naming
+   the resolvers.
+2. **The plan must follow a new address.** The 6.3 s was `Hold::replan` from
+   `hold_through_connect`, read 0.23 s before the new address, and nothing
+   read again until `REREAD_EVERY` (10 s); `tend` runs only on status reads.
+   That this read saw the old lease fits the frames but is unproven (no WFP
+   dump from that moment). Re-read on `NotifyUnicastIpAddressChange`, with
+   the 10 s re-read as the backstop (smallest version: `REREAD_EVERY` = 1 s).
+   Proof: a WFP dump at each new-plan log line, and the old LAN's frames
+   ending within 1 s of the new address.
+3. **A disable's "within a second" cannot be met at a 1 s read.** The
+   adapter-gone check runs only in `Engines::status()`, on the app's 1 s
+   read (`LIVENESS_POLL_MS`), and `Disable-NetAdapter` itself takes 0.4 to
+   0.7 s. The hold came in on that read every time; no defect in the hold.
+   Read status every 500 ms while an armed tunnel is up, or restate the item
+   as "the first status read after the adapter is gone".
+4. **The reason after `tunnelNotPermitted` must stay.** `arm_dialling` arms
+   the new WireGuard session and, for a new generation, clears `problem`, so
+   the status says armed; in a gap `gapTraffic` turns armed into
+   "unconfirmed", and 1.5 s later the screen says "checking". Once a gap's
+   read has said `notHeld`, a later armed in that gap should keep the reason
+   until the episode ends (the gap word, `Dashboard.tsx`).
+5. **Disconnect says neither until the release.** The press sets
+   "disconnecting", whose headline (`connection-evidence.ts`) is always "not
+   protected", and `HoldScene` has no disconnecting flag. The service lets go
+   on receipt (+0.30 s) and replies after its teardown (+1.5 s), so keeping
+   "blocked" until the reply would be 1.2 s stale. Say neither from the press
+   until `holdStore.released()` on the reply, under a neutral headline.
+6. **Tell the app before letting go.** The app learns of a let-go at its
+   next read: every 2 s in a gap, every 400 ms while dialling. Reading every
+   400 ms in a gap cuts the stale time to about 0.5 s. The closing fix: on a
+   stop, the service answers status "shutting down" and waits for one read
+   (at most about 0.6 s) before its teardown; in `hold_through_connect` it
+   reports a letting-go state the app says as neither, waits for one read,
+   then lets go. A crash or a kill of the service cannot warn the app first;
+   that stays a gap, stated in the release note.
+
+Also open: why the redial on the same protocol fails after a `neoconnect0`
+disable, and what item 3 should say for the attempts limit and Gaming mode,
+which no customer can reach mid-hold. The next capture runs item 1 (kills
+and cuts, every engine), 1b's `unname-wireguard-server`, item 5's three
+failures and item 6 again, with a WFP dump at each new plan.
+
 ## Method
 
 As the 2026-10-05 entry in the journal: `pktmon start --capture --comp nics`

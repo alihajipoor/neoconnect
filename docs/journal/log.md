@@ -7739,3 +7739,61 @@ Android 0.2.35 come from the release workflows on main `7bf4d950`. iOS
 - App Store version 1.0 is still waiting for review on build 15 and was
   not touched.
 - The next build number is 18.
+
+## 2026-11-06 — the kill switch's third VM proof
+
+The reconnect hold ("Block the internet while reconnecting") was captured
+a third time, on `main` at `47914a7` (desktop 0.9.57), in `Neoxify-Test`
+at the NIC. **Not proven.** `RECONNECT_HOLD_PROVEN` stays false and nothing
+shipped. Per-item results and the fixes are in
+`docs/reconnect-hold-proof.md`.
+
+**What held:** every engine drop. 125 kills, stops and adapter disables on
+Reality, TLS, Trojan, Shadowsocks, Stealth Web, OpenVPN UDP and WireGuard
+sent no leaker frame from the drop to the next confined tunnel. Every
+engine dialled and carried under the hold (exit IP = node). Every release
+path tried left no filter behind. With the setting off, every drop leaked
+as before.
+
+**What failed:**
+- Port 53 after a network change. 15 of 15 network cuts leaked 1 to 8
+  lookups to an unconfigured resolver, 2.4 to 4.6 s after the network came
+  back. An empty resolver read is taken as an unread one.
+- A roam kept the old network's gateway and IPv6 resolver open for 6.3 s.
+- The screen: "not protected" up to 0.3 s before a Disconnect's release;
+  "blocked" 0.4 to 1.8 s after a let-go the app had not yet read (a service
+  stop, a WireGuard rung let go partway) while leaker frames left;
+  "checking ... blocked" after `tunnelNotPermitted` with no filter in; and
+  the status taking up to 1.77 s to say a disabled adapter's tunnel ended.
+
+**Not run or unverified:** OpenVPN TCP (no server), the attempts limit
+(the budget always ends first), Gaming mode mid-hold (disabled while
+reconnecting), the device limit's server refusal, a natural slow WireGuard
+stop (emulated instead), a real ISP's IPv6 path, a censored network, a
+physical laptop.
+
+**Changed on the VM:** the guest now has IPv6 through VirtualBox NAT and
+the host's ISP, so IPv6 checks see answers. CLAUDE.md's "this PC has no
+IPv6" no longer holds.
+
+**Traps:**
+- The guest's wall clock is unreliable (VirtualBox time sync ran it 27%
+  fast). Time everything on the guest's performance counter, which is what
+  pktmon stamps frames with.
+- A 145 s step back of the guest's clock broke one WireGuard reconnect,
+  likely through WireGuard's handshake replay check.
+- Re-attaching NAT at runtime hands out 10.0.2.3 instead of the host's
+  resolvers. Saving and restoring the VM fixes it.
+- The guest firewall's address rules do not stop wireguard-nt's UDP, so
+  they cannot block a WireGuard rung.
+
+**Seen, not looked into:** after a `neoconnect0` disable, the redial on
+the same protocol fails after ~40 s and the ladder moves on; "Service
+isn't answering" ~5 s after an IKEv2 disconnect; Finland, France and
+Singapore were missing from the location list for part of the round.
+
+**Next:** the six fixes listed in the proof doc (keep the resolvers on an
+empty read, re-read on an address change, the disable's read cadence or
+the item restated, two screen fixes, tell the app before letting go),
+then a fourth capture of items 1, 1b (`unname-wireguard-server`), 5 and 6.
+The constant flips only when every gate passes, in a commit of its own.
