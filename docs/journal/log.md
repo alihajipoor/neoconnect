@@ -7939,3 +7939,11 @@ the dead fi1/fr1 updater endpoints are still in the desktop
 installer, its signature, the bootstrapper and checksums. The API's
 update manifest offers 0.9.59 to a 0.9.58 client (signature for
 `Neoxify_0.9.59_x64-setup.exe`, 23:15Z) and nothing to 0.9.59.
+
+**VM check on the released 0.9.59** (`C:\Users\aliha\Claude\vm\results\hold6`):
+two `fo` runs, with the installer clean under Defender and installed from
+the release itself. There were no "service isn't answering" frames and no
+leaker frames while held. **The words fix was not exercised, though.**
+Neither trigger came up: the split-tunnel changes took 18 to 357 ms
+(round five's took 28 s), and no read met a busy pipe. It stays
+unproven until a test can force one of them while held.
