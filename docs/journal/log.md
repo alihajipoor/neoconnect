@@ -7739,3 +7739,45 @@ Android 0.2.35 come from the release workflows on main `7bf4d950`. iOS
 - App Store version 1.0 is still waiting for review on build 15 and was
   not touched.
 - The next build number is 18.
+
+## 2026-11-09 — desktop 0.9.58 and mobile 0.2.36
+
+**Live:** desktop 0.9.58 and Android 0.2.36 come from the release
+workflows on main `9947ac2d` (Release Desktop run 42685636033, Release
+Android run 42685636337). No backend deploy goes with it: nothing in the
+release needs one.
+
+**What shipped:** `claude/countries-india`, merged as `3f63f5b8`. India is
+in the location list (both languages, its flag, a map light at New
+Delhi), the Netherlands is listed, France is gone, and the apps no longer
+try the two API mirrors whose servers are gone. Mobile takes the same
+from the shared desktop code. The customer note is the tag annotation, in
+English and Persian.
+
+**Kill switch: still hidden.** `RECONNECT_HOLD_PROVEN` stays false. The
+fourth VM proof (`b8bf40a`) failed items 3/4 and 5: a guest stall was
+read as the app going silent, the hold let go and the reconnect dialled
+unheld; and two screen faults around a failover. The write-up is
+committed on `claude/reconnect-hold-r4` (`612a961d`), which stays open
+and pushed. None of its fixes are in 0.9.58.
+
+**Unverified:** nothing in this release was run on the VM or a phone
+for this step. CI passed on `1d149ff7` (the merged tree is the same), which
+says it compiles and its tests pass, not that India or the Netherlands
+carry traffic. A censored network, a real IPv6 path and a physical laptop
+stay unverified as always.
+
+**Not done:**
+- The endpoint lists were not re-signed on the Mac. At the 10-28
+  inventory, offline v7 and server list v100 still named dead mirrors;
+  this release does not change that.
+- No iOS build was made or uploaded for 0.2.36. That needs the owner's OK.
+- The updater endpoints in the desktop `tauri.conf.json` still name the
+  two dead mirrors after the main address. Harmless while the main
+  address answers; that file is only staged for its version line.
+
+**Checked after release:** the desktop release holds the 0.9.58
+installer, its signature and checksums, and the API's update manifest
+offers 0.9.58 to a 0.9.57 client (signature for
+`Neoxify_0.9.58_x64-setup.exe`) and nothing to 0.9.58. The Android
+release holds the signed 0.2.36 APK and AAB.
