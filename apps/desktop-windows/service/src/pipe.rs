@@ -1897,18 +1897,14 @@ fn gaming_response(report: crate::gaming::Report) -> Response {
 /// which is the machine stopping, not the app (`idle_tick`).
 fn spawn_idle_watchdog(engines: Supervisor<Engines>, last_seen: Arc<Mutex<Instant>>) {
     tokio::spawn(async move {
+        let mut watch = IdleWatch::default();
         loop {
             let slept_from = Instant::now();
             tokio::time::sleep(IDLE_POLL).await;
             {
                 let mut seen = last_seen.lock().await;
-                match idle_tick(slept_from.elapsed(), seen.elapsed()) {
-                    IdleTick::Heard => continue,
-                    IdleTick::Stalled => {
-                        *seen = Instant::now();
-                        continue;
-                    }
-                    IdleTick::Silent => {}
+                if watch.tick(slept_from.elapsed(), &mut seen, Instant::now()) != IdleTick::Silent {
+                    continue;
                 }
             }
 
@@ -2000,14 +1996,23 @@ enum IdleTick {
     /// The tick itself took more than twice `IDLE_POLL`: the machine
     /// stopped -- a VM paused, a laptop asleep, the service starved -- and
     /// the app's silence was the machine's, not its own. Its grace starts
-    /// again.
+    /// again, up to `IDLE_STALLS` times before the app is heard from again.
     Stalled,
     /// Silent for `IDLE_GRACE` on a machine that ran: gone, or frozen.
     Silent,
 }
 
+/// How many late ticks in a row, the app not heard from between them, each
+/// start its grace again. Past that, the machine stopping is no reason to
+/// wait for it: a machine whose ticks keep coming late -- a starved service,
+/// a VM paused again and again -- would otherwise hold for an app that is
+/// gone for as long as that goes on. An app that is there is heard from
+/// within a second or two of a resume, and its count starts again.
+const IDLE_STALLS: u32 = 3;
+
 /// `tick`: how long the watchdog's last sleep of `IDLE_POLL` took. `silent`:
-/// how long since the app was last heard from.
+/// how long since the app was last heard from. `stalls`: late ticks already
+/// excused since then.
 ///
 /// Both are read off `Instant`, which on the VM counted a 72 s freeze of the
 /// whole guest (round 4): at resume the tick ran before the app's first
@@ -2015,8 +2020,8 @@ enum IdleTick {
 /// was reading every 400 ms -- and the episode's next connect dialled unheld.
 /// A laptop's sleep is unverified: if the clock does not count it, neither
 /// reading does, and nothing is let go of for it either.
-fn idle_tick(tick: Duration, silent: Duration) -> IdleTick {
-    if tick > IDLE_POLL * 2 {
+fn idle_tick(tick: Duration, silent: Duration, stalls: u32) -> IdleTick {
+    if tick > IDLE_POLL * 2 && stalls < IDLE_STALLS {
         IdleTick::Stalled
     } else if silent < IDLE_GRACE {
         IdleTick::Heard
@@ -2025,21 +2030,52 @@ fn idle_tick(tick: Duration, silent: Duration) -> IdleTick {
     }
 }
 
+/// The idle watchdog's memory between ticks: the late ticks excused since
+/// the app was last heard from, and the moment the last one started its
+/// grace again -- a `last_seen` other than that is the app's own.
+#[derive(Default)]
+struct IdleWatch {
+    excused: Option<Instant>,
+    stalls: u32,
+}
+
+impl IdleWatch {
+    /// One tick at `now`, whose sleep took `tick`. `seen`: when the app was
+    /// last heard from, started again here when a late tick is excused.
+    fn tick(&mut self, tick: Duration, seen: &mut Instant, now: Instant) -> IdleTick {
+        if self.excused.is_some_and(|at| *seen != at) {
+            self.excused = None;
+            self.stalls = 0;
+        }
+        let said = idle_tick(tick, now.saturating_duration_since(*seen), self.stalls);
+        if said == IdleTick::Stalled {
+            *seen = now;
+            self.excused = Some(now);
+            self.stalls += 1;
+        }
+        said
+    }
+}
+
 #[cfg(test)]
 mod idle_tests {
     use super::*;
 
-    /// The watchdog's loop over a run of ticks, as `spawn_idle_watchdog`
-    /// keeps it: when it lets go, in seconds from the start. `ticks`: how
-    /// long each sleep took; the app is heard from only at the start.
-    fn lets_go_after(ticks: &[u64]) -> Option<u64> {
-        let (mut now, mut seen) = (0, 0);
-        for &tick in ticks {
+    /// The watchdog over a run of ticks, through its own `IdleWatch`: when
+    /// it lets go, in seconds from the start. `ticks`: how long each sleep
+    /// took. `heard_after`: the ticks after which the app is heard from, a
+    /// second later; otherwise only at the start.
+    fn lets_go_after(ticks: &[u64], heard_after: &[usize]) -> Option<u64> {
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let (mut watch, mut seen, mut now) = (IdleWatch::default(), at(0), 0);
+        for (i, &tick) in ticks.iter().enumerate() {
             now += tick;
-            match idle_tick(Duration::from_secs(tick), Duration::from_secs(now - seen)) {
-                IdleTick::Heard => {}
-                IdleTick::Stalled => seen = now,
-                IdleTick::Silent => return Some(now),
+            if watch.tick(Duration::from_secs(tick), &mut seen, at(now)) == IdleTick::Silent {
+                return Some(now);
+            }
+            if heard_after.contains(&i) {
+                seen = at(now + 1);
             }
         }
         None
@@ -2049,20 +2085,36 @@ mod idle_tests {
     fn a_machine_that_stopped_is_not_an_app_gone_silent() {
         // The VM, round 4: the guest froze for 72 s and the tick at resume
         // called the app silent.
-        assert_eq!(idle_tick(Duration::from_secs(75), Duration::from_secs(73)), IdleTick::Stalled);
-        assert_eq!(idle_tick(Duration::from_secs(21), Duration::from_secs(61)), IdleTick::Stalled);
+        assert_eq!(idle_tick(Duration::from_secs(75), Duration::from_secs(73), 0), IdleTick::Stalled);
+        assert_eq!(idle_tick(Duration::from_secs(21), Duration::from_secs(61), 0), IdleTick::Stalled);
         // Late, but not by a stall: an app silent for the grace is let go of.
-        assert_eq!(idle_tick(Duration::from_secs(20), Duration::from_secs(60)), IdleTick::Silent);
-        assert_eq!(idle_tick(IDLE_POLL, Duration::from_secs(59)), IdleTick::Heard);
+        assert_eq!(idle_tick(Duration::from_secs(20), Duration::from_secs(60), 0), IdleTick::Silent);
+        assert_eq!(idle_tick(IDLE_POLL, Duration::from_secs(59), 0), IdleTick::Heard);
         // Its grace starts again at the stall: the app reading again after
         // the resume is heard long before it ends.
-        assert_eq!(lets_go_after(&[10, 10, 75, 10, 10]), None);
+        assert_eq!(lets_go_after(&[10, 10, 75, 10, 10], &[]), None);
+        assert_eq!(lets_go_after(&[10, 10, 75, 10, 10, 10, 10, 10, 10, 10], &[2, 5, 8]), None);
     }
 
     #[test]
     fn an_app_frozen_on_a_machine_that_runs_is_still_let_go_of_after_the_grace() {
-        assert_eq!(lets_go_after(&[10; 10]), Some(60));
+        assert_eq!(lets_go_after(&[10; 10], &[]), Some(60));
         // A stall on the way gives a full grace from it, and no more.
-        assert_eq!(lets_go_after(&[10, 10, 30, 10, 10, 10, 10, 10, 10, 10]), Some(110));
+        assert_eq!(lets_go_after(&[10, 10, 30, 10, 10, 10, 10, 10, 10, 10], &[]), Some(110));
+    }
+
+    #[test]
+    fn ticks_that_keep_coming_late_hold_for_a_gone_app_only_so_long() {
+        // Every tick late and the app never heard from: three graces, then
+        // the grace runs whatever the ticks do.
+        assert_eq!(lets_go_after(&[75; 10], &[]), Some(4 * 75));
+        assert_eq!(lets_go_after(&[25; 20], &[]), Some(6 * 25));
+        assert_eq!(idle_tick(Duration::from_secs(75), Duration::from_secs(75), IDLE_STALLS), IdleTick::Silent);
+        // An app heard from after each resume is never let go of, however
+        // many there are.
+        let resumes: Vec<usize> = (0..20).collect();
+        assert_eq!(lets_go_after(&[75; 20], &resumes), None);
+        // And heard once, then gone: three graces from there, no more.
+        assert_eq!(lets_go_after(&[75; 10], &[1]), Some(6 * 75));
     }
 }
