@@ -24,8 +24,8 @@
  *    `createStatusRelease`): a pass that landed a verified tunnel, or one
  *    that holds the machine itself, an episode that ended without one, a
  *    drop that began none -- and, from status reads alone, only a tunnel
- *    the service says landed under the hold, verified, on two reads a
- *    second apart;
+ *    the service says landed under the hold, verified, on two reads half
+ *    a second apart;
  *  - what the screen and the notifications say about the customer's other
  *    traffic in the gap (`gapTraffic`, `holdHint`, `holdNote`), from the
  *    service's own facts -- never from the setting alone, and never "going
@@ -222,8 +222,16 @@ export function landingReleases(
   return fresh !== null && landedUnderHold(fresh.hold, fresh.status);
 }
 
-/** How far apart the two reads that let go from status alone must be. */
-export const RELEASE_READS_APART_MS = 1_000;
+/** How far apart the two reads that let go from status alone must be,
+ * timed by when each reply came.
+ *
+ * Half a second: while the hold holds, the app reads once a second
+ * (`LIVENESS_POLL_MS`), and a reply's own time varies. At a full second, on
+ * the VM (round 4), reads sent 1.007 s apart were answered 0.897 s apart --
+ * the first reply 133 ms, the second 22 ms -- the second read was refused,
+ * and the hold over a landed WireGuard tunnel went only on the third. Still
+ * far above the same status answered twice, which came within 0.1 s. */
+export const RELEASE_READS_APART_MS = 500;
 
 /** Letting go of a hold from status reads alone -- the net under the
  * explicit releases (a pass that landed, an episode's end), for a hold the

@@ -167,7 +167,7 @@ describe("letting go on status reads alone", () => {
   const CONTRADICTORY: Read = { connected: true, ipv4Confined: false, health: { state: "unknown" } };
   const DOWN: Read = { connected: false, ipv4Confined: null, health: { state: "down" } };
 
-  it("follows a drop and a reconnect as the VM saw them, and lets go only on a landed tunnel read twice, a second apart", () => {
+  it("follows a drop and a reconnect as the VM saw them, and lets go only on a landed tunnel read twice, half a second apart", () => {
     const release = createStatusRelease();
     const see = (raw: unknown, status: Read, now: number, passRunning = false) =>
       release.see({ hold: readHold(raw), status, passRunning, now });
@@ -184,10 +184,10 @@ describe("letting go on status reads alone", () => {
     expect(see({ state: "holding", held_secs: 20, landed: true }, CONFINED, 20_000, true)).toBe(false);
     expect(see({ state: "holding", held_secs: 21, landed: true }, CONFINED, 21_500, true)).toBe(false);
     // The pass over and its own release lost: one landed read is not
-    // enough, nor a second within the second...
+    // enough, nor a second within half a second...
     expect(see({ state: "holding", held_secs: 26, landed: true }, CONFINED, 26_000)).toBe(false);
     expect(see({ state: "holding", held_secs: 26, landed: true }, CONFINED, 26_000 + RELEASE_READS_APART_MS - 1)).toBe(false);
-    // ...a second one a second after the first is.
+    // ...a second one half a second after the first is.
     expect(see({ state: "holding", held_secs: 27, landed: true }, CONFINED, 26_000 + RELEASE_READS_APART_MS)).toBe(true);
   });
 
@@ -200,6 +200,24 @@ describe("letting go on status reads alone", () => {
     expect(release.see({ hold: LANDED, status: CONFINED, passRunning: true, now: 1_900 })).toBe(false);
     expect(release.see({ hold: LANDED, status: CONFINED, passRunning: false, now: 2_500 })).toBe(false);
     expect(release.see({ hold: LANDED, status: CONFINED, passRunning: false, now: 3_500 })).toBe(true);
+  });
+
+  // The VM, round 4 (gate3-4, unconf-wg): reads sent 1.007 s apart were
+  // answered 0.897 s apart, and the hold over a landed WireGuard tunnel went
+  // only on the third read.
+  it("lets go from status reads a poll apart, however long each reply took, and never on the same status answered twice", () => {
+    const LANDED = { state: "holding", heldSecs: 30, landed: true } as const;
+    const ALIVE = { connected: true, ipv4Confined: null, health: { state: "alive" } };
+    expect(RELEASE_READS_APART_MS).toBeLessThanOrEqual(900);
+    expect(RELEASE_READS_APART_MS).toBeGreaterThan(100);
+    const release = createStatusRelease();
+    // Replies at +133 ms and +22 ms on reads sent 1.007 s apart.
+    expect(release.see({ hold: LANDED, status: ALIVE, passRunning: false, now: 133 })).toBe(false);
+    expect(release.see({ hold: LANDED, status: ALIVE, passRunning: false, now: 1_007 + 22 })).toBe(true);
+    // The same status answered twice, 0.07 s apart: one read.
+    const twice = createStatusRelease();
+    expect(twice.see({ hold: LANDED, status: ALIVE, passRunning: false, now: 22_971_190 })).toBe(false);
+    expect(twice.see({ hold: LANDED, status: ALIVE, passRunning: false, now: 22_971_260 })).toBe(false);
   });
 
   it("never lets go from the statuses of a service that does not say a tunnel landed", () => {
