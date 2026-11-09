@@ -635,6 +635,10 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
         ),
     }
 
+    // Kept for the stop: a hold the teardown is about to let go of is said
+    // in the status first (`Hold::warn_of_letting_go`).
+    let reconnect_hold = engines.reconnect_hold_handle();
+
     // One owner on its own thread, with a queue in front of it, rather
     // than a mutex every request contends on. See
     // docs/windows-service-rewrite.md and lifecycle::supervisor.
@@ -642,9 +646,11 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async {
-        let serving = pipe::serve(engines.clone());
+        let mut serving = Box::pin(pipe::serve(engines.clone()));
+        let mut still_serving = true;
         tokio::select! {
-            result = serving => {
+            result = &mut serving => {
+                still_serving = false;
                 if let Err(err) = result {
                     eprintln!("pipe server stopped: {err}");
                 }
@@ -681,6 +687,26 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
             wait_hint: STOP_WAIT_HINT,
             process_id: None,
         });
+
+        // A hold the teardown below lets go of is said first: the status
+        // says it is being let go of, and the teardown waits for one read to
+        // have carried that -- at most LET_GO_SAID_WITHIN -- with the pipe
+        // still answering. Told only at its next read, the app said
+        // "blocked" 1.7 s over traffic leaving on the VM. Nothing held,
+        // nothing waited for; and a crash or a kill warns nobody.
+        if still_serving {
+            let hold = std::sync::Arc::clone(&reconnect_hold);
+            let warned = tokio::task::spawn_blocking(move || {
+                hold.warn_of_letting_go(engines::reconnect_hold::LET_GO_SAID_WITHIN)
+            });
+            tokio::select! {
+                _ = &mut serving => {}
+                _ = warned => {}
+            }
+        }
+        // No more connections from here: nothing new is let in behind the
+        // teardown.
+        drop(serving);
 
         // Leaving a tunnel up after the service that manages it has gone
         // away would strand the machine's routing table pointed at an

@@ -61,11 +61,26 @@
 //! nothing can connect to them. When those resolvers cannot be read, port
 //! 53 to anywhere is permitted instead, and the status says so
 //! (`Report::Holding.dns_anywhere`) rather than claim the narrower rule.
+//! A read that finds none while some are in force is not that: an adapter
+//! that is down is skipped, so a cut cable or a network between two leases
+//! reads as no resolvers at all, and on the VM every network cut opened
+//! port 53 to anywhere that way (2026-11-06). The resolvers in force stay
+//! (`Plan::keeping_resolvers`); only a first read that finds none, or one
+//! that fails with none held, permits anywhere.
 //! Everything else, IPv4 and IPv6, both directions, is refused.
 //!
 //! The LAN, the DHCP servers and the resolvers are read again while it
 //! holds (`Hold::tend`): a laptop that roams during the wait gets its new
-//! network's LAN and resolvers, not the old one's.
+//! network's LAN and resolvers, not the old one's -- on every status read
+//! for [`FOLLOW_A_CHANGE_FOR`] after the machine's addresses change
+//! (`AddressWatch`), and every [`REREAD_EVERY`] otherwise.
+//!
+//! A let-go the app cannot see coming -- a connect's, before it dials, and
+//! the service stopping -- is said in the status first
+//! (`Report::LettingGo`, which the app says as neither blocked nor open)
+//! and made only once a read has carried it, or [`LET_GO_SAID_WITHIN`] has
+//! passed: otherwise the screen said "blocked" until its next read, over
+//! traffic already leaving. A crash or a kill of the service warns nobody.
 //!
 //! # What lets go of it
 //!
@@ -99,7 +114,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use neoconnect_ipc::{ConnectProfile, ReconnectHold as Report, ReconnectHoldProblem};
@@ -170,6 +185,19 @@ pub const NO_FOLLOW_UP: Duration = Duration::from_secs(120);
 /// left before it is tried again.
 pub const REREAD_EVERY: Duration = Duration::from_secs(10);
 pub const REREAD_AFTER_REFUSAL: Duration = Duration::from_secs(60);
+
+/// How long after the machine's addresses change every status read reads
+/// the network again, whatever [`REREAD_EVERY`] says: a roam's new address
+/// comes before its resolvers are written, and a plan read a moment before
+/// the new address kept the old network open for 6.3 s on the VM (the 10 s
+/// re-read). Reads come every 400 ms in a gap, so the plan follows within
+/// one of them.
+pub const FOLLOW_A_CHANGE_FOR: Duration = Duration::from_secs(5);
+
+/// How long a let-go the app cannot see coming waits for a status read to
+/// have said it (`Hold::let_go_once_said`): the app reads every 400 ms in a
+/// gap and while it dials, so one comes well inside this.
+pub const LET_GO_SAID_WITHIN: Duration = Duration::from_millis(600);
 
 /// The most resolvers a plan permits.
 pub const MAX_RESOLVERS: usize = 16;
@@ -246,14 +274,28 @@ impl Plan {
         self.dns.is_empty()
     }
 
+    /// The plan, its resolvers `in_force` when this read found none. An
+    /// adapter that is down is not read, so a network cut, or one between
+    /// two leases, reads as no resolvers at all: said as unread, that
+    /// opened port 53 to anywhere for every cut on the VM. Only a first
+    /// read -- nothing in force -- leaves it so.
+    pub fn keeping_resolvers(mut self, in_force: &[IpAddr]) -> Self {
+        if self.dns.is_empty() {
+            self.dns = in_force.to_vec();
+        }
+        self
+    }
+
     /// This plan, permitting as well every tunnel, program and server
     /// `other` does: what arming a session again keeps -- the setting said
     /// again as a reconnect begins re-arms the live session with no servers
     /// of the connect's to hand -- so a plan made again with less to go on
     /// never narrows what that session's tunnel needs. Standing under a
-    /// WireGuard tunnel, a narrower one would refuse its own server.
+    /// WireGuard tunnel, a narrower one would refuse its own server. Its
+    /// resolvers too, when this read found none: the setting said again
+    /// over a network going down reads none (`keeping_resolvers`).
     pub fn widened_by(self, other: &Plan) -> Plan {
-        let dns = self.dns.clone();
+        let dns = if self.dns.is_empty() { other.dns.clone() } else { self.dns.clone() };
         let mut tunnels = self.tunnels;
         tunnels.extend(other.tunnels.iter().copied());
         let mut programs = self.programs;
@@ -534,6 +576,69 @@ pub trait HoldOps: Send + Sync {
     fn longest(&self) -> Duration {
         HOLD_LONGEST
     }
+    /// When the machine's unicast addresses last changed, as Windows told
+    /// it (`AddressWatch`); `None` when nothing has, or nothing is watched.
+    fn address_changed_at(&self) -> Option<Instant> {
+        None
+    }
+}
+
+/// When Windows last said a unicast address changed, on any adapter: set
+/// from its notification thread, read by the status reads (`Hold::reread`).
+static ADDRESS_CHANGED: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// When the machine's addresses last changed, as `AddressWatch` heard.
+pub fn last_address_change() -> Option<Instant> {
+    *ADDRESS_CHANGED.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Windows' word that an address changed: noted, nothing more -- this runs
+/// on the system's notification thread, and the reads that act on it are
+/// the status reads' (`Hold::reread`). Nothing here can panic across the
+/// boundary.
+unsafe extern "system" fn address_changed(
+    _context: *const core::ffi::c_void,
+    _row: *const windows_sys::Win32::NetworkManagement::IpHelper::MIB_UNICASTIPADDRESS_ROW,
+    _kind: windows_sys::Win32::NetworkManagement::IpHelper::MIB_NOTIFICATION_TYPE,
+) {
+    *ADDRESS_CHANGED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+}
+
+/// `NotifyUnicastIpAddressChange`, registered for the service's life: a
+/// roam's new address is heard as it comes, and the hold's plan follows it
+/// at the next status read rather than at the next [`REREAD_EVERY`]. Ended
+/// when dropped.
+pub struct AddressWatch(windows_sys::Win32::Foundation::HANDLE);
+
+// SAFETY: the handle is only ever passed back to CancelMibChangeNotify2,
+// once, on drop; Windows documents both calls as callable from any thread.
+unsafe impl Send for AddressWatch {}
+unsafe impl Sync for AddressWatch {}
+
+impl AddressWatch {
+    /// Registered, or the error Windows gave.
+    pub fn start() -> Result<Self, u32> {
+        use windows_sys::Win32::NetworkManagement::IpHelper::NotifyUnicastIpAddressChange;
+        use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+        let mut handle: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+        // SAFETY: the callback is a plain function that only takes a lock
+        // and stores an instant; no context is passed; `handle` is a valid
+        // out pointer.
+        let err = unsafe { NotifyUnicastIpAddressChange(AF_UNSPEC, Some(address_changed), std::ptr::null(), 0, &mut handle) };
+        if err != 0 || handle.is_null() {
+            return Err(err);
+        }
+        Ok(Self(handle))
+    }
+}
+
+impl Drop for AddressWatch {
+    fn drop(&mut self) {
+        // SAFETY: registered by `start`, cancelled once, here.
+        unsafe {
+            windows_sys::Win32::NetworkManagement::IpHelper::CancelMibChangeNotify2(self.0);
+        }
+    }
 }
 
 /// Whether this build carries the VM's test switches for the hold
@@ -631,10 +736,12 @@ pub fn programs_in(exe_dir: &Path, service: Option<PathBuf>, exists: impl Fn(&Pa
 
 /// The machine. `exe_dir` is where the engines are, beside the service;
 /// `data_dir`, the service's own (`%ProgramData%\Neoxify`), where a test
-/// build reads its switches (`TestSwitches`).
+/// build reads its switches (`TestSwitches`); `address_watch`, kept for as
+/// long as the hold is, the notification `address_changed_at` reads.
 pub struct System {
     pub exe_dir: PathBuf,
     pub data_dir: PathBuf,
+    pub address_watch: Option<AddressWatch>,
 }
 
 impl HoldOps for System {
@@ -693,6 +800,10 @@ impl HoldOps for System {
 
     fn longest(&self) -> Duration {
         TestSwitches::read(&self.data_dir).longest_secs.map_or(HOLD_LONGEST, Duration::from_secs)
+    }
+
+    fn address_changed_at(&self) -> Option<Instant> {
+        self.address_watch.as_ref().and_then(|_| last_address_change())
     }
 }
 
@@ -765,6 +876,9 @@ pub enum Release {
 /// whatever races. An install is one WFP transaction, milliseconds.
 pub struct Hold {
     state: Mutex<State>,
+    /// Woken when a status has said the hold is being let go of, and when
+    /// what is in force goes (`let_go_once_said`).
+    said: Condvar,
     ops: Arc<dyn HoldOps>,
     log: Option<PathBuf>,
 }
@@ -813,6 +927,15 @@ struct State {
     /// what left between the tunnel's end and the hold going in was not
     /// held. Said in the status (`Report::Holding.standing_refused`).
     held_late: bool,
+    /// The hold held is about to be let go of, and the status says so
+    /// (`Report::LettingGo`) until it is (`warn_of_letting_go`). Only ever
+    /// while holding.
+    letting_go: bool,
+    /// How many statuses have said it: what a let-go waits on.
+    said_letting_go: u64,
+    /// The address change whose following a refused plan ended
+    /// (`reread`): not tried again at every read for that one.
+    refused_after_change: Option<Instant>,
 }
 
 impl State {
@@ -833,7 +956,7 @@ fn permits_all_of(held: &Plan, plan: &Plan) -> bool {
 
 impl Hold {
     pub fn new(ops: Arc<dyn HoldOps>, log_dir: Option<&Path>) -> Arc<Self> {
-        Arc::new(Self { state: Mutex::default(), ops, log: log_dir.map(|dir| dir.join(LOG_FILE)) })
+        Arc::new(Self { state: Mutex::default(), said: Condvar::new(), ops, log: log_dir.map(|dir| dir.join(LOG_FILE)) })
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -1279,6 +1402,8 @@ impl Hold {
             state.awaiting_follow_up = false;
             state.reread_at = None;
             state.held_late = false;
+            state.letting_go = false;
+            self.said.notify_all();
             drop(state);
             self.note(&format!("let go of{held_for}: its filters stay standing for the tunnel that is up ({reason})"));
             return true;
@@ -1305,6 +1430,9 @@ impl Hold {
         state.awaiting_follow_up = false;
         state.reread_at = None;
         state.held_late = false;
+        if std::mem::take(&mut state.letting_go) {
+            self.said.notify_all();
+        }
         if engine == 0 {
             return false;
         }
@@ -1418,12 +1546,22 @@ impl Hold {
     /// a tunnel service started again under filters standing for it can
     /// come back on an adapter of another LUID. A plan that will not go in
     /// leaves the one in force, and is not tried again for
-    /// [`REREAD_AFTER_REFUSAL`]. Resolvers that cannot be read this time
-    /// keep the ones held. Returns whether the plan moved.
+    /// [`REREAD_AFTER_REFUSAL`]. Resolvers that cannot be read this time,
+    /// or are read as none -- an adapter that is down is skipped, so a cut
+    /// reads none -- keep the ones held (`Plan::keeping_resolvers`).
+    ///
+    /// For [`FOLLOW_A_CHANGE_FOR`] after the machine's addresses change
+    /// (`HoldOps::address_changed_at`), every call reads again, whatever
+    /// `REREAD_EVERY` says: a roam's new address comes before its
+    /// resolvers, and the old network stayed open for 6.3 s on the VM until
+    /// the next re-read. A plan refused in that time is not tried again at
+    /// every call for the same change. Returns whether the plan moved.
     pub fn reread(&self, now: Instant) -> bool {
+        let changed = self.ops.address_changed_at().filter(|at| now.saturating_duration_since(*at) < FOLLOW_A_CHANGE_FOR);
         let held = {
             let mut state = self.lock();
-            if state.engine == 0 || state.reread_at.is_some_and(|at| now < at) {
+            let following = changed.is_some() && state.refused_after_change != changed;
+            if state.engine == 0 || (!following && state.reread_at.is_some_and(|at| now < at)) {
                 return false;
             }
             state.reread_at = Some(now + REREAD_EVERY);
@@ -1433,10 +1571,11 @@ impl Hold {
             }
         };
         let Some((lan, dhcp_servers)) = self.ops.lan() else { return false };
-        let dns = self.ops.dns_servers().unwrap_or_else(|| held.dns.clone());
         let mut tunnels = held.tunnels.clone();
         tunnels.extend(self.ops.our_tunnels().unwrap_or_default());
-        let next = Plan::new(tunnels, held.programs.clone(), held.nodes.clone(), lan, dhcp_servers).with_dns(dns);
+        let next = Plan::new(tunnels, held.programs.clone(), held.nodes.clone(), lan, dhcp_servers)
+            .with_dns(self.ops.dns_servers().unwrap_or_default())
+            .keeping_resolvers(&held.dns);
         if next == held {
             return false;
         }
@@ -1447,8 +1586,70 @@ impl Hold {
         let mut state = self.lock();
         if state.engine != 0 {
             state.reread_at = Some(now + REREAD_AFTER_REFUSAL);
+            state.refused_after_change = changed;
         }
         false
+    }
+
+    /// Says the hold held is about to be let go of -- the status reports
+    /// `LettingGo`, which the app says as neither blocked nor open -- and
+    /// waits until a status has said so, at most `within`. Returns whether
+    /// one did. Nothing held, nothing said, and it returns at once; let go
+    /// of by another meanwhile, it returns then.
+    ///
+    /// For a let-go the app cannot see coming: told only at its next read,
+    /// it said "blocked" 0.4 to 1.8 s over traffic already leaving on the VM.
+    /// The service stopping calls this before its teardown; a connect's
+    /// let-go, `let_go_once_said`. A crash or a kill warns nobody.
+    pub fn warn_of_letting_go(&self, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        let mut state = self.lock();
+        if !state.holding() {
+            return false;
+        }
+        state.letting_go = true;
+        let seen = state.said_letting_go;
+        drop(state);
+        self.note("letting go: the status says so first, and it is let go of once a read has carried that");
+        let mut state = self.lock();
+        loop {
+            if state.said_letting_go != seen {
+                return true;
+            }
+            if !state.letting_go {
+                return false;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            state = match self.said.wait_timeout(state, left) {
+                Ok((state, _)) => state,
+                Err(poisoned) => poisoned.into_inner().0,
+            };
+        }
+    }
+
+    /// Lets go of the hold for `why` once a status has said it is being let
+    /// go of (`warn_of_letting_go`), or `within` has passed. Nothing held,
+    /// or let go of by another meanwhile -- the customer's Disconnect, a
+    /// backstop -- and nothing is done, nor any problem said. Returns
+    /// whether this call let go of it.
+    pub fn let_go_once_said(&self, why: Release, within: Duration) -> bool {
+        let said = self.warn_of_letting_go(within);
+        let state = self.lock();
+        if !state.letting_go {
+            return false;
+        }
+        let let_go = self.let_go_locked(state, why, false);
+        if let_go {
+            self.note(if said {
+                "a status said it was being let go of before it was"
+            } else {
+                "no status read came to say it was being let go of in time, so it was let go of without"
+            });
+        }
+        let_go
     }
 
     /// Lets go of a hold that has held for `longest` with no tunnel up --
@@ -1484,14 +1685,27 @@ impl Hold {
         self.lock().held.clone()
     }
 
+    /// The resolvers the plan in force permits, none while none is: what a
+    /// plan made from a read that found none keeps (`Plan::keeping_resolvers`).
+    pub fn resolvers_in_force(&self) -> Vec<IpAddr> {
+        self.lock().held.as_ref().map(|plan| plan.dns.clone()).unwrap_or_default()
+    }
+
     /// What the status poll says of it. `live`: the session up now, if any
     /// -- "armed" is said only of the session that is, and a hold is said
     /// to have `landed` only under a session that came up after the drop
     /// it holds for and is armed: its tunnel in the plan, the gap over.
     /// The dropped session itself, still in the slot while it is taken
-    /// down, is not one.
+    /// down, is not one. A hold about to be let go of is said as that
+    /// (`warn_of_letting_go`), and saying it is what that waits for: every
+    /// call here answers a status read.
     pub fn report(&self, live: Option<u64>) -> Option<Report> {
-        let state = self.lock();
+        let mut state = self.lock();
+        if state.holding() && state.letting_go {
+            state.said_letting_go += 1;
+            self.said.notify_all();
+            return Some(Report::LettingGo);
+        }
         if state.holding() {
             let held_secs = state.since.map_or(0, |since| since.elapsed().as_secs());
             let dns_anywhere = state.held.as_ref().is_some_and(Plan::dns_anywhere);
@@ -1906,6 +2120,10 @@ mod tests {
         refuse_standing: Mutex<Option<String>>,
         /// And `hold-longest-secs`.
         longest: Mutex<Option<Duration>>,
+        /// When the machine's addresses last changed, as the test says.
+        changed: Mutex<Option<Instant>>,
+        /// Every install asked for, refused or not.
+        tries: std::sync::atomic::AtomicUsize,
     }
 
     impl HoldOps for Fake {
@@ -1915,7 +2133,11 @@ mod tests {
         fn longest(&self) -> Duration {
             self.longest.lock().unwrap().unwrap_or(HOLD_LONGEST)
         }
+        fn address_changed_at(&self) -> Option<Instant> {
+            *self.changed.lock().unwrap()
+        }
         fn install(&self, plan: &Plan) -> Result<Installed, String> {
+            self.tries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("could not add the filter (0x80320009)".into());
             }
@@ -2188,6 +2410,236 @@ mod tests {
         *fake.lan.lock().unwrap() = (vec![roamed], Vec::new());
         assert!(hold.reread(t1 + REREAD_AFTER_REFUSAL + REREAD_EVERY));
         assert_eq!(hold.held_plan().map(|p| p.dns), Some(vec![IpAddr::V4(Ipv4Addr::new(10, 20, 30, 1))]));
+    }
+
+    /// A read that finds no resolvers -- a cut cable, an adapter between two
+    /// leases: one that is down is skipped -- keeps the ones in force, in
+    /// the re-read, in arming the same session again and in widening. Port
+    /// 53 to anywhere comes only from a first read that found none. On the
+    /// VM every network cut opened it (2026-11-06, 10 of 10 cuts).
+    #[test]
+    fn an_empty_resolver_read_keeps_the_resolvers_in_force() {
+        // A first read that finds none: anywhere, and said.
+        assert!(plan().with_dns(Vec::new()).keeping_resolvers(&[]).dns_anywhere());
+        // Widening: the resolvers of the plan before, when this read found none.
+        let before = plan().with_dns(resolvers());
+        assert_eq!(plan().widened_by(&before).dns, resolvers());
+        let other = vec![IpAddr::V4(Ipv4Addr::new(10, 1, 1, 53))];
+        assert_eq!(plan().with_dns(other.clone()).widened_by(&before).dns, other, "a read that found some is the network now");
+
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, before.clone(), false);
+        // The setting said again as the reconnect begins, over a link that
+        // is down: armed again with a read that found none.
+        hold.arm(7, plan(), false);
+        assert!(hold.engage(7, "a drop"));
+        assert_eq!(hold.held_plan().map(|p| p.dns), Some(resolvers()), "re-armed onto port 53 to anywhere");
+        assert!(matches!(hold.report(None), Some(Report::Holding { dns_anywhere: false, .. })));
+
+        // The cut, read again: none found, the ones in force stay.
+        *fake.dns.lock().unwrap() = Some(Vec::new());
+        *fake.lan.lock().unwrap() = (vec![Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24)], Vec::new());
+        assert!(hold.reread(Instant::now()), "the LAN moved");
+        assert_eq!(hold.held_plan().map(|p| p.dns), Some(resolvers()));
+        assert_eq!(hold.resolvers_in_force(), resolvers());
+        assert!(matches!(hold.report(None), Some(Report::Holding { dns_anywhere: false, .. })), "a cut opened port 53");
+    }
+
+    /// For a moment after the machine's addresses change, every read reads
+    /// the network again, whatever `REREAD_EVERY` says, so a roam's new LAN
+    /// and its resolvers -- which come after the address -- replace the old
+    /// network's at the next read. On the VM the old network stayed open
+    /// 6.3 s, to the 10 s re-read. A plan refused meanwhile is not tried at
+    /// every read for that change.
+    #[test]
+    fn the_plan_follows_an_address_change_at_every_read_for_a_moment() {
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan().with_dns(resolvers()), false);
+        hold.engage(7, "a drop");
+        *fake.lan.lock().unwrap() = (plan().lan, plan().dhcp_servers);
+        let t0 = Instant::now();
+        assert!(!hold.reread(t0), "the same network is nothing to move");
+
+        // The roam: a new address, its LAN read at once, its resolvers a
+        // moment later.
+        let roamed = Prefix::new(Ipv4Addr::new(10, 20, 30, 0), 24);
+        *fake.lan.lock().unwrap() = (vec![roamed], vec![Ipv4Addr::new(10, 20, 30, 1)]);
+        let at = t0 + Duration::from_millis(100);
+        assert!(!hold.reread(at), "read again within REREAD_EVERY with no change heard");
+        *fake.changed.lock().unwrap() = Some(at);
+        assert!(hold.reread(at + Duration::from_millis(300)), "the change was not followed at the next read");
+        assert_eq!(hold.held_plan().map(|p| p.lan), Some(vec![roamed]));
+        assert_eq!(hold.held_plan().map(|p| p.dns), Some(resolvers()), "the old resolvers kept until new ones are read");
+        let new_resolver = vec![IpAddr::V4(Ipv4Addr::new(10, 20, 30, 1))];
+        *fake.dns.lock().unwrap() = Some(new_resolver.clone());
+        assert!(hold.reread(at + Duration::from_millis(700)), "the resolvers written after the address were not followed");
+        assert_eq!(hold.held_plan().map(|p| p.dns), Some(new_resolver.clone()), "the old network's resolver is still permitted");
+        let rows: Vec<(&str, Flow, Verdict)> = vec![
+            ("the old network's resolver", out(browser(), v4(198, 51, 100, 53), 53, protocol::UDP, PHYSICAL), Verdict::Block),
+            ("the new network's resolver", out(browser(), v4(10, 20, 30, 1), 53, protocol::UDP, PHYSICAL), Verdict::Permit),
+            ("the old LAN", out(browser(), v4(192, 168, 1, 7), 445, protocol::TCP, PHYSICAL), Verdict::Block),
+        ];
+        check(&[specs(&hold.held_plan().unwrap())], &rows);
+
+        // After the moment, back to REREAD_EVERY.
+        *fake.lan.lock().unwrap() = (vec![Prefix::new(Ipv4Addr::new(10, 20, 40, 0), 24)], Vec::new());
+        assert!(!hold.reread(at + FOLLOW_A_CHANGE_FOR + Duration::from_millis(1)));
+
+        // A plan refused while following a change waits for the next change.
+        let at2 = at + Duration::from_secs(20);
+        *fake.changed.lock().unwrap() = Some(at2);
+        fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let tries = fake.tries.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(!hold.reread(at2));
+        assert!(!hold.reread(at2 + Duration::from_millis(400)));
+        assert_eq!(fake.tries.load(std::sync::atomic::Ordering::SeqCst), tries + 1, "a refused plan was tried at every read");
+        assert!(hold.holding(), "a refused plan cost the hold");
+        fake.refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        let at3 = at2 + Duration::from_secs(1);
+        *fake.changed.lock().unwrap() = Some(at3);
+        assert!(hold.reread(at3 + Duration::from_millis(100)), "a new change was not followed after a refusal");
+    }
+
+    /// A let-go the app cannot see coming is said first: from the moment it
+    /// is asked, the status says `LettingGo`, and it is made only once a
+    /// status has said that -- or the wait is over. Let go of by another
+    /// meanwhile, nothing more is done and no problem said.
+    #[test]
+    fn a_let_go_is_said_in_the_status_before_it_is_made() {
+        // No read comes: let go of once the wait is over.
+        let (hold, fake) = held_by_fake();
+        hold.set_wanted(true);
+        hold.arm(7, plan(), false);
+        hold.engage(7, "a drop");
+        let asked = Instant::now();
+        assert!(hold.let_go_once_said(
+            Release::Failed(ReconnectHoldProblem::TunnelNotPermitted, "the server could not be named".into()),
+            Duration::from_millis(50)
+        ));
+        assert!(asked.elapsed() >= Duration::from_millis(50), "let go of before the wait was over");
+        assert!(!hold.holding());
+        assert_eq!(fake.closed.lock().unwrap().clone(), vec![5000]);
+        assert!(matches!(hold.report(None), Some(Report::NotHeld { problem: ReconnectHoldProblem::TunnelNotPermitted, .. })));
+        // Nothing held: nothing said, nothing waited for, no problem made up.
+        hold.release(Release::Asked("the app proved a tunnel"));
+        let asked = Instant::now();
+        assert!(!hold.let_go_once_said(Release::Failed(ReconnectHoldProblem::NotCovered, "IKEv2".into()), Duration::from_secs(5)));
+        assert!(asked.elapsed() < Duration::from_secs(1), "waited with nothing held");
+        assert_eq!(hold.report(None), None);
+        assert!(!hold.warn_of_letting_go(Duration::from_secs(5)));
+
+        // A read while it waits is what lets it go, at once.
+        hold.arm(7, plan(), false);
+        hold.engage(7, "a drop");
+        let reader = {
+            let hold = Arc::clone(&hold);
+            std::thread::spawn(move || loop {
+                if let Some(Report::LettingGo) = hold.report(None) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            })
+        };
+        let asked = Instant::now();
+        assert!(hold.let_go_once_said(Release::Failed(ReconnectHoldProblem::NotCovered, "IKEv2".into()), Duration::from_secs(10)));
+        assert!(asked.elapsed() < Duration::from_secs(5), "the read did not end the wait");
+        reader.join().unwrap();
+        assert!(matches!(hold.report(None), Some(Report::NotHeld { problem: ReconnectHoldProblem::NotCovered, .. })));
+    }
+
+    /// Thirty-two holds side by side, each with a status reader, a let-go
+    /// that is said first and -- for half of them -- the customer's
+    /// Disconnect racing it: no reader ever sees "not held" before it has
+    /// seen "letting go" or the Disconnect's let-go, none sees "holding"
+    /// again after "letting go", a let-go the Disconnect beat says no
+    /// problem, and every WFP session is closed exactly once. Single
+    /// instances of this kind of race have passed where concurrent ones
+    /// failed (docs/split-tunnel-rewrite.md).
+    #[test]
+    fn thirty_two_let_goes_said_first_against_readers_and_disconnects() {
+        const AT_ONCE: usize = 32;
+        for _round in 0..5 {
+            let start = Arc::new(std::sync::Barrier::new(AT_ONCE * 3));
+            let mut handles = Vec::new();
+            let mut holds = Vec::new();
+            for i in 0..AT_ONCE {
+                let (hold, fake) = held_by_fake();
+                hold.set_wanted(true);
+                hold.arm(7, plan(), false);
+                assert!(hold.engage(7, "a drop"));
+                holds.push((Arc::clone(&hold), fake));
+                let disconnects = i % 2 == 0;
+                {
+                    let (hold, start) = (Arc::clone(&hold), Arc::clone(&start));
+                    handles.push(std::thread::spawn(move || {
+                        start.wait();
+                        hold.let_go_once_said(
+                            Release::Failed(ReconnectHoldProblem::TunnelNotPermitted, "the server could not be named".into()),
+                            Duration::from_secs(10),
+                        );
+                        None
+                    }));
+                }
+                {
+                    let (hold, start) = (Arc::clone(&hold), Arc::clone(&start));
+                    handles.push(std::thread::spawn(move || {
+                        start.wait();
+                        if disconnects {
+                            hold.release(Release::Asked("the customer disconnected"));
+                        }
+                        None
+                    }));
+                }
+                {
+                    let (hold, start) = (Arc::clone(&hold), Arc::clone(&start));
+                    handles.push(std::thread::spawn(move || {
+                        start.wait();
+                        let mut seen = Vec::new();
+                        let deadline = Instant::now() + Duration::from_secs(10);
+                        while Instant::now() < deadline {
+                            let said = hold.report(None);
+                            let over = !matches!(said, Some(Report::Holding { .. }) | Some(Report::LettingGo));
+                            seen.push(said);
+                            if over {
+                                break;
+                            }
+                            std::thread::yield_now();
+                        }
+                        Some((disconnects, seen))
+                    }));
+                }
+            }
+            for handle in handles {
+                let Some((disconnects, seen)) = handle.join().expect("a caller panicked") else { continue };
+                let warned = seen.iter().position(|s| matches!(s, Some(Report::LettingGo)));
+                let after = seen.iter().position(|s| !matches!(s, Some(Report::Holding { .. }) | Some(Report::LettingGo)));
+                let after = after.expect("the hold was never let go of");
+                match &seen[after] {
+                    Some(Report::NotHeld { .. }) => {
+                        let warned = warned.expect("let go of with no status saying it first");
+                        assert!(warned < after);
+                    }
+                    None => assert!(disconnects, "let go of on purpose with no Disconnect: {seen:?}"),
+                    other => panic!("{other:?}"),
+                }
+                if let Some(warned) = warned {
+                    assert!(
+                        !seen[warned..].iter().any(|s| matches!(s, Some(Report::Holding { .. }))),
+                        "holding said again after letting go: {seen:?}"
+                    );
+                }
+            }
+            for (hold, fake) in holds {
+                assert!(!hold.holding());
+                drop(hold);
+                let opened: Vec<isize> = (0..fake.installs.lock().unwrap().len() as isize).map(|i| 5000 + i).collect();
+                let mut closed = fake.closed.lock().unwrap().clone();
+                closed.sort_unstable();
+                assert_eq!(closed, opened, "a session closed twice, or left open");
+            }
+        }
     }
 
     /// Thirty-two threads at once engaging, moving and letting go of one
