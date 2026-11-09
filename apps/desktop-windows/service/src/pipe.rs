@@ -73,6 +73,12 @@ const IDLE_GRACE: Duration = Duration::from_secs(60);
 /// How often the idle check runs.
 const IDLE_POLL: Duration = Duration::from_secs(10);
 
+/// Why a plain Disconnect lets go of the reconnect hold, for the log. Not
+/// "the customer disconnected": the app sends the same request to tear down
+/// after a pass that failed -- the mid-session failover's among them -- and
+/// the log said a press nobody made (the VM, round 4).
+const DISCONNECT_LETS_GO: &str = "a Disconnect: the customer's, or the app's own teardown";
+
 /// Split out from [`serve`] so tests can drive the real server on a
 /// throwaway pipe name instead of the production one -- everything
 /// below this point, including the ACL, is the shipping code path.
@@ -1110,7 +1116,7 @@ mod tests {
         let start = source.rfind("            let hard = engines.run(move |engines: &mut Engines, token| {").expect("the hard stop's job");
         let job = &source[start..start + source[start..].find("            });").expect("its end")];
         let held = job.find("engines.hold_for_reconnect();").expect("a reconnect's teardown holds");
-        let released = job.find("engines.release_reconnect_hold(\"the customer disconnected\", true);").expect("the customer's lets go");
+        let released = job.find("engines.release_reconnect_hold(DISCONNECT_LETS_GO, true);").expect("the customer's lets go");
         let stop = job.find("crate::lifecycle::teardown::hard_stop(&mut *engines)").expect("the hard stop");
         assert!(held < stop, "a reconnect's hold went in after the hard stop");
         assert!(released < stop, "the customer's Disconnect left the hold, or standing filters, in force through the hard stop");
@@ -1540,7 +1546,7 @@ async fn dispatch(
                     // is: not a hold nothing followed.
                     hold.followed();
                 } else {
-                    hold.release(crate::engines::reconnect_hold::Release::Asked("the customer disconnected"));
+                    hold.release(crate::engines::reconnect_hold::Release::Asked(DISCONNECT_LETS_GO));
                     hold.disarm();
                 }
             }
@@ -1574,7 +1580,7 @@ async fn dispatch(
                     // answer if that was queued beyond DISCONNECT_LOCK_WAIT.
                     // wireguard.exe's own kill switch covers its tunnel until
                     // the stop takes it down.
-                    engines.release_reconnect_hold("the customer disconnected", true);
+                    engines.release_reconnect_hold(DISCONNECT_LETS_GO, true);
                 }
                 crate::lifecycle::teardown::hard_stop(&mut *engines)
             });
