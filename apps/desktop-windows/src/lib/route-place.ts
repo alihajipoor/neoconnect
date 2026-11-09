@@ -36,6 +36,7 @@ const COUNTRY_NAMES: Record<string, Record<Language, string>> = {
   ae: { en: "UAE", fa: "امارات" },
   us: { en: "USA", fa: "آمریکا" },
   gb: { en: "UK", fa: "بریتانیا" },
+  in: { en: "India", fa: "هند" },
 };
 
 /** The country a region slug is in, or the slug as written when this
