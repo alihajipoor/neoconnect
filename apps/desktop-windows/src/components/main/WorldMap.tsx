@@ -9,6 +9,7 @@ import {
   fitBox,
   lightPoints,
   placeRibbon,
+  placeRibbonNorthEast,
   RIBBON_MIN,
   RIBBON_MIN_WINDOW,
   type Box,
@@ -177,7 +178,7 @@ function placeInScene(app: HTMLElement, box: Box, alert: boolean, bandNow: numbe
 export const STAGE_MIN = 96;
 
 /** The column layouts, measured in the stage's own box. */
-function placeInStage(stage: HTMLElement, box: Box): Placement {
+function placeInStage(stage: HTMLElement, box: Box, countries: readonly string[]): Placement {
   const w = stage.clientWidth;
   const h = stage.clientHeight;
   if (w < 40 || h < STAGE_MIN) return NONE;
@@ -193,7 +194,14 @@ function placeInStage(stage: HTMLElement, box: Box): Placement {
   const vy0 = 2;
   const vy1 = top + 0.8 * bh;
   const size = Math.min(vx1 - vx0, vy1 - vy0);
-  const wanted = size > 0 ? { x: vx0 + (vx1 - vx0 - size) / 2, y: vy0 + (vy1 - vy0 - size) / 2, s: size } : null;
+  let wanted: Square | null = size > 0 ? { x: vx0 + (vx1 - vx0 - size) / 2, y: vy0 + (vy1 - vy0 - size) / 2, s: size } : null;
+  // India's light is inside that region (2026-11-06). Where the mark would
+  // step aside for it, it shrinks into the stage's top-right corner instead
+  // (`placeRibbonNorthEast`); where it fits as it is, nothing moves.
+  const points = lightPoints(countries, fit);
+  if (wanted && !placeRibbon(wanted, points)) {
+    wanted = placeRibbonNorthEast({ x: vx1 - size, y: vy0, s: size }, points) ?? wanted;
+  }
   return { mode: "stage", fit, lights: true, wanted, band: 0 };
 }
 
@@ -266,7 +274,8 @@ export function WorldMap({ host, lights, arc, countries, logo = true, logoTone =
           if (app.dataset.mapmode !== next.mode) app.dataset.mapmode = next.mode;
         }
       } else {
-        next = placeInStage(node, box);
+        // `box` follows the country list, so this re-measures when it changes.
+        next = placeInStage(node, box, countries);
         if (app && app.dataset.mapmode !== "stage") app.dataset.mapmode = "stage";
       }
       setPlacement((prev) => (samePlacement(prev, next) ? prev : next));

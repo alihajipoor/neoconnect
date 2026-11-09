@@ -20,7 +20,7 @@
       "city": "Paris",
       "x": 100.643,
       "y": 15.594,
-      "listed": true
+      "listed": false
     },
     "de": {
       "city": "Frankfurt",
@@ -53,11 +53,17 @@
       "y": 45.366,
       "listed": true
     },
+    "in": {
+      "city": "New Delhi",
+      "x": 140.833,
+      "y": 28.22,
+      "listed": true
+    },
     "nl": {
       "city": "Amsterdam",
       "x": 101.822,
       "y": 13.468,
-      "listed": false
+      "listed": true
     },
     "ae": {
       "city": "Dubai",

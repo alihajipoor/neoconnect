@@ -14,13 +14,14 @@ import {
   fitBox,
   lightPoints,
   placeRibbon,
+  placeRibbonNorthEast,
 } from "./map-fit";
 
 /** The map's placement: the listed box fits its stage, lights never crowd
  * past recognition, and the ribbon never covers a light (design-system.md
  * 5.1 and 5.2). */
 
-const LISTED = ["gb", "fr", "de", "fi", "tr", "ir", "sg"];
+const LISTED = ["gb", "de", "fi", "tr", "ir", "sg", "in", "nl"];
 
 describe("boxFor", () => {
   it("is the generated listed box for the countries listed today", () => {
@@ -69,7 +70,7 @@ describe("lightPoints", () => {
   });
 
   it("nudges crowded lights apart by no more than the limit", () => {
-    // At a small scale London, Paris and Frankfurt sit within a few pixels.
+    // At a small scale London, Amsterdam and Frankfurt sit within a few pixels.
     const fit = { k: 2, ox: 0, oy: 0 };
     const pts = lightPoints(LISTED, fit);
     for (const p of pts) {
@@ -81,8 +82,68 @@ describe("lightPoints", () => {
       const pb = pts.find((p) => p.cc === b)!;
       return Math.hypot(pa.x - pb.x, pa.y - pb.y);
     };
-    const raw = Math.hypot((ANCHORS.gb.x - ANCHORS.fr.x) * fit.k, (ANCHORS.gb.y - ANCHORS.fr.y) * fit.k);
-    expect(close("gb", "fr")).toBeGreaterThan(raw);
+    const raw = Math.hypot((ANCHORS.gb.x - ANCHORS.nl.x) * fit.k, (ANCHORS.gb.y - ANCHORS.nl.y) * fit.k);
+    expect(close("gb", "nl")).toBeGreaterThan(raw);
+  });
+});
+
+/** The column layouts put the mark in the map's north-east, where India's
+ * light now is (2026-11-06). Shrinking around its centre never clears that
+ * light, so the mark stepped aside on every phone; where it would, it
+ * shrinks into the stage's top-right corner instead. Laid out as
+ * WorldMap's placeInStage, with its stage sizes: 350x183 is the phone
+ * preview's 390x844 main page. */
+describe("the mark in a column stage, with India listed", () => {
+  function stageMark(w: number, h: number, countries: readonly string[], corner = true) {
+    const box = boxFor(countries);
+    const fit = fitBox(box, { x: 0, y: 0, w, h })!;
+    const left = fit.ox + box.x0 * fit.k;
+    const top = fit.oy + box.y0 * fit.k;
+    const vx0 = left + 0.56 * (box.x1 - box.x0) * fit.k;
+    const vx1 = w - 4;
+    const vy1 = top + 0.8 * (box.y1 - box.y0) * fit.k;
+    const size = Math.min(vx1 - vx0, vy1 - 2);
+    if (size <= 0) return null;
+    let wanted = { x: vx0 + (vx1 - vx0 - size) / 2, y: 2 + (vy1 - 2 - size) / 2, s: size };
+    const points = lightPoints(countries, fit);
+    if (corner && !placeRibbon(wanted, points)) wanted = placeRibbonNorthEast({ x: vx1 - size, y: 2, s: size }, points) ?? wanted;
+    return placeRibbon(wanted, points);
+  }
+
+  it("stepped aside at phone sizes before, and is drawn clear of every light now", () => {
+    for (const [w, h] of [[350, 183], [375, 240], [390, 280], [412, 300], [430, 340], [600, 360]]) {
+      expect(stageMark(w, h, LISTED, false), `${w}x${h} before`).toBeNull();
+      const mark = stageMark(w, h, LISTED);
+      expect(mark, `${w}x${h}`).not.toBeNull();
+      expect(mark!.s).toBeGreaterThanOrEqual(RIBBON_MIN);
+      // In the corner: flush with the region's top and right edges.
+      expect(mark!.y).toBe(2);
+      expect(mark!.x + mark!.s).toBeCloseTo(w - 4, 6);
+    }
+  });
+
+  it("is placed exactly as before for a list with nothing in that corner", () => {
+    const without = LISTED.filter((cc) => cc !== "in");
+    for (let w = 200; w <= 1000; w += 23) {
+      for (let h = 96; h <= 700; h += 19) expect(stageMark(w, h, without), `${w}x${h}`).toEqual(stageMark(w, h, without, false));
+    }
+  });
+
+  it("shrinks towards the top-right corner, never over a light or under the minimum", () => {
+    const wanted = { x: 100, y: 0, s: 200 };
+    const light = [{ x: 150, y: 120 }];
+    const placed = placeRibbonNorthEast(wanted, light)!;
+    expect(placed.s).toBeLessThan(wanted.s);
+    expect(placed.x + placed.s).toBeCloseTo(300, 6);
+    expect(placed.y).toBe(0);
+    expect(clearOf(placed, light, RIBBON_MARGIN)).toBe(true);
+    expect(placeRibbonNorthEast({ x: 0, y: 0, s: 100 }, [{ x: 95, y: 5 }])).toBeNull();
+  });
+
+  it("is what WorldMap's column layout uses", () => {
+    const map = readFileSync(new URL("../components/main/WorldMap.tsx", import.meta.url), "utf8");
+    expect(map).toContain("if (wanted && !placeRibbon(wanted, points)) {");
+    expect(map).toContain("placeRibbonNorthEast({ x: vx1 - size, y: vy0, s: size }, points) ?? wanted");
   });
 });
 
