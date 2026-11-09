@@ -54,6 +54,12 @@ const STOP_LOCK_WAIT: Duration = Duration::from_secs(3);
 /// this is the window for them to notice, unwind and release.
 const STOP_LOCK_WAIT_AFTER_ABANDON: Duration = Duration::from_secs(10);
 
+/// The most the stop waits to have said that a hold is being let go of
+/// (`Hold::warn_of_letting_go`), before its teardown goes ahead anyway:
+/// the warning's own wait, and room to take the hold's lock -- which a WFP
+/// call under it can keep. A stop that waited on that would never stop.
+const STOP_WARN_WAIT: Duration = Duration::from_secs(1);
+
 mod adapters;
 mod cleanup_log;
 mod engines;
@@ -694,14 +700,20 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
         // still answering. Told only at its next read, the app said
         // "blocked" 1.7 s over traffic leaving on the VM. Nothing held,
         // nothing waited for; and a crash or a kill warns nobody.
+        //
+        // Bounded (STOP_WARN_WAIT), and on a thread of its own rather than
+        // the runtime's blocking pool: the runtime's drop waits for that
+        // pool, so a warning stuck on the hold's lock would have kept the
+        // service from stopping at all.
         if still_serving {
             let hold = std::sync::Arc::clone(&reconnect_hold);
-            let warned = tokio::task::spawn_blocking(move || {
-                hold.warn_of_letting_go(engines::reconnect_hold::LET_GO_SAID_WITHIN)
+            let (said, warned) = tokio::sync::oneshot::channel();
+            let _ = std::thread::Builder::new().name("neoxify-hold-warn".into()).spawn(move || {
+                let _ = said.send(hold.warn_of_letting_go(engines::reconnect_hold::LET_GO_SAID_WITHIN));
             });
             tokio::select! {
                 _ = &mut serving => {}
-                _ = warned => {}
+                _ = timeout(STOP_WARN_WAIT, warned) => {}
             }
         }
         // No more connections from here: nothing new is let in behind the
