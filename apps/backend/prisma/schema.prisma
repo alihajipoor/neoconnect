@@ -897,6 +897,12 @@ model UsageRecord {
 
   @@index([subscriptionId, reportedAt])
   @@index([nodeId, reportedAt])
+  // No query reads usage by credential, but every revoke does. The foreign
+  // key's SET NULL makes Postgres find this credential's usage rows on each
+  // protocol_users delete, and without this index that was a full scan of
+  // the table: 2.7 s per revoked credential at 2.6 million rows, and about
+  // 45 minutes for one plan edit's 6,722 revocations (2026-11-07).
+  @@index([protocolUserId])
   @@map("usage_records")
 }
 
