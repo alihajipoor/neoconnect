@@ -26,6 +26,7 @@ import {
 import type { ResellerBalance, ResellerVoucher } from "@/lib/types";
 import { Pager } from "@/components/dashboard/pager";
 import { generateVoucher, resendVoucher, revokeVoucher } from "./actions";
+import { ActivateForm } from "./activate-form";
 import { balanceLabel, canMintFrom } from "./balance";
 
 export function ResellerWorkspace({
@@ -186,6 +187,8 @@ export function ResellerWorkspace({
           </Button>
         </div>
       </Card>
+
+      <ActivateForm balances={balances} />
 
       <Card className="p-0">
         <div className="border-b border-white/5 p-5">

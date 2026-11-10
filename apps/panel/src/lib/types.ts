@@ -584,6 +584,19 @@ export interface ResellerVoucher {
   canRevoke: boolean;
 }
 
+/** What comes back when a reseller puts a plan straight onto a
+ * customer's account. The code is the one minted and used to do it; it
+ * is already in their list as redeemed. */
+export interface ResellerActivation {
+  activated: boolean;
+  plan: { id: string; name: string };
+  customerEmail: string;
+  voucherId: string;
+  code: string;
+  subscriptionId: string;
+  expiresAt: string | null;
+}
+
 /** The operator's view of a reseller. */
 export interface ResellerSummary {
   id: string;
