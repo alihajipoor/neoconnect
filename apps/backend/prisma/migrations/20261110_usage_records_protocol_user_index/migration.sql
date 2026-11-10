@@ -1,0 +1,27 @@
+-- An index on usage_records("protocolUserId"), for the foreign key's
+-- delete rule rather than for any query.
+--
+-- usage_records."protocolUserId" references protocol_users ON DELETE SET
+-- NULL (20260724, so revoking a credential keeps its usage history
+-- instead of failing or deleting it). Postgres does not index the
+-- referencing side of a foreign key by itself, so every protocol_users
+-- delete looked for that credential's usage rows by scanning the whole
+-- table. At 2.6 million rows that took 2.7 s per delete. A plan edit
+-- revokes the credentials of every subscription on the plan, device
+-- credentials included: 6,722 of them on 2026-11-07, about 45 minutes,
+-- long enough to exhaust Prisma's connection pool and silence an agent.
+-- With the index the same lookup takes 0.13 ms.
+--
+-- ---------------------------------------------------------------------
+-- APPLYING THIS TO THE LIVE DATABASE -- READ BEFORE `migrate deploy`
+-- ---------------------------------------------------------------------
+-- A plain CREATE INDEX blocks writes to the table while it builds, and
+-- usage reports arrive every minute. On a database with live customers,
+-- run concurrent.sql (next to this file) first; this statement then
+-- finds the index present and does nothing. Production had it applied
+-- that way on 2026-11-10, built in 9 s and checked valid.
+--
+-- The name is Prisma's own for @@index([protocolUserId]), so the schema
+-- and this migration agree (CI's `prisma migrate diff --exit-code`).
+
+CREATE INDEX IF NOT EXISTS "usage_records_protocolUserId_idx" ON "usage_records"("protocolUserId");
