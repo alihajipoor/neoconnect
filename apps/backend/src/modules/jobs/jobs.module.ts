@@ -13,6 +13,7 @@ import { ANNOUNCEMENTS_QUEUE, SWEEPS_QUEUE } from "./jobs.constants";
 import { ReferralsModule } from "../referrals/referrals.module";
 import { ProtocolUsersModule } from "../protocol-users/protocol-users.module";
 import { RelayAuthModule } from "../relay-auth/relay-auth.module";
+import { NodeDoorsModule } from "../node-doors/node-doors.module";
 import { SweepsProcessor } from "./sweeps.processor";
 import { SweepsSchedulerService } from "./sweeps-scheduler.service";
 import { AnnouncementsProcessor } from "./announcements.processor";
@@ -57,6 +58,9 @@ const announcementsQueue = BullModule.registerQueue({ name: ANNOUNCEMENTS_QUEUE 
     // Prisma and the agent gateway only.
     ProtocolUsersModule,
     RelayAuthModule,
+    // For the round that learns each node's door. No cycle: it pulls in
+    // Prisma only.
+    NodeDoorsModule,
   ],
   providers: [SweepsProcessor, SweepsSchedulerService, AnnouncementsProcessor],
   exports: [announcementsQueue],

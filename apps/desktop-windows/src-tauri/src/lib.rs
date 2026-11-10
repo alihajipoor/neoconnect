@@ -1,6 +1,7 @@
 mod autostart;
 mod bundle_scope;
 mod control_plane_probe;
+mod door_http;
 mod health_ip;
 mod notify;
 mod relay_http;
@@ -217,6 +218,11 @@ pub fn run() {
             // and SPKI pin, when no ordinary route answers. See
             // relay_http.rs.
             relay_http::relay_request,
+            // A server's door to the API: any API call, to one of our VPN
+            // servers by address and SPKI pin, when no name of ours
+            // answers. A command of its own, so the relay's list of calls
+            // stays what it is. See door_http.rs.
+            door_http::door_request,
             // The HTTP scope for the hosts of a signed endpoint bundle,
             // checked here before it is widened. See bundle_scope.rs.
             bundle_scope::grant_bundle_scope,

@@ -1,8 +1,9 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, NotFoundException, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AlertingService } from "../alerting/alerting.service";
 import { HourlyBudget, PagerService } from "../alerting/pager.service";
+import { NodeDoorsService } from "../node-doors/node-doors.service";
 import { CreateNodeDto } from "./dto/create-node.dto";
 
 /** How long between repeat alerts for a node that is still OFFLINE.
@@ -60,6 +61,9 @@ export class NodesService {
     private readonly alerting: AlertingService,
     private readonly pager: PagerService,
     private readonly config: ConfigService,
+    // Optional for the specs that build this by hand; without it no door
+    // is asked for as a node comes online, only on the timer.
+    @Optional() private readonly doors?: NodeDoorsService,
   ) {}
 
   list() {
@@ -134,6 +138,11 @@ export class NodesService {
         agentVersion: extra?.agentVersion,
       },
     });
+
+    // A node that has just come online is asked for its door to the panel
+    // API (modules/node-doors) -- a new or replaced server has one within
+    // the minute instead of at the next round. Scheduled, never awaited.
+    if (status === "ONLINE" && previous?.status !== "ONLINE") this.doors?.learnSoon(id);
 
     if (previous && previous.status !== status) {
       const label = status === "OFFLINE" ? "went OFFLINE" : "is back ONLINE";

@@ -21,6 +21,12 @@
  *
  * one `phase:` group per leg of the request, each address as
  * `host[:port]=outcome@milliseconds`, in the order they were started.
+ *
+ * When the request was also offered to servers' doors (server-doors.ts),
+ * a `door:` group follows, one entry for each door that was asked and
+ * none for a door that was not:
+ *
+ *     req: a.example=timeout@10004; door: 192.0.2.7:2053=pin@310 192.0.2.9:2096=h200@420
  */
 
 /** Which leg of a request an attempt belongs to.
@@ -90,10 +96,39 @@ export interface TraceEntry {
   settledAt?: number;
 }
 
+/** How one door's attempt ended.
+ *
+ * - `h<status>`: an HTTP answer came back through it.
+ * - `timeout`: no connection, or no answer, in the time it had.
+ * - `net`: the connection was refused or cut.
+ * - `pin`: the server at that address presented a key that is not the
+ *   door's. Nothing was sent to it.
+ * - `tls`: the handshake failed some other way. Nothing was sent.
+ * - `bad`: the door as this device holds it cannot be dialled at all (a
+ *   malformed address or pin). Refused here; the network was not asked.
+ * - `pending`: not settled; rendered as `budget`, as for an address.
+ */
+export type DoorAttemptOutcome = `h${number}` | "timeout" | "net" | "pin" | "tls" | "bad" | "pending";
+
+/** One door one request was offered to. Apart from `entries`, which is
+ * the addresses by name and is read for what it says about them: whether
+ * every route failed (`everyRouteFailed` in api.ts), and which to probe
+ * (control-plane-probe.ts). */
+export interface DoorAttempt {
+  /** `address:port`, the unit that gets blocked. */
+  door: string;
+  startedAt: number;
+  outcome: DoorAttemptOutcome;
+  settledAt?: number;
+}
+
 export interface EndpointTrace {
   /** The phase new attempts are recorded under. Moved on by `api.ts`. */
   phase: TracePhase;
   entries: TraceEntry[];
+  /** The doors the request was offered to, in the order they were asked.
+   * Absent when none was. */
+  doors?: DoorAttempt[];
   /** Traces each attempt is recorded in as well, as the same entry: the
    * requests waiting on a token refresh that one of them sent
    * (`renewSession` in api.ts). Each still says what its renewal did,
@@ -130,6 +165,37 @@ export function settleAttempt(
   if (!entry || entry.outcome !== "pending") return;
   entry.outcome = outcome;
   entry.settledAt = now;
+}
+
+/** Starts recording one door's attempt. Undefined when nobody is tracing. */
+export function beginDoorAttempt(
+  trace: EndpointTrace | undefined,
+  door: string,
+  now = Date.now(),
+): DoorAttempt | undefined {
+  if (!trace) return undefined;
+  const attempt: DoorAttempt = { door, startedAt: now, outcome: "pending" };
+  (trace.doors ??= []).push(attempt);
+  return attempt;
+}
+
+/** Records how a door's attempt ended; the first settlement wins. */
+export function settleDoorAttempt(
+  attempt: DoorAttempt | undefined,
+  outcome: Exclude<DoorAttemptOutcome, "pending">,
+  now = Date.now(),
+): void {
+  if (!attempt || attempt.outcome !== "pending") return;
+  attempt.outcome = outcome;
+  attempt.settledAt = now;
+}
+
+/** Takes back an attempt that turned out never to have been made: the
+ * call was refused on this device before any door was dialled. */
+export function withdrawDoorAttempt(trace: EndpointTrace | undefined, attempt: DoorAttempt | undefined): void {
+  if (!trace?.doors || !attempt) return;
+  trace.doors = trace.doors.filter((kept) => kept !== attempt);
+  if (trace.doors.length === 0) delete trace.doors;
 }
 
 /** The class of a failed fetch, from what the HTTP plugin rejected with.
@@ -180,7 +246,18 @@ export function renderTrace(trace: EndpointTrace, now = Date.now()): string {
     const ms = Math.max(0, Math.round((entry.settledAt ?? now) - entry.startedAt));
     group.parts.push(`${endpointLabel(entry.base)}=${outcome}@${ms}`);
   }
-  return groups.map((g) => `${g.phase}: ${g.parts.join(" ")}`).join("; ");
+  const sections = groups.map((g) => `${g.phase}: ${g.parts.join(" ")}`);
+  // After the legs by name, whichever was asked first: an entry carries
+  // how long it took, not when.
+  if (trace.doors && trace.doors.length > 0) {
+    const parts = trace.doors.map((attempt) => {
+      const outcome = attempt.outcome === "pending" ? "budget" : attempt.outcome;
+      const ms = Math.max(0, Math.round((attempt.settledAt ?? now) - attempt.startedAt));
+      return `${attempt.door}=${outcome}@${ms}`;
+    });
+    sections.push(`door: ${parts.join(" ")}`);
+  }
+  return sections.join("; ");
 }
 
 /** The longest `apiEndpoint` the current backend accepts. Matches
@@ -283,7 +360,9 @@ function cutMiddle(pieces: Piece[], n: number): Piece[] {
  * part a trace cannot reconstruct, and it comes last, so cutting from
  * the end -- as this once did -- removed it first. Only when the
  * attempts are down to their first and last entry does the probe lose
- * its own middle; then the remaining attempts go, then the rest.
+ * its own middle; then the remaining attempts go, then the rest. (A
+ * `door:` group is part of the attempt list here, and is short: three
+ * entries at most.)
  *
  * Every cut leaves `[N cut]` where the N entries were. */
 export function clipTrace(text: string, max: number): string {

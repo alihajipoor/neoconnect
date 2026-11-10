@@ -44,6 +44,7 @@ const {
   updateSnapshotProtocolUsers,
   updateSnapshotRoutes,
 } = await import("./credential-cache");
+const doorList = await import("./door-list");
 
 const credential = {
   id: "pu-1",
@@ -393,5 +394,56 @@ describe("the server list's own answer, written into the snapshot", () => {
     await saveSnapshot({ subscription: { ...plan, planId: "plan-0" }, protocolUsers: [credential], routes: [] });
     await expect(updateSnapshotRoutes(plan, [germany])).resolves.toBe("skipped");
     expect((await loadSnapshot())!.routes).toEqual([]);
+  });
+});
+
+/** A server's door to the API travels on its credential
+ * (`connection.door`), and the cache is what keeps it across a restart:
+ * on a network where no name answers, the cached list is the only place a
+ * door can come from. */
+describe("the doors in a cached server list", () => {
+  const { knownDoors, resetDoorListForTests } = doorList;
+  const door = {
+    host: "192.0.2.10",
+    port: 2053,
+    pins: [`sha256/${btoa(String.fromCharCode(...new Uint8Array(32).fill(1)))}`],
+    sni: "www.example.org",
+  };
+  const withDoor = {
+    ...credential,
+    protocol: "XRAY_VLESS_TLS",
+    connection: { host: door.host, port: 443, security: "TLS", publicParams: {}, door },
+  } as unknown as ProtocolUser;
+
+  afterEach(() => resetDoorListForTests());
+
+  it("come back from the cache as they went in", async () => {
+    await saveSnapshot({ subscription: null, protocolUsers: [withDoor, credential], routes: [] });
+    const cached = (await loadSnapshot())!;
+    expect(cached.protocolUsers[0].connection.door).toEqual(door);
+    expect(cached.protocolUsers[1].connection.door).toBeUndefined();
+    expect(await knownDoors()).toEqual([door]);
+  });
+
+  it("are read from the cache by a run that has read nothing yet", async () => {
+    await saveSnapshot({ subscription: null, protocolUsers: [withDoor], routes: [] });
+    // A restart: nothing in memory, the snapshot on disk.
+    resetDoorListForTests();
+    expect(await knownDoors()).toEqual([door]);
+  });
+
+  it("follow the list: a refresh without a door takes it away", async () => {
+    await saveSnapshot({ subscription: null, protocolUsers: [withDoor], routes: [] });
+    expect(await updateSnapshotProtocolUsers([credential])).toBe("written");
+    expect(await knownDoors()).toEqual([]);
+    expect((await loadSnapshot())!.protocolUsers[0].connection.door).toBeUndefined();
+  });
+
+  it("go with the snapshot at sign-out", async () => {
+    await saveSnapshot({ subscription: null, protocolUsers: [withDoor], routes: [] });
+    await clearSnapshot();
+    expect(await knownDoors()).toEqual([]);
+    expect(await loadSnapshot()).toBeNull();
+    expect(await knownDoors()).toEqual([]);
   });
 });

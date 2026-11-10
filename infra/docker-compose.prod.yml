@@ -118,6 +118,13 @@ services:
       # Token for the inside-country data checks' collector
       # (scripts/inside-probe). Unset, that endpoint refuses everything.
       INSIDE_PROBE_TOKEN: ${INSIDE_PROBE_TOKEN:-}
+      # Each VPN server as a door to this API by address (modules/node-doors).
+      # All optional: blank is on, with the defaults in the code.
+      # NODE_DOORS=off stops the checks and takes doors out of every answer.
+      NODE_DOORS: ${NODE_DOORS:-}
+      NODE_DOOR_PORTS: ${NODE_DOOR_PORTS:-}
+      NODE_DOOR_SNI: ${NODE_DOOR_SNI:-}
+      NODE_DOOR_DOMAINS: ${NODE_DOOR_DOMAINS:-}
       # Per-ISP recommendations: an offline IP-to-ASN table (iptoasn.com,
       # public domain), downloaded once a day. All optional and on by
       # default. ASN_LOOKUP_ENABLED=false turns the feature off (no tags,

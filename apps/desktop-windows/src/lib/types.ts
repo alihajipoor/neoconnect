@@ -90,6 +90,28 @@ export type PaymentStart =
       payCurrency: string;
     };
 
+/** A server as a door to the API: where the server already answers `/api`
+ * on its own address, and how to know it without one of our names.
+ *
+ * The API is reached by name, and names are what a filter poisons or
+ * resets while the servers' addresses stay reachable. The backend learns
+ * each server's door by asking the server itself and hands it out here,
+ * with the server list, so a replaced server brings its own door and
+ * nothing else has to change (docs/reachability.md; server-doors.ts says
+ * when one is used). */
+export interface ServerDoor {
+  /** The server's address: the credential's own `host`. */
+  host: string;
+  port: number;
+  /** One to three SPKI pins, the current key's first, in the relay of
+   * last resort's format (`sha256/` and base64). The server is accepted
+   * by one of these and by nothing else. */
+  pins: string[];
+  /** The server name to send in the TLS hello, or null to send none.
+   * Never one of ours. */
+  sni: string | null;
+}
+
 export interface ProtocolUserConnection {
   host: string;
   port: number;
@@ -105,6 +127,10 @@ export interface ProtocolUserConnection {
   transport?: "TCP" | "WS" | "GRPC";
   security?: "NONE" | "TLS" | "REALITY";
   publicParams: Record<string, unknown>;
+  /** This server's door to the API, when the backend has a fresh one.
+   * Absent from a backend that hands out none, and for a server whose
+   * door has not passed its check lately. */
+  door?: ServerDoor;
 }
 
 export interface ProtocolUser {

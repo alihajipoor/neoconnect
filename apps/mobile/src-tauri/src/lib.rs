@@ -35,6 +35,15 @@ mod health_ip;
 #[path = "../../../desktop-windows/src-tauri/src/relay_http.rs"]
 mod relay_http;
 
+/// A server's door to the API -- the Windows app's file, compiled here by
+/// path like the relay above, whose pin check it shares.
+///
+/// For when no name of ours answers and the servers' own addresses still
+/// do: any API call, sent to one of our VPN servers by address and
+/// accepted by the SPKI pin the API handed out with the server list.
+#[path = "../../../desktop-windows/src-tauri/src/door_http.rs"]
+mod door_http;
+
 /// The HTTP scope for the hosts a signed endpoint bundle names -- the
 /// Windows app's file again. The scope written at build time knows only
 /// the seed bundle's hosts; this grants a newer bundle's once its
@@ -116,6 +125,8 @@ pub fn run() {
             health_ip::data_check_v4,
             // The relay of last resort; see `mod relay_http` above.
             relay_http::relay_request,
+            // A server's door to the API; see `mod door_http` above.
+            door_http::door_request,
             // A signed bundle's hosts into the HTTP scope; see
             // `mod bundle_scope` above.
             bundle_scope::grant_bundle_scope

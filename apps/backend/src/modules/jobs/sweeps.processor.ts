@@ -10,6 +10,7 @@ import { ReachabilityService } from "../reachability/reachability.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { RelayAuthService } from "../relay-auth/relay-auth.service";
 import { BlockWatchService } from "../block-watch/block-watch.service";
+import { NodeDoorsService } from "../node-doors/node-doors.service";
 import { SWEEPS_QUEUE, STALE_PENDING_AFTER_MS } from "./jobs.constants";
 
 @Processor(SWEEPS_QUEUE)
@@ -26,6 +27,7 @@ export class SweepsProcessor extends WorkerHost {
     private readonly protocolUsersService: ProtocolUsersService,
     private readonly relayAuthService: RelayAuthService,
     private readonly blockWatchService: BlockWatchService,
+    private readonly nodeDoorsService: NodeDoorsService,
   ) {
     super();
   }
@@ -125,6 +127,14 @@ export class SweepsProcessor extends WorkerHost {
             `block watch: ${flagged.map((r) => `${r.nodeName}=${r.verdict ?? "outage"}[${r.firing.join("+")}]`).join(", ")}`,
           );
         }
+        break;
+      }
+      case "node-doors": {
+        // Asks each node which of its ports is a door to the panel API
+        // and records it; reads from nodes, changes none. Off with
+        // NODE_DOORS=off. Logs its own lines, one per change, and
+        // swallows its own failures.
+        await this.nodeDoorsService.runCycle();
         break;
       }
       default:

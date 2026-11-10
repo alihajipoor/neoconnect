@@ -15,6 +15,7 @@ import {
 } from "./endpoint-demotion";
 import { beginAttempt, failureOutcome, newTrace, settleAttempt, type EndpointTrace, type TraceEntry } from "./endpoint-trace";
 import {
+  endRelayMode,
   noteNormalRouteAnswered,
   relayRequest,
   skipNormalRoutes,
@@ -22,6 +23,15 @@ import {
   type RelayOutcome,
   type RelayUse,
 } from "./last-resort";
+import {
+  askDoorsFirst,
+  doorRequest,
+  namesProbeDue,
+  noteDoorNotBackend,
+  noteNameAnswered,
+  type DoorCall,
+  type DoorOutcome,
+} from "./server-doors";
 import { clearTokens, getTokens, setTokens } from "./session";
 import { announceSessionRevoked } from "./session-revoked";
 import type { TokenPair } from "./types";
@@ -157,8 +167,10 @@ function noteAnswer(base: string, response: Response, answer: BackendAnswer): vo
     servedBackend.add(base);
     notBackend.delete(base);
     // The usual way reaches the backend again: relay mode, if it held,
-    // is over (last-resort.ts, R1.7).
+    // is over (last-resort.ts, R1.7), and so is going to the servers'
+    // doors first (server-doors.ts).
     noteNormalRouteAnswered();
+    noteNameAnswered();
   }
   if (servesBackend(response) || bodilessSuccess(response)) announceBackendAnswer(answer);
 }
@@ -416,6 +428,7 @@ export function resetRaceWinnerForTests(): void {
   refreshInFlight = null;
   servedBackend.clear();
   notBackend.clear();
+  doorsServedBackend.clear();
   resetDemotionsForTests();
 }
 
@@ -1329,11 +1342,13 @@ export async function publicRequest<T>(
   const { relay, ...plain } = init ?? {};
   // A request sent only to addresses a race has just heard from is a
   // sign-in's attempt, whose relay leg is auth.ts's own.
-  if (relay === undefined || via !== undefined) return await publicDirect<T>(path, plain, trace, via);
+  if (via !== undefined) return await publicDirect<T>(path, plain, trace, via);
+  const traced = trace ?? newTrace();
   return await withLastResort<T>(
-    trace ?? newTrace(),
-    (traced) => publicDirect<T>(path, plain, traced),
-    (normal) => viaRelay<T>(path, plain, relay, normal),
+    traced,
+    (asked) => publicDirect<T>(path, plain, asked),
+    () => viaDoor<T>(path, plain, traced),
+    relay === undefined ? null : (normal) => viaRelay<T>(path, plain, relay, normal),
   );
 }
 
@@ -1376,8 +1391,9 @@ async function publicDirect<T>(
 // ---------------------------------------------------------------------------
 // The relay of last resort (last-resort.ts; docs/relay-last-resort.md).
 
-/** Whether `failure` is the kind only blocking explains, so the relay of
- * last resort may be asked (R1.2): nothing answered anywhere, and every
+/** Whether `failure` is the kind only blocking explains, so the servers'
+ * doors, and after them the relay of last resort, may be asked (R1.2):
+ * nothing answered anywhere, and every
  * address asked failed in transport -- a timeout, a connection that
  * failed, or a name on Iran's block page. Never after any answer at all,
  * however unhelpful (an HTTP status, a page, the backend answering a
@@ -1408,29 +1424,81 @@ interface RelayLeg<T> {
  * failure's `error` is; the screens word it by its code. */
 export const RELAY_DISCONNECT = "Disconnect to use the backup route.";
 
-/** Runs a request over the ordinary routes, and over the relay when they
- * have all failed as only blocking explains -- or the relay first, while
- * relay mode says they were found blocked minutes ago and they are not
- * due to be asked again (`skipNormalRoutes`). Never both at once: the
- * relay is never raced (R1.1). */
+/** Runs a request over the ordinary routes -- the addresses by name --
+ * and, when they have all failed as only blocking explains, over what
+ * comes after them. The owner's order (2026-11-10): names first for
+ * everyone; then the servers' own doors (`doored`; server-doors.ts),
+ * which carry every request; then, for a request that opted in, the relay
+ * of last resort (`relayed`, null for one that did not).
+ *
+ * Two memories change where it starts. While doors answered on this
+ * network minutes ago (`askDoorsFirst`), the doors are asked first and the
+ * names only if no door answers; the names are asked again on their own
+ * meanwhile (`probeNames`) -- the moment that starts (`askDoor`), and
+ * every few minutes -- and an answer there puts them back in front.
+ * Otherwise, while relay mode says the ordinary routes were found blocked
+ * minutes ago and they are not due to be asked again (`skipNormalRoutes`),
+ * the relay is asked first, as before.
+ *
+ * Never two at once -- neither the doors nor the relay is raced (R1.1) --
+ * and none of them twice for one request. A door leg that ends the
+ * request ends it here: a write that went out through a door and got no
+ * answer is not sent to the names or to the relay after it. */
 async function withLastResort<T>(
   trace: EndpointTrace,
   normal: (trace: EndpointTrace) => Promise<ApiResult<T>>,
-  relayed: (normal: RequestFailure | null) => Promise<RelayLeg<T>>,
+  doored: () => Promise<RelayLeg<T>>,
+  relayed: ((normal: RequestFailure | null) => Promise<RelayLeg<T>>) | null,
 ): Promise<ApiResult<T>> {
-  if (skipNormalRoutes()) {
-    const leg = notForThisNetwork(await relayed(null));
+  let doorsAsked = false;
+  let relayLeg: RelayLeg<T> | null = null;
+  if (askDoorsFirst()) {
+    if (namesProbeDue()) probeNames();
+    doorsAsked = true;
+    const leg = await doored();
     if (leg.result) return leg.result;
+    // No door answered: the names are asked after all.
+  } else if (relayed !== null && skipNormalRoutes()) {
+    relayLeg = notForThisNetwork(await relayed(null));
+    if (relayLeg.result) return relayLeg.result;
     // Not sent, or sent and unanswered: the ordinary routes are asked
     // after all, and the relay is not asked twice.
-    const result = await normal(trace);
-    return leg.dialled && !result.ok ? { ...result, relayTried: true } : result;
   }
   const result = await normal(trace);
-  if (result.ok || !everyRouteFailed(result, trace)) return result;
+  const dialled = relayLeg !== null && relayLeg.dialled;
+  const ended = (): ApiResult<T> => (dialled && !result.ok ? { ...result, relayTried: true } : result);
+  if (result.ok || !everyRouteFailed(result, trace)) return ended();
+  if (!doorsAsked) {
+    const leg = await doored();
+    if (leg.result) return leg.result;
+  }
+  if (relayed === null || relayLeg !== null) return ended();
   const leg = notForThisNetwork(await relayed(result));
   if (leg.result) return leg.result;
   return leg.dialled ? { ...result, relayTried: true } : result;
+}
+
+/** Asks the names for the health check, on its own, while requests go to
+ * the doors first: nobody waits for it, and what it finds is noted as any
+ * answer is (`noteAnswer`) -- the backend answering at a name ends "doors
+ * first". Over the names alone, so it can never come back here. */
+function probeNames(): void {
+  void publicDirect<unknown>(HEALTH_PATH, { method: "GET" }).catch(() => undefined);
+}
+
+/** `doorRequest`, and the names asked again at once if its answer has
+ * just put the doors in front (`namesProbeDue`).
+ *
+ * The request that came here failed at every name, and that is all that
+ * is known: the names may work on this network -- it was back by the time
+ * the door was asked, or only this request was too slow for them. Asked
+ * now, they say so in the time one answer takes, and "doors first" ends
+ * (`noteNameAnswered`) before the next requests have gone to servers by
+ * address for minutes on a network where the names answer. */
+async function askDoor(call: DoorCall, trace: EndpointTrace | undefined): Promise<DoorOutcome> {
+  const outcome = await doorRequest(call, trace);
+  if (namesProbeDue()) probeNames();
+  return outcome;
 }
 
 /** Whether `result` is the backend refusing a relay call for the network's
@@ -1547,6 +1615,154 @@ async function viaRelay<T>(
   return { result: relayResult<T>(outcome.answer), dialled: true };
 }
 
+// ---------------------------------------------------------------------------
+// The servers' doors (server-doors.ts; docs/reachability.md).
+
+/** Sends one request through a server's door, or says why it was not.
+ *
+ * A door carries any call, as the mirror by name it is does; what it is
+ * told here is the one thing that depends on the call. A write that must
+ * not arrive twice -- every one but the token refresh
+ * (`REPEATABLE_WRITES`) -- is not offered to a second door once it has
+ * gone out, nor after a page that says the backend may have acted on it
+ * (`mayHaveReachedBackend`): the rule a walk over addresses by name keeps.
+ *
+ * The backend's own answer through a door is announced as its answer by
+ * any address is (`announceBackendAnswer`): a screen saying Neoxify
+ * cannot be reached stops saying it. And it ends relay mode, which is for
+ * a network where nothing before the relay answers. It is not noted
+ * against any address by name, and is never the remembered one. The door
+ * is noted as one the backend has answered through
+ * (`doorsServedBackend`). None of that on a JSON 401, 403 or 404, which
+ * proves nothing by any route (`DOUBTFUL_STATUSES`). */
+async function doorExchange(path: string, init: RequestInit, trace: EndpointTrace | undefined): Promise<DoorOutcome> {
+  // A body that is not text is not one the command carries.
+  if (init.body != null && typeof init.body !== "string") return { kind: "skipped" };
+  const method = (init.method ?? "GET").toUpperCase();
+  const once = method !== "GET" && method !== "HEAD" && !REPEATABLE_WRITES.has(path);
+  const outcome = await askDoor(
+    {
+      method,
+      path,
+      headers: headerRecord({ "Content-Type": "application/json" }, init.headers),
+      body: typeof init.body === "string" ? init.body : undefined,
+      signal: init.signal ?? null,
+      ...(once ? { mayHaveArrived: mayHaveReachedBackend } : {}),
+    },
+    trace,
+  );
+  if (outcome.kind === "answered") {
+    const answer = outcome.answer;
+    const backend = relayAnswerIsBackend(answer);
+    const bodiless = !backend && answer.contentType === "" && answer.status >= 200 && answer.status < 300;
+    if ((backend && !DOUBTFUL_STATUSES.has(answer.status)) || bodiless) {
+      doorsServedBackend.add(outcome.door);
+      endRelayMode();
+      announceBackendAnswer({ read: isRead(path, init) });
+    }
+  }
+  return outcome;
+}
+
+/** The doors the backend has answered through in this run, as far as an
+ * answer can show it: `servedBackend`, for doors. */
+const doorsServedBackend = new Set<string>();
+
+/** Whether a 401 to the token refresh, through `door`, is the backend
+ * refusing the token -- which ends the session, and on a network where
+ * no name answers leaves the customer with no way to sign in again.
+ *
+ * The rule for an address by name (`refusedByBackend`), kept for a door.
+ * The pin says the answer came from our server; it does not say that
+ * server's mirror still points at the API. One that does not has been
+ * seen answering JSON 401 to everything, by name, and a list of doors in
+ * the cache can be older than whatever broke it. So the refusal is
+ * believed only from a door the backend has otherwise answered through in
+ * this run, or once that same door has answered the public health check
+ * as only the backend does (`provesBackend`). A door that fails that is
+ * put behind the others (`noteDoorNotBackend`), and the session stays. */
+async function refusedThroughDoorByBackend(door: string, trace: EndpointTrace | undefined): Promise<boolean> {
+  if (doorsServedBackend.has(door)) return true;
+  const health = await askDoor({ method: "GET", path: HEALTH_PATH, only: door }, trace);
+  const proves =
+    health.kind === "answered" &&
+    relayAnswerIsBackend(health.answer) &&
+    ((health.answer.status >= 200 && health.answer.status < 300) ||
+      health.answer.status === 503 ||
+      health.answer.status === 429);
+  if (proves) doorsServedBackend.add(door);
+  else noteDoorNotBackend(door);
+  return proves;
+}
+
+/** What a door leg came to when no door gave an answer.
+ *
+ * A write that went out and may have arrived (`spent`) ends the request:
+ * the server took the connection and the request, so it was reached, and
+ * then nothing came back -- `STOPPED_ANSWERING`, as for a write by name
+ * whose address answered the health check and then not the write. It is
+ * not `everyRouteFailed`, so nothing sends it on. Otherwise the leg has
+ * no result, and whoever comes next is asked. */
+function doorLegWithout<T>(outcome: Exclude<DoorOutcome, { kind: "answered" }>): RelayLeg<T> {
+  if (outcome.kind !== "unanswered") return { result: null, dialled: false };
+  if (!outcome.spent) return { result: null, dialled: true };
+  return { result: { ok: false, error: STOPPED_ANSWERING, noResponse: true }, dialled: true };
+}
+
+/** A public request through a server's door. */
+async function viaDoor<T>(path: string, init: RequestInit, trace: EndpointTrace | undefined): Promise<RelayLeg<T>> {
+  const outcome = await doorExchange(path, init, trace);
+  if (outcome.kind !== "answered") return doorLegWithout<T>(outcome);
+  return { result: relayResult<T>(outcome.answer), dialled: true };
+}
+
+/** A route to the API that is not an address by name -- the relay of last
+ * resort, or a server's door -- as an authenticated request uses one
+ * (`authenticatedOver`): how one request is sent over it. */
+interface Carrier {
+  /** Which it is: a token refresh under way is shared by the requests on
+   * the same one (`renewOver`). */
+  name: "relay" | "door";
+  /** Sends one request: the answer, or the leg the request ends with for
+   * want of one. */
+  carry<T>(path: string, init: RequestInit): Promise<Carried | { leg: RelayLeg<T> }>;
+  /** Whether a JSON 401 to the token refresh, carried here, is the
+   * backend refusing the token (`renewOver`). */
+  refusedByBackend(carried: Carried): Promise<boolean>;
+}
+
+/** An answer over a carrier, and through which door when it was one. */
+interface Carried {
+  answer: RelayAnswer;
+  door?: string;
+}
+
+function relayCarrier(use: RelayUse, normal: RequestFailure | null): Carrier {
+  return {
+    name: "relay",
+    carry: async <T>(path: string, init: RequestInit) => {
+      const outcome = await relayExchange(path, init, use);
+      return outcome.kind === "answered" ? { answer: outcome.answer } : { leg: legWithout<T>(outcome, use, normal) };
+    },
+    // The relay's TLS is pinned end to end to the origin.
+    refusedByBackend: () => Promise.resolve(true),
+  };
+}
+
+function doorCarrier(trace: EndpointTrace | undefined): Carrier {
+  return {
+    name: "door",
+    carry: async <T>(path: string, init: RequestInit) => {
+      const outcome = await doorExchange(path, init, trace);
+      return outcome.kind === "answered"
+        ? { answer: outcome.answer, door: outcome.door }
+        : { leg: doorLegWithout<T>(outcome) };
+    },
+    refusedByBackend: (carried) =>
+      carried.door === undefined ? Promise.resolve(false) : refusedThroughDoorByBackend(carried.door, trace),
+  };
+}
+
 /** A request through the relay alone, never the ordinary routes: a
  * sign-in's relay leg, or a sign-up that exists only there. Null when the
  * relay was not dialled (see `RelaySkip` in last-resort.ts); otherwise its
@@ -1564,57 +1780,59 @@ export async function relayOnly<T>(
   return { ...(fallback ?? unreachable()), relayTried: true };
 }
 
-/** The token refresh through the relay that is under way, if one is. */
-let relayRenewal: Promise<Refresh> | null = null;
+/** The token refresh under way over the relay, and the one over the
+ * doors, if there is one. */
+const renewals: { relay: Promise<Refresh> | null; door: Promise<Refresh> | null } = { relay: null, door: null };
 
-/** The token refresh, through the relay: once, however many requests
- * found the token expired there (`renewSession` does the same on the
- * ordinary routes). A JSON 401 through the relay is the backend's own --
- * the relay's TLS is pinned end to end to the origin -- and ends the
- * session as one on an ordinary route does. */
-async function renewThroughRelay(sentWith: string, use: RelayUse): Promise<Refresh> {
-  if (relayRenewal !== null) return relayRenewal;
+/** The token refresh, over the relay or a door: once, however many
+ * requests found the token expired there (`renewSession` does the same on
+ * the ordinary routes). A JSON 401 through the relay is the backend's own
+ * -- its TLS is pinned end to end to the origin -- and ends the session as
+ * one on an ordinary route does. One through a door does once the door has
+ * shown it reaches the backend (`refusedThroughDoorByBackend`); until
+ * then it says nothing about the session. */
+async function renewOver(carrier: Carrier, sentWith: string): Promise<Refresh> {
+  const under = renewals[carrier.name];
+  if (under !== null) return under;
   const stored = await getTokens();
   if (stored === null) return { kind: "none" };
   if (stored.accessToken !== sentWith) return { kind: "renewed", tokens: stored };
-  relayRenewal = (async (): Promise<Refresh> => {
-    const outcome = await relayExchange(
-      REFRESH_PATH,
-      { method: "POST", body: JSON.stringify({ refreshToken: stored.refreshToken }), headers: deviceHeaders() },
-      use,
-    );
-    if (outcome.kind !== "answered") return { kind: "unavailable", answered: false };
-    const answer = outcome.answer;
-    if (answer.status === REFRESH_REFUSED && relayAnswerIsBackend(answer)) return { kind: "refused" };
+  const renewal = (async (): Promise<Refresh> => {
+    const carried = await carrier.carry<TokenPair>(REFRESH_PATH, {
+      method: "POST",
+      body: JSON.stringify({ refreshToken: stored.refreshToken }),
+      headers: deviceHeaders(),
+    });
+    if (!("answer" in carried)) return { kind: "unavailable", answered: false };
+    const answer = carried.answer;
+    if (answer.status === REFRESH_REFUSED && relayAnswerIsBackend(answer)) {
+      return (await carrier.refusedByBackend(carried)) ? { kind: "refused" } : { kind: "unavailable", answered: true };
+    }
     const result = relayResult<TokenPair>(answer);
     if (!result.ok || typeof result.data?.accessToken !== "string") return { kind: "unavailable", answered: true };
     await setTokens(result.data);
     return { kind: "renewed", tokens: result.data };
   })().finally(() => {
-    relayRenewal = null;
+    renewals[carrier.name] = null;
   });
-  return relayRenewal;
+  renewals[carrier.name] = renewal;
+  return renewal;
 }
 
-/** An authenticated request through the relay, with its own token refresh
- * on the backend's 401, as `authenticatedAttempt` does on the ordinary
- * routes. */
-async function relayAuthenticated<T>(
-  path: string,
-  init: RequestInit,
-  use: RelayUse,
-  normal: RequestFailure | null,
-): Promise<RelayLeg<T>> {
+/** An authenticated request over the relay or a door, with its own token
+ * refresh on the backend's 401, as `authenticatedAttempt` does on the
+ * ordinary routes. */
+async function authenticatedOver<T>(carrier: Carrier, path: string, init: RequestInit): Promise<RelayLeg<T>> {
   const tokens = await getTokens();
   if (tokens === null) return { result: null, dialled: false };
   const withBearer = (accessToken: string): RequestInit => ({
     ...init,
     headers: headerRecord(init.headers, { Authorization: `Bearer ${accessToken}` }),
   });
-  let outcome = await relayExchange(path, withBearer(tokens.accessToken), use);
-  if (outcome.kind !== "answered") return legWithout<T>(outcome, use, normal);
-  if (outcome.answer.status === 401 && relayAnswerIsBackend(outcome.answer)) {
-    const renewed = await renewThroughRelay(tokens.accessToken, use);
+  let carried = await carrier.carry<T>(path, withBearer(tokens.accessToken));
+  if (!("answer" in carried)) return carried.leg;
+  if (carried.answer.status === 401 && relayAnswerIsBackend(carried.answer)) {
+    const renewed = await renewOver(carrier, tokens.accessToken);
     if (renewed.kind === "unavailable") {
       return {
         result: { ok: false, error: renewed.answered ? RENEWAL_FAILED : RENEWAL_UNANSWERED },
@@ -1629,12 +1847,16 @@ async function relayAuthenticated<T>(
         dialled: true,
       };
     }
-    outcome = await relayExchange(path, withBearer(renewed.tokens.accessToken), use);
-    if (outcome.kind !== "answered") {
-      return { result: { ok: false, error: STOPPED_ANSWERING, noResponse: true, relayTried: true }, dialled: true };
+    carried = await carrier.carry<T>(path, withBearer(renewed.tokens.accessToken));
+    if (!("answer" in carried)) {
+      // The backend answered this request and renewed its session moments
+      // ago, over this same route. `relayTried` is for the relay alone:
+      // it is what lets a screen say "including the backup server".
+      const stopped: RequestFailure = { ok: false, error: STOPPED_ANSWERING, noResponse: true };
+      return { result: carrier.name === "relay" ? { ...stopped, relayTried: true } : stopped, dialled: true };
     }
   }
-  return { result: relayResult<T>(outcome.answer), dialled: true };
+  return { result: relayResult<T>(carried.answer), dialled: true };
 }
 
 /** What a race found: the answer, and who else answered. */
@@ -2585,11 +2807,12 @@ async function authenticatedAttempt(path: string, init?: ApiInit, trace?: Endpoi
  * and the caller decides what it means. */
 export async function apiRequest<T>(path: string, init?: ApiInit, trace?: EndpointTrace): Promise<ApiResult<T>> {
   const { relay, ...plain } = init ?? {};
-  if (relay === undefined) return await apiDirect<T>(path, plain, trace);
+  const traced = trace ?? newTrace();
   return await withLastResort<T>(
-    trace ?? newTrace(),
-    (traced) => apiDirect<T>(path, plain, traced),
-    (normal) => relayAuthenticated<T>(path, plain, relay, normal),
+    traced,
+    (asked) => apiDirect<T>(path, plain, asked),
+    () => authenticatedOver<T>(doorCarrier(traced), path, plain),
+    relay === undefined ? null : (normal) => authenticatedOver<T>(relayCarrier(relay, normal), path, plain),
   );
 }
 

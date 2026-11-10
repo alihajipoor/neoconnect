@@ -16,7 +16,9 @@ import { relayAllows } from "./relay-calls";
  * and auth.ts's: a request opts in, and only after every ordinary
  * attempt has failed in a way only blocking explains
  * (`everyRouteFailed` in api.ts), or while relay mode says the ordinary
- * routes were found blocked minutes ago.
+ * routes were found blocked minutes ago. Since 2026-11-10 the servers'
+ * own doors are asked between the two (server-doors.ts): the relay comes
+ * after them, and a door answering ends relay mode.
  *
  * The order of checks below is the spec's, and the reason for each:
  *
@@ -478,8 +480,12 @@ function serially<T>(task: () => Promise<T>): Promise<T> {
 /** The gate (R1.5): "down" -- the tunnel is down, as its owner reports
  * it now, and no connect is under way -- is the only state that opens it.
  * "up" is a tunnel up or being brought up; anything else -- no reader, an
- * error, slow to say -- is "unknown", and keeps it closed too. */
-async function tunnelState(): Promise<"down" | "up" | "unknown"> {
+ * error, slow to say -- is "unknown", and keeps it closed too.
+ *
+ * Exported for the servers' doors (server-doors.ts), which are held to
+ * the same gate: with a tunnel up, or coming up, nothing is sent around
+ * it. */
+export async function tunnelState(): Promise<"down" | "up" | "unknown"> {
   if (ladderPass.inFlight()) return "up";
   const reader = tunnelReader;
   if (reader === null) return "unknown";

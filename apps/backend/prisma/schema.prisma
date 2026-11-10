@@ -660,6 +660,24 @@ model Node {
   /// gap soon after is not paged, so a flapping link does not page all day.
   heartbeatBackPagedAt DateTime?
 
+  /// This node as a door to the panel API, reached by address and checked
+  /// by key instead of by name (modules/node-doors). The backend learns it
+  /// by connecting to the node itself: which port answers with a publicly
+  /// trusted certificate for one of our names and reaches the API behind
+  /// it, the name it sent as SNI (null for none), and the SPKI pin of the
+  /// certificate's key. All null until one has been verified.
+  ///
+  /// `doorPreviousPin` is the pin before the last change of key, handed
+  /// out beside the current one for a while after `doorPinChangedAt`.
+  /// `doorVerifiedAt` is the last time the whole check passed; a door not
+  /// verified lately is not handed to anyone.
+  doorPort         Int?
+  doorSni          String?
+  doorPin          String?
+  doorPreviousPin  String?
+  doorPinChangedAt DateTime?
+  doorVerifiedAt   DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
