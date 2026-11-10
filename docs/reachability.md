@@ -203,7 +203,7 @@ Not built: a scan of several tunnels at once on a new network, to pick
 the fastest before connecting. It needs new work in the Windows service
 (a test path per concurrent exit) and in the phone engines.
 
-## Server doors (2026-11-10, the backend half)
+## Server doors (2026-11-10)
 
 The owner's decision: every VPN server is also a door to the panel API,
 by address, and nothing about it is set by hand, because servers are
@@ -239,9 +239,61 @@ what gets poisoned; the servers' addresses mostly stay reachable.
   server's door until it has fetched the list again, through another
   door, a name or the relay.
 
-Checked for real, read-only, from an unfiltered network: the check
-passes against live servers by address on both kinds of port (the TLS
-inbound's fallback and nginx's own listener), with a neutral server name
-and with none, and the two ports of one server present different keys.
-Unverified: anything from inside a filtered network, and the whole
-client half, which is not built yet -- no app reads `door` today.
+The apps' half (desktop and mobile, one shared library and one Rust
+file compiled by both):
+
+- **Order.** Names first, for everyone. Doors only when a request has
+  failed at every name in the way only blocking explains
+  (`everyRouteFailed` in `api.ts`) -- the moment that used to go straight
+  to the relay of last resort. The relay stays last, and only for the
+  calls it has always carried. A door carries every call, signed in or
+  not: it is the same mirror, reached by pin instead of by name.
+- **Which door** (`server-doors.ts`): the server this device last
+  connected through on this network, then the door that last answered
+  there, then the rest; one that has just failed goes to the back. Three
+  doors and twelve seconds at most for one request. Where they all fail,
+  they are left alone on that network for two minutes, doubling up to
+  sixteen, so a network that drops everything still reaches the relay
+  without paying for the doors each time.
+- **Doors work here.** A door that answers is remembered per network for
+  fifteen minutes: requests go to the doors first, and the names are
+  asked again in the background every three minutes. A name answering
+  ends it at once, and so does a tunnel.
+- **Never with a tunnel up**, or one being brought up. With a tunnel
+  nothing changes.
+- **Writes are never sent twice.** A door that could not be connected
+  to, or whose key was not the pinned one, was sent nothing, and the next
+  is asked. Once a write has gone out and no answer came back, it goes to
+  no other door, no name and not to the relay.
+- **By pin alone** (`door_http.rs`, a command of its own beside the
+  relay's): the server's address, the door's server name in the hello or
+  none, TLS accepted only for a pinned key that also signs the
+  handshake, HTTP/1.1, a connection per call, nothing outside `/api`, no
+  redirects, no proxy, no lookup of the name. The pins come only from
+  the API's own answers to a signed-in customer and the cache of them
+  (`credential-cache.ts`); a sign-out forgets them.
+- **A door's word on a session.** The pin says the answer came from our
+  server, not that the server's mirror still points at the API, and a
+  cached list can be older than whatever broke it. So, as for an address
+  by name: a 401, 403 or 404 through a door starts nothing, and a refused
+  token refresh ends the session only through a door the backend has
+  otherwise answered through in this run, or once that same door has
+  answered the public health check as the backend does. A customer is
+  not signed out, on the one network where they could not sign in again,
+  by a door that answers 401 to everything.
+- **Reports.** A request's trace lists each door that was asked and how
+  it ended (`door: address:port=pin@310 ...`), and none that was not.
+
+Not built: sign-in and sign-up through a door (a signed-out device holds
+no server list, so no door); the gaming profile's conditional read; a
+second door per server.
+
+Checked for real, read-only, from an unfiltered network: the backend's
+check passes against live servers by address on both kinds of port (the
+TLS inbound's fallback and nginx's own listener), with a neutral server
+name and with none, and the two ports of one server present different
+keys. Unverified: anything from inside a filtered network; the apps'
+half against a real server (its pin check and server name are tested
+over real TLS on loopback only, the rest against fakes); and whether a
+door on a TLS inbound's port takes an HTTP/1.1 hello from the apps' TLS
+library as it takes the backend's.

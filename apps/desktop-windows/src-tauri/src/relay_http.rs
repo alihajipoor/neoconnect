@@ -189,7 +189,7 @@ const KEEP_ALIVE_TIMEOUT: Duration = CONNECT_TIMEOUT;
 /// The same identity the app's other requests present (tauri-plugin-
 /// http's default, as in health_ip.rs), so the backend behind the box
 /// sees one client, not two.
-const USER_AGENT: &str = "tauri-plugin-http/2.5.9";
+pub(crate) const USER_AGENT: &str = "tauri-plugin-http/2.5.9";
 
 const PIN_PREFIX: &str = "sha256/";
 const MAX_PINS: usize = 3;
@@ -259,7 +259,7 @@ fn decimal(text: &str, max_digits: usize) -> Option<u32> {
 
 /// Four decimal numbers from 0 to 255, dot-separated, none with a
 /// leading zero -- the one spelling a reader and every parser agree on.
-fn dotted_quad(host: &str) -> Option<Ipv4Addr> {
+pub(crate) fn dotted_quad(host: &str) -> Option<Ipv4Addr> {
     let mut octets = [0u8; 4];
     let mut parts = host.split('.');
     for octet in &mut octets {
@@ -275,7 +275,7 @@ fn dotted_quad(host: &str) -> Option<Ipv4Addr> {
 /// loopback (outside tests), link-local, multicast and broadcast. A base
 /// naming one is a mistake or an attempt to have this command reach
 /// something on the customer's own machine or segment.
-fn refused_address(address: Ipv4Addr, loopback: bool) -> bool {
+pub(crate) fn refused_address(address: Ipv4Addr, loopback: bool) -> bool {
     let [a, b, _, _] = address.octets();
     a == 0
         || (a == 127 && !loopback)
@@ -676,6 +676,17 @@ fn pinned_tls_config(pins: Vec<[u8; 32]>, handshakes: Arc<AtomicU64>) -> ClientC
     config
 }
 
+/// The pin check on its own, for a TLS configuration that is not the
+/// relay's: a server's door to the API (door_http.rs), which is accepted
+/// by pin in the same way and differs in everything around it.
+pub(crate) fn pin_verifier(
+    pins: Vec<[u8; 32]>,
+    provider: &rustls::crypto::CryptoProvider,
+    handshakes: Arc<AtomicU64>,
+) -> Arc<dyn ServerCertVerifier> {
+    Arc::new(PinVerifier { pins, algorithms: provider.signature_verification_algorithms, handshakes })
+}
+
 /// Accepts a server whose leaf certificate's public key is one of the
 /// pins, and then only if it proves it holds the matching private key.
 #[derive(Debug)]
@@ -855,7 +866,7 @@ fn went_silent(err: &reqwest::Error) -> bool {
 
 /// Which `RelayError` a reqwest failure is. Looks only at the error's
 /// kind and causes, never its text, which carries the URL.
-fn classify(err: &reqwest::Error) -> RelayError {
+pub(crate) fn classify(err: &reqwest::Error) -> RelayError {
     match cause::<rustls::Error>(err) {
         Some(rustls::Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure)) => {
             return RelayError::PinMismatch
@@ -898,14 +909,21 @@ fn cause<'a, T: std::error::Error + 'static>(err: &'a (dyn std::error::Error + '
 }
 
 /// The answer, whole or not at all.
-async fn read_response(mut response: reqwest::Response) -> Result<RelayResponse, RelayError> {
+async fn read_response(response: reqwest::Response) -> Result<RelayResponse, RelayError> {
+    read_response_within(response, MAX_RESPONSE_BODY).await
+}
+
+/// `read_response` with the limit on the body given: `max` bytes, counted
+/// after decompression. The relay's is `MAX_RESPONSE_BODY`; a server's
+/// door carries the whole API and allows more (door_http.rs).
+pub(crate) async fn read_response_within(mut response: reqwest::Response, max: usize) -> Result<RelayResponse, RelayError> {
     let status = response.status().as_u16();
     let headers = response.headers();
     let content_type = header_text(headers, &CONTENT_TYPE).unwrap_or_default();
     let etag = header_text(headers, &ETAG);
     let gzip = gzipped(headers)?;
 
-    let limit = if gzip { MAX_RESPONSE_BODY + GZIP_SLACK } else { MAX_RESPONSE_BODY };
+    let limit = if gzip { max + GZIP_SLACK } else { max };
     // Refused before reading a byte when the server says how much is
     // coming; counted as it arrives when it does not.
     if response.content_length().is_some_and(|length| length > limit as u64) {
@@ -919,7 +937,7 @@ async fn read_response(mut response: reqwest::Response) -> Result<RelayResponse,
         raw.extend_from_slice(&chunk);
     }
     // A 304 or a 204 says gzip and carries nothing to inflate.
-    let bytes = if gzip && !raw.is_empty() { inflate(&raw)? } else { raw };
+    let bytes = if gzip && !raw.is_empty() { inflate(&raw, max)? } else { raw };
     let body = String::from_utf8(bytes).map_err(|_| RelayError::NotUtf8)?;
     Ok(RelayResponse { status, content_type, etag, body })
 }
@@ -951,20 +969,23 @@ fn gzipped(headers: &HeaderMap) -> Result<bool, RelayError> {
 
 /// Inflates a gzip body, stopping one byte past the limit: a few
 /// kilobytes that inflate to gigabytes cost no more than the limit.
-fn inflate(compressed: &[u8]) -> Result<Vec<u8>, RelayError> {
+fn inflate(compressed: &[u8], max: usize) -> Result<Vec<u8>, RelayError> {
     let mut inflated = Vec::new();
     flate2::read::GzDecoder::new(compressed)
-        .take(MAX_RESPONSE_BODY as u64 + 1)
+        .take(max as u64 + 1)
         .read_to_end(&mut inflated)
         .map_err(|_| RelayError::BadResponse)?;
-    if inflated.len() > MAX_RESPONSE_BODY {
+    if inflated.len() > max {
         return Err(RelayError::TooLarge);
     }
     Ok(inflated)
 }
 
+// `pub(crate)`, with the helpers marked the same way below, so the tests
+// of a server's door (door_http.rs) serve their loopback TLS from this
+// test relay instead of from a second copy of it.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
@@ -1058,7 +1079,7 @@ mod tests {
         assert!(LOOPBACK_ALLOWED);
     }
 
-    fn pin_of(bytes: &[u8; 32]) -> String {
+    pub(crate) fn pin_of(bytes: &[u8; 32]) -> String {
         format!("{PIN_PREFIX}{}", base64::engine::general_purpose::STANDARD.encode(bytes))
     }
 
@@ -1199,7 +1220,7 @@ mod tests {
         assert!(!allowed_call("GET", &format!("/customer/subscriptions//{SUBSCRIPTION}/routes")));
     }
 
-    fn header_set(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+    pub(crate) fn header_set(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect()
     }
 
@@ -1390,13 +1411,13 @@ mod tests {
     const OID_COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03];
 
     /// A fresh P-256 key, generated for one test and never written down.
-    struct TestKey {
+    pub(crate) struct TestKey {
         pkcs8: Vec<u8>,
         pair: EcdsaKeyPair,
     }
 
     impl TestKey {
-        fn fresh() -> Self {
+        pub(crate) fn fresh() -> Self {
             let rng = SystemRandom::new();
             let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap().as_ref().to_vec();
             let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &pkcs8, &rng).unwrap();
@@ -1410,14 +1431,14 @@ mod tests {
             der(0x30, &[&algorithm, &der(0x03, &[&[0u8], self.pair.public_key().as_ref()])])
         }
 
-        fn pin(&self) -> String {
+        pub(crate) fn pin(&self) -> String {
             let digest = ring::digest::digest(&ring::digest::SHA256, &self.spki());
             pin_of(digest.as_ref().try_into().unwrap())
         }
 
         /// A self-signed v3 certificate for this key -- and an expired
         /// one, valid only during 2000, because the relay must not care.
-        fn certificate(&self) -> CertificateDer<'static> {
+        pub(crate) fn certificate(&self) -> CertificateDer<'static> {
             let rng = SystemRandom::new();
             let algorithm = der(0x30, &[&der(0x06, &[OID_ECDSA_SHA256])]);
             let name = der(0x30, &[&der(0x31, &[&der(0x30, &[&der(0x06, &[OID_COMMON_NAME]), &der(0x0c, &[b"relay test only"])])])]);
@@ -1444,28 +1465,28 @@ mod tests {
     }
 
     #[derive(Debug, Default, Clone)]
-    struct SeenRequest {
-        method: String,
-        target: String,
-        headers: Vec<(String, String)>,
-        body: Vec<u8>,
+    pub(crate) struct SeenRequest {
+        pub(crate) method: String,
+        pub(crate) target: String,
+        pub(crate) headers: Vec<(String, String)>,
+        pub(crate) body: Vec<u8>,
     }
 
     impl SeenRequest {
-        fn header(&self, name: &str) -> Option<&str> {
+        pub(crate) fn header(&self, name: &str) -> Option<&str> {
             self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
         }
     }
 
     /// What the test relay saw.
     #[derive(Debug, Default)]
-    struct Seen {
+    pub(crate) struct Seen {
         /// The SNI of each ClientHello; `None` when there was none.
-        sni: Vec<Option<String>>,
+        pub(crate) sni: Vec<Option<String>>,
         /// The ALPN protocols each ClientHello offered.
-        alpn: Vec<Vec<String>>,
-        connections: usize,
-        requests: Vec<SeenRequest>,
+        pub(crate) alpn: Vec<Vec<String>>,
+        pub(crate) connections: usize,
+        pub(crate) requests: Vec<SeenRequest>,
     }
 
     /// Hands out the one certificate, noting what each ClientHello said.
@@ -1511,7 +1532,7 @@ mod tests {
     }
 
     /// What the test relay does with one request.
-    enum Step {
+    pub(crate) enum Step {
         /// Writes these bytes back.
         Answer(Vec<u8>),
         /// Reads the request and closes the connection without a word --
@@ -1521,20 +1542,20 @@ mod tests {
 
     /// An HTTP/1.1 relay on 127.0.0.1 with a fresh key, following a
     /// script: one list of steps per connection, connections in order.
-    struct TestRelay {
-        base: String,
-        pin: String,
+    pub(crate) struct TestRelay {
+        pub(crate) base: String,
+        pub(crate) pin: String,
         seen: Arc<Mutex<Seen>>,
         thread: JoinHandle<TcpListener>,
     }
 
     impl TestRelay {
-        fn start(script: Vec<Vec<Step>>) -> Self {
+        pub(crate) fn start(script: Vec<Vec<Step>>) -> Self {
             let key = TestKey::fresh();
             Self::start_with(key.certificate(), &key, &[&rustls::version::TLS13], script)
         }
 
-        fn start_with(
+        pub(crate) fn start_with(
             cert: CertificateDer<'static>,
             signer: &TestKey,
             versions: &[&'static rustls::SupportedProtocolVersion],
@@ -1562,7 +1583,7 @@ mod tests {
 
         /// What the relay saw once its script is done, and whether yet
         /// another connection was waiting that the script had no use for.
-        fn finish(self) -> (Seen, bool) {
+        pub(crate) fn finish(self) -> (Seen, bool) {
             let listener = self.thread.join().unwrap();
             listener.set_nonblocking(true).unwrap();
             let another = listener.accept().is_ok();
@@ -1663,7 +1684,7 @@ mod tests {
     }
 
     /// An HTTP/1.1 response with a Content-Length.
-    fn http(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+    pub(crate) fn http(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
         let mut head = format!("HTTP/1.1 {status}\r\n");
         for (name, value) in headers {
             head.push_str(&format!("{name}: {value}\r\n"));
@@ -1688,13 +1709,13 @@ mod tests {
         out
     }
 
-    fn gzip(bytes: &[u8]) -> Vec<u8> {
+    pub(crate) fn gzip(bytes: &[u8]) -> Vec<u8> {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(bytes).unwrap();
         encoder.finish().unwrap()
     }
 
-    const JSON: (&str, &str) = ("Content-Type", "application/json");
+    pub(crate) const JSON: (&str, &str) = ("Content-Type", "application/json");
 
     // ---- End to end -------------------------------------------------
 
@@ -1916,12 +1937,12 @@ mod tests {
         bomb.truncate(bomb.len() - 8);
         // Two megabytes of zeros, in about two kilobytes.
         assert!(bomb.len() < 4 * 1024, "{}", bomb.len());
-        assert_eq!(inflate(&bomb), Err(RelayError::TooLarge));
+        assert_eq!(inflate(&bomb, MAX_RESPONSE_BODY), Err(RelayError::TooLarge));
         // The same damage inside the limit is found.
         let mut small = gzip(b"{}");
         small.truncate(small.len() - 8);
-        assert_eq!(inflate(&small), Err(RelayError::BadResponse));
-        assert_eq!(inflate(&gzip(b"{}")), Ok(b"{}".to_vec()));
+        assert_eq!(inflate(&small, MAX_RESPONSE_BODY), Err(RelayError::BadResponse));
+        assert_eq!(inflate(&gzip(b"{}"), MAX_RESPONSE_BODY), Ok(b"{}".to_vec()));
     }
 
     /// The box closes a pooled connection just as a GET goes out on it.

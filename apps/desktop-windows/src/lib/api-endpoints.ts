@@ -4,6 +4,7 @@ import { loadSnapshot } from "./credential-cache";
 import { confinedAround, setConnectedMirrors } from "./connected-mirrors";
 import { bundledBases } from "./endpoint-bundle-store";
 import { endRelayMode } from "./last-resort";
+import { endDoorMode } from "./server-doors";
 import type { TunnelServer } from "./egress";
 
 /** Where to reach the control plane, in the order worth trying.
@@ -161,9 +162,13 @@ let aroundServer: ReadonlySet<string> | null = null;
 /** Tells the endpoint order which server the tunnel now up is dialled at
  * (`null` once none is). See `aroundServer`. */
 export function setTunnelServer(server: TunnelServer | null): void {
-  // A tunnel being dialled or up ends relay mode (R1.7): what the app
-  // sends from here goes through it, or waits for it.
-  if (server !== null) endRelayMode();
+  // A tunnel being dialled or up ends relay mode (R1.7), and going to
+  // the servers' doors first: what the app sends from here goes through
+  // the tunnel, or waits for it.
+  if (server !== null) {
+    endRelayMode();
+    endDoorMode();
+  }
   aroundServer = server?.reachedAround ? new Set(server.addresses) : null;
   // Until the next `apiEndpoints` works out the new server's, a race keeps
   // nothing back: the old server's mirrors are no longer around anything.

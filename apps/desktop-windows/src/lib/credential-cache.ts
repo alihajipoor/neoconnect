@@ -1,4 +1,5 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
+import { forgetDoors, rememberDoors, setDoorPrimer } from "./door-list";
 import type { ProtocolUser, RouteOption, Subscription } from "./types";
 
 /** The last known good answer from the control plane, kept so the app can
@@ -122,7 +123,12 @@ function getStore(): Promise<Store> {
  * `savedAt` is now unless given. Given only by a write that leaves the
  * credentials and the plan as they were (`updateSnapshotRoutes`): the time
  * is what says how fresh they are (`isSnapshotStale`), and what the offline
- * banner says they were last updated. */
+ * banner says they were last updated.
+ *
+ * Each credential is kept whole, its server's door to the API included
+ * (`connection.door`): that is what lets the app reach the API by a
+ * server's address after a restart on a network where no name answers.
+ * The list of doors in hand follows what is written here (door-list.ts). */
 export async function saveSnapshot(
   snapshot: Omit<ConnectionSnapshot, "version" | "savedAt"> & { savedAt?: number },
   stillCurrent?: () => boolean,
@@ -130,6 +136,7 @@ export async function saveSnapshot(
   try {
     const store = await getStore();
     if (stillCurrent && !stillCurrent()) return;
+    rememberDoors(snapshot.protocolUsers);
     const savedAt = snapshot.savedAt ?? Date.now();
     await store.set(KEY, { ...snapshot, version: VERSION, savedAt, askedAt: snapshot.askedAt ?? savedAt });
     await store.save();
@@ -150,12 +157,22 @@ export async function loadSnapshot(): Promise<ConnectionSnapshot | null> {
   try {
     const store = await getStore();
     const stored = await store.get<ConnectionSnapshot>(KEY);
-    if (!stored || stored.version !== VERSION) return null;
-    if (!Array.isArray(stored.protocolUsers) || stored.protocolUsers.length === 0) return null;
-    // A credential with no connection block cannot build a tunnel, and
-    // one that got that far would fail with a missing-field error rather
-    // than an honest "no saved servers".
-    if (!stored.protocolUsers.every((u) => u && u.connection && u.protocol)) return null;
+    const usable =
+      !!stored &&
+      stored.version === VERSION &&
+      Array.isArray(stored.protocolUsers) &&
+      stored.protocolUsers.length > 0 &&
+      // A credential with no connection block cannot build a tunnel, and
+      // one that got that far would fail with a missing-field error rather
+      // than an honest "no saved servers".
+      stored.protocolUsers.every((u) => u && u.connection && u.protocol);
+    if (!usable) {
+      // The store was read and holds no list: no doors either. Not when
+      // it could not be read at all (the catch below), which says nothing.
+      forgetDoors();
+      return null;
+    }
+    rememberDoors(stored.protocolUsers);
     const savedAt = typeof stored.savedAt === "number" ? stored.savedAt : 0;
     return {
       version: VERSION,
@@ -438,6 +455,9 @@ export async function updateSnapshotRoutes(
  * credentials on the machine for the next person to connect with is not
  * a cache, it is a leak. */
 export async function clearSnapshot(): Promise<void> {
+  // Before the store is touched, so the doors are gone from memory even
+  // if the file cannot be.
+  forgetDoors();
   try {
     const store = await getStore();
     await store.delete(KEY);
@@ -446,3 +466,7 @@ export async function clearSnapshot(): Promise<void> {
     // Same reasoning as save: nothing useful to do about it here.
   }
 }
+
+// A run that needs a server's door before anything has read the snapshot
+// reads it through here (`knownDoors` in door-list.ts).
+setDoorPrimer(() => loadSnapshot());

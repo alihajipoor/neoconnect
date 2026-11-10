@@ -3,12 +3,15 @@ import {
   API_ENDPOINT_MAX,
   LEGACY_API_ENDPOINT_MAX,
   beginAttempt,
+  beginDoorAttempt,
   clipTrace,
   endpointLabel,
   failureOutcome,
   newTrace,
   renderTrace,
   settleAttempt,
+  settleDoorAttempt,
+  withdrawDoorAttempt,
 } from "./endpoint-trace";
 
 /** Names are RFC 2606 stand-ins; the real endpoint list is never
@@ -220,5 +223,52 @@ describe("clipTrace", () => {
 
   it("fits the server's limit", () => {
     expect(clipTrace("x".repeat(5_000), API_ENDPOINT_MAX).length).toBeLessThanOrEqual(API_ENDPOINT_MAX);
+  });
+});
+
+/** The doors a request was offered to (server-doors.ts) are written after
+ * the addresses by name, each as it ended, and only the ones asked. The
+ * addresses are documentation ones. */
+describe("the doors in a trace", () => {
+  it("are rendered after the legs by name, with how each ended", () => {
+    const trace = newTrace();
+    settleAttempt(beginAttempt(trace, PANEL, 0), "timeout", 10_004);
+    settleDoorAttempt(beginDoorAttempt(trace, "192.0.2.7:2053", 10_010), "pin", 10_320);
+    settleDoorAttempt(beginDoorAttempt(trace, "192.0.2.9:2096", 10_330), "h200", 10_750);
+    expect(renderTrace(trace, 11_000)).toBe(
+      "req: connect.example.net=timeout@10004; door: 192.0.2.7:2053=pin@310 192.0.2.9:2096=h200@420",
+    );
+  });
+
+  it("leave a trace with no door as it always was", () => {
+    const trace = newTrace();
+    settleAttempt(beginAttempt(trace, PANEL, 0), "h200", 80);
+    expect(trace).toEqual({ phase: "req", entries: trace.entries });
+    expect(renderTrace(trace, 100)).toBe("req: connect.example.net=h200@80");
+    expect(beginDoorAttempt(undefined, "192.0.2.7:2053")).toBeUndefined();
+  });
+
+  it("say budget for a door still being asked, and nothing for one never dialled", () => {
+    const trace = newTrace();
+    beginDoorAttempt(trace, "192.0.2.7:2053", 1_000);
+    const refused = beginDoorAttempt(trace, "192.0.2.9:2096", 1_200);
+    withdrawDoorAttempt(trace, refused);
+    expect(renderTrace(trace, 1_250)).toBe("door: 192.0.2.7:2053=budget@250");
+    // The first settlement wins, as for an address.
+    settleDoorAttempt(trace.doors?.[0], "timeout", 5_000);
+    settleDoorAttempt(trace.doors?.[0], "h200", 6_000);
+    expect(renderTrace(trace, 9_000)).toBe("door: 192.0.2.7:2053=timeout@4000");
+    withdrawDoorAttempt(trace, trace.doors?.[0]);
+    expect(trace.doors).toBeUndefined();
+  });
+
+  it("are cut with the rest when the field has to fit", () => {
+    const names = Array.from({ length: 30 }, (_, i) => `n${i}.example.org=timeout@10000`).join(" ");
+    const text = `req: ${names}; door: 192.0.2.7:2053=timeout@4000 192.0.2.9:2096=h200@420`;
+    const clipped = clipTrace(text, LEGACY_API_ENDPOINT_MAX);
+    expect(clipped.length).toBeLessThanOrEqual(LEGACY_API_ENDPOINT_MAX);
+    // How it ended is kept: the door that answered is the last entry.
+    expect(clipped.endsWith("192.0.2.9:2096=h200@420")).toBe(true);
+    expect(clipped.startsWith("req: n0.example.org=timeout@10000")).toBe(true);
   });
 });
