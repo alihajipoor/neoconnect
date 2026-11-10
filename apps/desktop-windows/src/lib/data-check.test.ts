@@ -5,20 +5,27 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(
 
 const {
   checkDataMoves,
+  describeSearchEnd,
   DOWN_BYTES,
+  endSearch,
   judgeDataCheck,
   judgeSample,
   keepsSlow,
   noSlowRungs,
+  noteDial,
   noteSlow,
   passOverSlow,
   presentsOwnName,
   rememberedKbps,
   rememberedKbpsWith,
+  restartSearch,
   rungSpeeds,
   SAMPLE_MS,
   sampleDownload,
+  searchOrder,
   serverKey,
+  SLOW_SEARCH_MAX_DIALS,
+  SLOW_SEARCH_MAX_MS,
   slowFallback,
   UP_BYTES,
 } = await import("./data-check");
@@ -262,5 +269,145 @@ describe("slow rungs", () => {
     expect(passOverSlow(slow, uk)).toBe(true);
     expect(passOverSlow(slow, ukTls)).toBe(true);
     expect(passOverSlow(slow, de)).toBe(false);
+  });
+});
+
+/** A slow rung is one that works. The ladder used to walk on from it to
+ * its very end before going back to it, and on a network where most
+ * servers carry nothing a customer cancelled long before that end. */
+describe("the search for something better than a slow rung", () => {
+  const user = (id: string, host: string, protocol = "XRAY_VLESS_REALITY"): ProtocolUser =>
+    ({ id, routeId: `${id}-route`, protocol, connection: { host } }) as unknown as ProtocolUser;
+  const START = 1_800_000_000_000;
+  const SLOW = { state: "slow", downKbps: 2400, upKbps: 0 } as const;
+  const de = user("de", "198.51.100.3");
+  const others = ["a", "b", "c", "d"].map((id, i) => user(id, `198.51.100.${10 + i}`));
+  const begun = () => {
+    const slow = noSlowRungs((u) => serverKey(u, []));
+    noteSlow(slow, de, SLOW, START);
+    return slow;
+  };
+
+  it("is three further rungs dialled, or forty seconds", () => {
+    expect(SLOW_SEARCH_MAX_DIALS).toBe(3);
+    expect(SLOW_SEARCH_MAX_MS).toBe(40_000);
+  });
+
+  it("has no budget to run out while nothing has been slow", () => {
+    const slow = noSlowRungs();
+    for (const other of others) noteDial(slow, other);
+    expect(endSearch(slow, START + 10 * SLOW_SEARCH_MAX_MS)).toBeNull();
+    expect(slow.search).toBeNull();
+  });
+
+  it("goes back to the slow rung after three further rungs were dialled, and keeps it", () => {
+    const slow = begun();
+    noteDial(slow, others[0]);
+    noteDial(slow, others[1]);
+    expect(endSearch(slow, START + 12_000)).toBeNull();
+    noteDial(slow, others[2]);
+    expect(endSearch(slow, START + 20_000)).toEqual({ candidate: de, dials: 3, ms: 20_000 });
+    // Kept whatever its check says this time, and never passed over itself.
+    expect(keepsSlow(slow, de)).toBe(true);
+    expect(passOverSlow(slow, de)).toBe(false);
+    // Once: the pass goes on from it if it does not come up.
+    expect(endSearch(slow, START + 60_000)).toBeNull();
+  });
+
+  it("goes back after forty seconds, however few were dialled", () => {
+    const slow = begun();
+    noteDial(slow, others[0]);
+    expect(endSearch(slow, START + SLOW_SEARCH_MAX_MS - 1)).toBeNull();
+    expect(endSearch(slow, START + SLOW_SEARCH_MAX_MS)).toEqual({ candidate: de, dials: 1, ms: 40_000 });
+  });
+
+  it("counts rungs dialled, not rungs passed over, and a rung dialled twice once", () => {
+    const slow = begun();
+    // The slow server's other protocols are passed over: nothing is dialled.
+    expect(passOverSlow(slow, user("de-ss", "198.51.100.3", "SHADOWSOCKS"))).toBe(true);
+    noteDial(slow, others[0]);
+    noteDial(slow, others[0]);
+    noteDial(slow, others[1]);
+    expect(endSearch(slow, START + 5_000)).toBeNull();
+  });
+
+  it("is one search for the pass: a second slow rung neither restarts the clock nor the count, and the better of the two is kept", () => {
+    const slow = begun();
+    noteDial(slow, others[0]);
+    noteSlow(slow, others[0], { state: "slow", downKbps: 900, upKbps: 140 }, START + 15_000);
+    noteDial(slow, others[1]);
+    noteDial(slow, others[2]);
+    expect(endSearch(slow, START + 30_000)?.candidate).toBe(others[0]);
+  });
+
+  /** "Slow" is also what the check calls a tunnel it got nothing through
+   * at all. That one is not known to work, so the pass does not stop
+   * looking for its sake. */
+  it("is not begun by a rung that moved nothing either way, which is still the fallback at the end", () => {
+    const nothing = noSlowRungs((u) => serverKey(u, []));
+    noteSlow(nothing, de, { state: "slow", downKbps: 0, upKbps: 0 }, START);
+    for (const other of others) noteDial(nothing, other);
+    expect(endSearch(nothing, START + 10 * SLOW_SEARCH_MAX_MS)).toBeNull();
+    expect(slowFallback(nothing)).toBe(de);
+
+    // One that moves data, later in the pass, begins the search then --
+    // and is what the pass goes back to.
+    const later = noSlowRungs((u) => serverKey(u, []));
+    noteSlow(later, de, { state: "slow", downKbps: 0, upKbps: 0 }, START);
+    noteSlow(later, others[0], SLOW, START + 100_000);
+    expect(endSearch(later, START + 100_000 + SLOW_SEARCH_MAX_MS - 1)).toBeNull();
+    expect(endSearch(later, START + 100_000 + SLOW_SEARCH_MAX_MS)?.candidate).toBe(others[0]);
+  });
+
+  it("starts its budget afresh after a wait for a network", () => {
+    const slow = begun();
+    noteDial(slow, others[0]);
+    noteDial(slow, others[1]);
+    restartSearch(slow, START + 600_000);
+    expect(endSearch(slow, START + 600_000 + 1_000)).toBeNull();
+    noteDial(slow, others[0]);
+    noteDial(slow, others[1]);
+    noteDial(slow, others[2]);
+    expect(endSearch(slow, START + 600_000 + 2_000)?.dials).toBe(3);
+  });
+
+  it("puts the slow rung back once more at the end of the ladder, if it did not land when put back early", () => {
+    const slow = begun();
+    expect(endSearch(slow, START + SLOW_SEARCH_MAX_MS)?.candidate).toBe(de);
+    // It did not come up; the pass walked the rest; nothing landed.
+    expect(slowFallback(slow)).toBe(de);
+    expect(keepsSlow(slow, de)).toBe(true);
+    expect(slowFallback(slow)).toBeNull();
+  });
+
+  it("leaves the end of the ladder as it was when the budget was never used up", () => {
+    const slow = begun();
+    noteDial(slow, others[0]);
+    expect(slowFallback(slow)).toBe(de);
+    expect(slowFallback(slow)).toBeNull();
+    // Put back at the end: there is no search left to end.
+    expect(endSearch(slow, START + 10 * SLOW_SEARCH_MAX_MS)).toBeNull();
+  });
+
+  it("says what it did, and how many rungs it did not dial", () => {
+    expect(describeSearchEnd({ candidate: de, dials: 2, ms: 41_300 }, 38)).toBe(
+      "going back to it -- slow, but it works; 2 more dialled in 41 s found nothing better, 38 further not dialled yet",
+    );
+  });
+
+  it("searches first what this network has seen move, each group in the order it had", () => {
+    const [a, b, c, d] = others;
+    const moved = new Set([c.id]);
+    expect(searchOrder([a, b, c, d], (u) => moved.has(u.id))).toEqual([c, a, b, d]);
+    // Nothing remembered: the order it had.
+    expect(searchOrder([a, b, c, d], () => false)).toEqual([a, b, c, d]);
+    // The location the customer chose keeps its lead over both.
+    expect(
+      searchOrder(
+        [a, b, c, d],
+        (u) => moved.has(u.id),
+        (u) => u.id === "b",
+      ),
+    ).toEqual([b, c, a, d]);
   });
 });
