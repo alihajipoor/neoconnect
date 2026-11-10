@@ -3,15 +3,16 @@
  *
  * # What this is and is not
  *
- * Information for a person choosing a server. It is **not** an input to
- * the automatic failover order, and must not become one: commit ac56993
- * decided that, for a reason that still holds -- filtering is not
- * uniform across an ISP (two subscribers on one carrier can get
- * different answers by region and egress) and it changes day to day, so
- * an order derived from other people's experience is a guess dressed as
- * a default. The device's own history orders the ladder. A tag only
- * tells a customer, in words, what others on their network saw, and
- * leaves the choice with them.
+ * Information for a person choosing a server. Commit ac56993 kept it
+ * out of the automatic failover order altogether, for a reason that
+ * still holds where it applies -- filtering is not uniform across an ISP
+ * (two subscribers on one carrier can get different answers by region
+ * and egress) and it changes day to day, so a device's own results on a
+ * network are the better guide, and they still lead. But a device has
+ * none for a route it has never tried, and there the apps now read the
+ * tag, and the coarser signals in isp-order.ts, ahead of one fixed order
+ * for the whole world. A tag itself only tells a customer, in words,
+ * what others on their network saw, and leaves the choice with them.
  *
  * Which is also why the wording on the client is hedged and dated --
  * "works for most people on your network recently" -- and never "works

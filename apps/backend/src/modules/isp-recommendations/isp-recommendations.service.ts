@@ -1,7 +1,9 @@
 import { Injectable } from "@nestjs/common";
 import { ClientAttemptKind, Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
+import { latestDialsSql, type LatestDialRow } from "../client-attempts/latest-dials";
 import { NetworkIdentityService } from "../network-identity/network-identity.service";
+import { hintFor, networkOrder, ORDER_WINDOW_HOURS, type IspHint, type OrderDial, type RouteKind } from "./isp-order";
 import { routeStats, tagFor, WINDOW_HOURS, type EvidenceRow, type IspTag, type RouteIspStats } from "./isp-signal";
 import { attributeTraffic, type RouteTraffic, type UsageBucket } from "./isp-traffic";
 
@@ -57,6 +59,14 @@ function trafficJson(t: RouteTraffic) {
 @Injectable()
 export class IspRecommendationsService {
   private readonly cache = new Map<number, { at: number; tags: Map<string, IspTag> }>();
+  /** The connect order's hints per network, and what they are worked out
+   * from: one country's latest dials (shared by every network in it), the
+   * networks that have reported at all, and what each route dials. All
+   * reused for `CACHE_MS`, as the tags are. */
+  private readonly hintCache = new Map<number, { at: number; hints: Map<string, IspHint> }>();
+  private readonly dialCache = new Map<string, { at: number; dials: OrderDial[] }>();
+  private networksSeen: { at: number; asns: number[] } | null = null;
+  private routeKinds: { at: number; kinds: Map<string, RouteKind> } | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -101,6 +111,106 @@ export class IspRecommendationsService {
     if (this.cache.size >= CACHE_MAX) this.cache.clear();
     this.cache.set(asn, { at: now, tags });
     return tags;
+  }
+
+  /** For every route, what the automatic connect order may read about it
+   * on `asn`: how its server has done there and whether its protocol
+   * lands there (isp-order.ts). Empty when the network is unknown; with
+   * one, every route gets a hint, if only to name the network.
+   *
+   * Three bounded reads on a miss, none of them per request: the networks
+   * that reported inside the window (a range of the createdAt index),
+   * each customer's latest dial per route on the caller's country's
+   * networks (ranges of the (asn, createdAt) index, deduplicated in the
+   * database), and the routes. A country's dials are read once for all of
+   * its networks. */
+  async hintsFor(asn: number | null, now = Date.now()): Promise<Map<string, IspHint>> {
+    if (asn === null) return new Map();
+    const hit = this.hintCache.get(asn);
+    if (hit && now - hit.at < CACHE_MS) return hit.hints;
+
+    // Where the network is registered: the level above the ISP. Unknown
+    // while the table has not loaded, and then the ISP stands alone.
+    const country = this.identity.countryOfAsn(asn);
+    const [dials, kinds] = await Promise.all([this.orderDials(asn, country, now), this.kindsOfRoutes(now)]);
+    const order = networkOrder(dials, kinds, asn, now, country !== null);
+    const hints = new Map<string, IspHint>();
+    for (const [routeId, kind] of kinds) hints.set(routeId, hintFor(asn, kind, order));
+
+    if (this.hintCache.size >= CACHE_MAX) this.hintCache.clear();
+    this.hintCache.set(asn, { at: now, hints });
+    return hints;
+  }
+
+  /** Each customer's latest dial of each route inside the order's window:
+   * on every network registered in `country` that has reported, or on
+   * `asn` alone when the country is unknown. */
+  private async orderDials(asn: number, country: string | null, now: number): Promise<OrderDial[]> {
+    const key = country ?? `asn:${asn}`;
+    const hit = this.dialCache.get(key);
+    if (hit && now - hit.at < CACHE_MS) return hit.dials;
+
+    const since = now - ORDER_WINDOW_HOURS * 3_600_000;
+    const asns =
+      country === null
+        ? [asn]
+        : (await this.networksReporting(since, now)).filter((seen) => this.identity.countryOfAsn(seen) === country);
+    const rows = asns.length === 0 ? [] : await this.prisma.$queryRaw<LatestDialRow[]>(latestDialsSql(since, asns));
+    const dials = rows.map((row) => ({
+      customerId: row.customerId,
+      asn: Number(row.asn),
+      routeId: row.routeId,
+      carried: row.carried,
+      at: new Date(row.happenedAt).getTime(),
+    }));
+
+    if (this.dialCache.size >= CACHE_MAX) this.dialCache.clear();
+    this.dialCache.set(key, { at: now, dials });
+    return dials;
+  }
+
+  /** Every network a signed-in customer's connect report named inside the
+   * window. One read for all countries. */
+  private async networksReporting(since: number, now: number): Promise<number[]> {
+    if (this.networksSeen && now - this.networksSeen.at < CACHE_MS) return this.networksSeen.asns;
+    const networks = await this.prisma.clientAttempt.groupBy({
+      by: ["asn"],
+      where: {
+        kind: ClientAttemptKind.CONNECT,
+        customerId: { not: null },
+        asn: { not: null },
+        createdAt: { gte: new Date(since) },
+      },
+    });
+    const asns = networks.map((n) => n.asn).filter((seen): seen is number => seen !== null);
+    this.networksSeen = { at: now, asns };
+    return asns;
+  }
+
+  /** What every route dials -- disabled ones too, whose dials inside the
+   * window are still evidence about their server and protocol. */
+  private async kindsOfRoutes(now: number): Promise<Map<string, RouteKind>> {
+    if (this.routeKinds && now - this.routeKinds.at < CACHE_MS) return this.routeKinds.kinds;
+    const routes = await this.prisma.route.findMany({
+      select: {
+        id: true,
+        exitProtocolConfig: { select: { nodeId: true } },
+        entryProtocolConfig: { select: { nodeId: true, protocol: true, transport: true } },
+      },
+    });
+    const kinds = new Map<string, RouteKind>(
+      routes.map((route) => [
+        route.id,
+        {
+          nodeId: route.entryProtocolConfig.nodeId,
+          exitNodeId: route.exitProtocolConfig?.nodeId ?? null,
+          protocol: route.entryProtocolConfig.protocol,
+          transport: route.entryProtocolConfig.transport ?? null,
+        },
+      ]),
+    );
+    this.routeKinds = { at: now, kinds };
+    return kinds;
   }
 
   /** Every network and route with any evidence in the window, for the

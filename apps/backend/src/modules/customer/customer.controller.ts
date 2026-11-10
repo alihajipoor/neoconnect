@@ -26,6 +26,7 @@ import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { PlansService } from "../plans/plans.service";
 import { RoutesService } from "../routes/routes.service";
 import { IspRecommendationsService } from "../isp-recommendations/isp-recommendations.service";
+import type { IspHint } from "../isp-recommendations/isp-order";
 import type { IspTag } from "../isp-recommendations/isp-signal";
 import { clientIpOf } from "../../common/client-ip";
 import { BillingService } from "../billing/billing.service";
@@ -341,8 +342,14 @@ export class CustomerController {
   // caller's network recently experienced on it, when enough of them did
   // to say anything (see isp-recommendations/isp-signal.ts). A code and
   // counts, never prose -- the client words it in the customer's
-  // language. Information for the person choosing; the client's
-  // automatic failover order does not read it.
+  // language. Information for the person choosing.
+  //
+  // And `ispHint`: what the app's automatic connect order may read about
+  // the route on that network -- how its server has done there and whether
+  // its protocol lands there, each from far more people than try any one
+  // route (isp-recommendations/isp-order.ts). Never shown, never about
+  // fewer than three customers, and null when the network is unknown. An
+  // app from before it ignores the field.
   //
   // The network comes from the `X-Neoxify-Network` attestation the
   // client was handed at /health/ip before its tunnel came up, because
@@ -368,17 +375,26 @@ export class CustomerController {
 
     // Best-effort: a failure here costs the tags, never the list.
     let tags = new Map<string, IspTag>();
+    let hints = new Map<string, IspHint>();
     try {
       const header = req.headers["x-neoxify-network"];
       const asn = await this.ispRecommendations.networkFor(
         Array.isArray(header) ? header[0] : header,
         clientIpOf(req) || req.ip,
       );
-      tags = await this.ispRecommendations.tagsFor(asn);
+      // Each on its own: the hints failing costs the hints, not the tags.
+      [tags, hints] = await Promise.all([
+        this.ispRecommendations.tagsFor(asn),
+        this.ispRecommendations.hintsFor(asn).catch(() => new Map<string, IspHint>()),
+      ]);
     } catch {
       // Fall through with no tags.
     }
-    return routes.map((route) => ({ ...route, ispTag: tags.get(route.id) ?? null }));
+    return routes.map((route) => ({
+      ...route,
+      ispTag: tags.get(route.id) ?? null,
+      ispHint: hints.get(route.id) ?? null,
+    }));
   }
 
   // Location picker: switch this subscription's VPN account to a

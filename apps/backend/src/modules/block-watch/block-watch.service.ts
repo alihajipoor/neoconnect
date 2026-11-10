@@ -11,6 +11,7 @@ import {
 } from "@prisma/client";
 import { connect } from "node:net";
 import { PrismaService } from "../../prisma/prisma.service";
+import { latestDialsSql, type LatestDialRow } from "../client-attempts/latest-dials";
 import { HourlyBudget, PagerService, type PageDelivery } from "../alerting/pager.service";
 import { NetworkIdentityService } from "../network-identity/network-identity.service";
 import {
@@ -90,48 +91,6 @@ export function tcpReachable(host: string, port: number, timeoutMs: number): Pro
     socket.once("connect", () => done(true));
     socket.once("error", () => done(false));
   });
-}
-
-/** One row of latestDialsSql. */
-interface LatestDialRow {
-  customerId: string;
-  asn: number;
-  routeId: string;
-  carried: boolean;
-  happenedAt: Date;
-  createdAt: Date;
-  rung: number;
-}
-
-/** Each customer's latest dial of each route, per network, from the
- * connect reports that arrived since `sinceMs`, on the given networks
- * only. Deduplicated in the database, so however many reports one
- * account sends, it is one row per route -- it can neither crowd out
- * anyone else's nor count twice. Ordered by when the client says it
- * happened (never after arrival), then by its place in the ladder. */
-export function latestDialsSql(sinceMs: number, asns: number[]): Prisma.Sql {
-  return Prisma.sql`
-    SELECT DISTINCT ON (a."customerId", a."asn", r.rung ->> 'routeId')
-      a."customerId" AS "customerId",
-      a."asn" AS "asn",
-      r.rung ->> 'routeId' AS "routeId",
-      (r.rung ->> 'carried')::boolean AS "carried",
-      LEAST(COALESCE(a."occurredAt", a."createdAt"), a."createdAt") AS "happenedAt",
-      a."createdAt" AS "createdAt",
-      r.ord::int AS "rung"
-    FROM "client_attempts" a
-    CROSS JOIN LATERAL jsonb_array_elements(
-      CASE WHEN jsonb_typeof(a."attemptsJson") = 'array' THEN a."attemptsJson" ELSE '[]'::jsonb END
-    ) WITH ORDINALITY AS r(rung, ord)
-    WHERE a."createdAt" >= (to_timestamp(${sinceMs}::double precision / 1000) AT TIME ZONE 'UTC')
-      AND a."kind" = 'CONNECT'
-      AND a."customerId" IS NOT NULL
-      AND a."asn" IN (${Prisma.join(asns)})
-      AND jsonb_typeof(r.rung -> 'routeId') = 'string'
-      AND jsonb_typeof(r.rung -> 'carried') = 'boolean'
-    ORDER BY a."customerId", a."asn", r.rung ->> 'routeId',
-      LEAST(COALESCE(a."occurredAt", a."createdAt"), a."createdAt") DESC, a."createdAt" DESC, r.ord DESC
-  `;
 }
 
 /** A server this evaluation looks at, and what its windows hang on. */
@@ -950,3 +909,7 @@ function evidenceOf(i: BlockIncident): StoredEvidence | null {
 function view(i: BlockIncident & { node: { name: string } }): IncidentView {
   return { nodeName: i.node.name, openedAt: i.openedAt, evidence: i.evidenceJson as unknown as StoredEvidence };
 }
+
+// In a file of its own now, for the connect order's signals as well; still
+// named from here for the specs that import it.
+export { latestDialsSql };
