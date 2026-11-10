@@ -59,7 +59,9 @@ import {
   recordAttempt,
   recordDead,
   recordSpeed,
+  recordUpload,
   rungShownDead,
+  typicalUploadKbps,
   workedLately,
   type ConnectHistory,
 } from "../lib/connect-history";
@@ -115,6 +117,7 @@ import {
   noSlowRungs,
   noteDial,
   noteSlow,
+  passedUploadKbps,
   passOverSlow,
   restartSearch,
   rungSpeeds,
@@ -123,6 +126,7 @@ import {
   searchOrder,
   serverKey,
   slowFallback,
+  uploadLegMs,
   type DataVerdict,
 } from "../lib/data-check";
 import {
@@ -3949,6 +3953,12 @@ export function Dashboard({
         candidates = [...candidates, fallback];
         return true;
       };
+      // How long each rung's upload gets in the data check: longer than the
+      // usual eight seconds only on a network whose own passing uploads
+      // have been slow (`uploadLegMs`), so a line that is merely slow is
+      // not read as a server that is held. From the memory as the pass
+      // began -- a rung that passes ends the pass.
+      const upLegMs = uploadLegMs(typicalUploadKbps(history, networkId));
       // Once a rung has measured slow on a server this network has seen
       // move, the pass looks only a little further (`endSearch`), so what
       // is left is searched in the order likeliest to move: what this
@@ -4379,7 +4389,7 @@ export function Dashboard({
             // loads nothing (`data-check.ts`). Moved on from, unless it is
             // the slow fallback, which lands anyway and says so.
             if (verdict === "connected" && egress.state === "throughTunnel") {
-              const moved = await checkDataMoves(egress.from);
+              const moved = await checkDataMoves(egress.from, upLegMs);
               measured = moved;
               sampleBase = egress.from;
               if (moved.state === "slow") {
@@ -4527,6 +4537,11 @@ export function Dashboard({
               );
               const kbps = rememberedKbps(measured);
               if (kbps !== null) recorded = recordSpeed(recorded, networkId, candidate.routeId, candidate.protocol, kbps);
+              // And the upload alone, where the check passed: what this
+              // network's line manages, for the next pass's upload leg
+              // (`typicalUploadKbps`).
+              const up = passedUploadKbps(measured);
+              if (up !== null) recorded = recordUpload(recorded, networkId, candidate.routeId, candidate.protocol, up);
               setHistory(recorded);
               void saveConnectHistory(recorded);
             }

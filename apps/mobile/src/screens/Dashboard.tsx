@@ -13,7 +13,9 @@ import {
   recordAttempt,
   recordDead,
   recordSpeed,
+  recordUpload,
   rungShownDead,
+  typicalUploadKbps,
   workedLately,
   type ConnectHistory,
 } from "@shared/lib/connect-history";
@@ -151,6 +153,7 @@ import {
   noSlowRungs,
   noteDial,
   noteSlow,
+  passedUploadKbps,
   passOverSlow,
   rungSpeeds,
   sampleDownload,
@@ -158,6 +161,7 @@ import {
   searchOrder,
   serverKey,
   slowFallback,
+  uploadLegMs,
 } from "@shared/lib/data-check";
 import { snapshotAge, traceRequests } from "@shared/lib/unanswered-report";
 import {
@@ -2490,6 +2494,15 @@ export function Dashboard({
       if (kbps !== null) historyNow = recordSpeed(historyNow, networkId, routeId, protocol, kbps);
       void saveConnectHistory(historyNow);
     };
+    // The upload alone, on the rung just remembered, where its check
+    // passed (`passedUploadKbps`): what this network's line manages, for
+    // the next pass's upload leg (`typicalUploadKbps`). The Windows
+    // ladder's rule.
+    const rememberUpload = (routeId: string, protocol: ProtocolUser["protocol"], upKbps: number | null) => {
+      if (upKbps === null) return;
+      historyNow = recordUpload(historyNow, networkId, routeId, protocol, upKbps);
+      void saveConnectHistory(historyNow);
+    };
     // What the sample after landing measured (`sampleDownload`), in place
     // of the check's download: a reading of some length, where the check's
     // 128 KB is over in a few round trips on a good line. Still the slower
@@ -2591,6 +2604,12 @@ export function Dashboard({
       candidates.push(fallback);
       return true;
     };
+    // How long each rung's upload gets in the data check: longer than the
+    // usual eight seconds only on a network whose own passing uploads have
+    // been slow (`uploadLegMs`), so a line that is merely slow is not read
+    // as a server that is held. From the memory as the pass began -- a
+    // rung that passes ends the pass. The Windows ladder's rule.
+    const upLegMs = uploadLegMs(typicalUploadKbps(history, networkId));
     const willDial = (c: ProtocolUser) =>
       !(c.protocol === "IKEV2" && (allowedApps.length > 0 || options.skipIkev2 === true)) && !passOverSlow(slow, c);
     // Once a rung has measured slow on a server this network has seen move,
@@ -2873,7 +2892,7 @@ export function Dashboard({
         let keptSlow = false;
         let measured: Awaited<ReturnType<typeof checkDataMoves>> | null = null;
         if (outcome === "connected" && verdict.state === "throughTunnel") {
-          const moved = await checkDataMoves(verdict.from);
+          const moved = await checkDataMoves(verdict.from, upLegMs);
           measured = moved;
           if (sessionGeneration() !== sessionAtStart) {
             await forgetProfiles().catch(() => disconnect()).catch(() => undefined);
@@ -2925,6 +2944,7 @@ export function Dashboard({
           // The slow fallback carried, but leading with it next time would
           // only cost a check to find it slow again.
           remember(candidate.routeId, candidate.protocol, proven && !keptSlow, rememberedKbps(measured));
+          rememberUpload(candidate.routeId, candidate.protocol, passedUploadKbps(measured));
           if (proven && !keptSlow) {
             void saveLastGood(rememberLastGood(lastGood, networkId, candidate.routeId));
           }
