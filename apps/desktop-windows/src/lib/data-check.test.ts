@@ -5,20 +5,28 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(
 
 const {
   checkDataMoves,
+  describeSearchEnd,
   DOWN_BYTES,
+  endSearch,
   judgeDataCheck,
   judgeSample,
   keepsSlow,
   noSlowRungs,
+  noteDial,
   noteSlow,
   passOverSlow,
   presentsOwnName,
   rememberedKbps,
   rememberedKbpsWith,
+  restartSearch,
   rungSpeeds,
   SAMPLE_MS,
   sampleDownload,
+  searching,
+  searchOrder,
   serverKey,
+  SLOW_SEARCH_MAX_DIALS,
+  SLOW_SEARCH_MAX_MS,
   slowFallback,
   UP_BYTES,
 } = await import("./data-check");
@@ -262,5 +270,204 @@ describe("slow rungs", () => {
     expect(passOverSlow(slow, uk)).toBe(true);
     expect(passOverSlow(slow, ukTls)).toBe(true);
     expect(passOverSlow(slow, de)).toBe(false);
+  });
+});
+
+/** A slow rung is one that works. The ladder used to walk on from it to
+ * its very end before going back to it, and on a network where most
+ * servers carry nothing a customer cancelled long before that end. */
+describe("the search for something better than a slow rung", () => {
+  const user = (id: string, host: string, protocol = "XRAY_VLESS_REALITY"): ProtocolUser =>
+    ({ id, routeId: `${id}-route`, protocol, connection: { host } }) as unknown as ProtocolUser;
+  const START = 1_800_000_000_000;
+  const SLOW = { state: "slow", downKbps: 2400, upKbps: 0 } as const;
+  const de = user("de", "198.51.100.3");
+  const others = ["a", "b", "c", "d"].map((id, i) => user(id, `198.51.100.${10 + i}`));
+  /** A pass on a network whose memory has seen `moved` carry traffic
+   * lately -- the customer's usual server, by default. */
+  const pass = (moved: ProtocolUser[] = [de]) => noSlowRungs((u) => serverKey(u, []), moved);
+  const begun = () => {
+    const slow = pass();
+    noteSlow(slow, de, SLOW, START);
+    return slow;
+  };
+
+  it("is three further rungs dialled, or forty seconds", () => {
+    expect(SLOW_SEARCH_MAX_DIALS).toBe(3);
+    expect(SLOW_SEARCH_MAX_MS).toBe(40_000);
+  });
+
+  it("has no budget to run out while nothing has been slow", () => {
+    const slow = noSlowRungs();
+    for (const other of others) noteDial(slow, other);
+    expect(endSearch(slow, START + 10 * SLOW_SEARCH_MAX_MS)).toBeNull();
+    expect(slow.search).toBeNull();
+  });
+
+  it("goes back to the slow rung after three further rungs were dialled, and keeps it", () => {
+    const slow = begun();
+    noteDial(slow, others[0]);
+    noteDial(slow, others[1]);
+    expect(endSearch(slow, START + 12_000)).toBeNull();
+    noteDial(slow, others[2]);
+    expect(endSearch(slow, START + 20_000)).toEqual({ candidate: de, dials: 3, ms: 20_000 });
+    // Kept whatever its check says this time, and never passed over itself.
+    expect(keepsSlow(slow, de)).toBe(true);
+    expect(passOverSlow(slow, de)).toBe(false);
+    // Once: the pass goes on from it if it does not come up.
+    expect(endSearch(slow, START + 60_000)).toBeNull();
+  });
+
+  it("goes back after forty seconds, however few were dialled", () => {
+    const slow = begun();
+    noteDial(slow, others[0]);
+    expect(endSearch(slow, START + SLOW_SEARCH_MAX_MS - 1)).toBeNull();
+    expect(endSearch(slow, START + SLOW_SEARCH_MAX_MS)).toEqual({ candidate: de, dials: 1, ms: 40_000 });
+  });
+
+  it("counts rungs dialled, not rungs passed over, and a rung dialled twice once", () => {
+    const slow = begun();
+    // The slow server's other protocols are passed over: nothing is dialled.
+    expect(passOverSlow(slow, user("de-ss", "198.51.100.3", "SHADOWSOCKS"))).toBe(true);
+    noteDial(slow, others[0]);
+    noteDial(slow, others[0]);
+    noteDial(slow, others[1]);
+    expect(endSearch(slow, START + 5_000)).toBeNull();
+  });
+
+  /** The regression this guards: a held server reads slow exactly as a
+   * slow line does -- download done, upload out of time. Stopping early
+   * for it kept the customer on about 0.1 Mbps up while a clean server
+   * sat a few rungs further down, never dialled. */
+  it("is not begun by a slow rung on a server this network has not seen move: the pass walks on, as it did", () => {
+    const [held, alsoHeld, dead, deadToo] = others;
+    // No memory of this network at all.
+    const slow = noSlowRungs((u) => serverKey(u, []));
+    noteSlow(slow, held, { state: "slow", downKbps: 3000, upKbps: 0 }, START);
+    noteDial(slow, alsoHeld);
+    noteSlow(slow, alsoHeld, { state: "slow", downKbps: 2000, upKbps: 0 }, START + 10_000);
+    noteDial(slow, dead);
+    noteDial(slow, deadToo);
+    expect(slow.search).toBeNull();
+    // Nor is what is left of the ladder put in another order for it.
+    expect(searching(slow)).toBe(false);
+    expect(endSearch(slow, START + 10 * SLOW_SEARCH_MAX_MS)).toBeNull();
+    // Its other protocols are still passed over, and at the very end of
+    // the ladder it is still the fallback: both as before.
+    expect(passOverSlow(slow, user("held-ss", "198.51.100.10", "SHADOWSOCKS"))).toBe(true);
+    expect(slowFallback(slow)).toBe(held);
+
+    // The same with a memory that knows another server: a pinned
+    // country's held server is not what moved here.
+    const pinned = pass([de]);
+    noteSlow(pinned, held, { state: "slow", downKbps: 3000, upKbps: 0 }, START);
+    for (const other of [alsoHeld, dead, deadToo]) noteDial(pinned, other);
+    expect(endSearch(pinned, START + 10 * SLOW_SEARCH_MAX_MS)).toBeNull();
+  });
+
+  it("is begun by the first slow rung on a server seen moving, and goes back to that one -- not to a faster-reading one never seen moving", () => {
+    const [held, a, b, c] = others;
+    const slow = pass([de]);
+    // A held server first: nothing begins.
+    noteSlow(slow, held, { state: "slow", downKbps: 5000, upKbps: 0 }, START);
+    noteDial(slow, de);
+    expect(endSearch(slow, START + 50_000)).toBeNull();
+    // The usual server, slow this time: the clock starts here.
+    noteSlow(slow, de, SLOW, START + 50_000);
+    expect(slow.search?.since).toBe(START + 50_000);
+    expect(searching(slow)).toBe(true);
+    for (const other of [a, b, c]) noteDial(slow, other);
+    // The held one read the faster download; it is not what is kept.
+    expect(endSearch(slow, START + 60_000)?.candidate).toBe(de);
+    expect(searching(slow)).toBe(false);
+    expect(keepsSlow(slow, de)).toBe(true);
+    expect(keepsSlow(slow, held)).toBe(false);
+  });
+
+  it("knows a server by any of its rungs: the one that moved here need not be the one that is slow now", () => {
+    const slow = pass([user("de-ss", "198.51.100.3", "SHADOWSOCKS")]);
+    noteSlow(slow, de, SLOW, START);
+    expect(endSearch(slow, START + SLOW_SEARCH_MAX_MS)?.candidate).toBe(de);
+  });
+
+  it("is one search for the pass: a second slow rung neither restarts the clock nor the count, and the better of the two is kept", () => {
+    const slow = pass([de, others[0]]);
+    noteSlow(slow, de, SLOW, START);
+    noteDial(slow, others[0]);
+    noteSlow(slow, others[0], { state: "slow", downKbps: 900, upKbps: 140 }, START + 15_000);
+    noteDial(slow, others[1]);
+    noteDial(slow, others[2]);
+    expect(endSearch(slow, START + 30_000)?.candidate).toBe(others[0]);
+  });
+
+  /** "Slow" is also what the check calls a tunnel it got nothing through
+   * at all. That one is not known to work, so the pass does not stop
+   * looking for its sake. */
+  it("is not begun by a rung that moved nothing either way, which is still the fallback at the end", () => {
+    const nothing = pass();
+    noteSlow(nothing, de, { state: "slow", downKbps: 0, upKbps: 0 }, START);
+    for (const other of others) noteDial(nothing, other);
+    expect(endSearch(nothing, START + 10 * SLOW_SEARCH_MAX_MS)).toBeNull();
+    expect(slowFallback(nothing)).toBe(de);
+
+    // One that moves data, later in the pass, begins the search then --
+    // and is what the pass goes back to.
+    const later = pass([de, others[0]]);
+    noteSlow(later, de, { state: "slow", downKbps: 0, upKbps: 0 }, START);
+    noteSlow(later, others[0], SLOW, START + 100_000);
+    expect(endSearch(later, START + 100_000 + SLOW_SEARCH_MAX_MS - 1)).toBeNull();
+    expect(endSearch(later, START + 100_000 + SLOW_SEARCH_MAX_MS)?.candidate).toBe(others[0]);
+  });
+
+  it("starts its budget afresh after a wait for a network", () => {
+    const slow = begun();
+    noteDial(slow, others[0]);
+    noteDial(slow, others[1]);
+    restartSearch(slow, START + 600_000);
+    expect(endSearch(slow, START + 600_000 + 1_000)).toBeNull();
+    noteDial(slow, others[0]);
+    noteDial(slow, others[1]);
+    noteDial(slow, others[2]);
+    expect(endSearch(slow, START + 600_000 + 2_000)?.dials).toBe(3);
+  });
+
+  it("puts the slow rung back once more at the end of the ladder, if it did not land when put back early", () => {
+    const slow = begun();
+    expect(endSearch(slow, START + SLOW_SEARCH_MAX_MS)?.candidate).toBe(de);
+    // It did not come up; the pass walked the rest; nothing landed.
+    expect(slowFallback(slow)).toBe(de);
+    expect(keepsSlow(slow, de)).toBe(true);
+    expect(slowFallback(slow)).toBeNull();
+  });
+
+  it("leaves the end of the ladder as it was when the budget was never used up", () => {
+    const slow = begun();
+    noteDial(slow, others[0]);
+    expect(slowFallback(slow)).toBe(de);
+    expect(slowFallback(slow)).toBeNull();
+    // Put back at the end: there is no search left to end.
+    expect(endSearch(slow, START + 10 * SLOW_SEARCH_MAX_MS)).toBeNull();
+  });
+
+  it("says what it did, and how many rungs it did not dial", () => {
+    expect(describeSearchEnd({ candidate: de, dials: 2, ms: 41_300 }, 38)).toBe(
+      "going back to it -- slow, but it works; 2 more dialled in 41 s found nothing better, 38 further not dialled yet",
+    );
+  });
+
+  it("searches first what this network has seen move, each group in the order it had", () => {
+    const [a, b, c, d] = others;
+    const moved = new Set([c.id]);
+    expect(searchOrder([a, b, c, d], (u) => moved.has(u.id))).toEqual([c, a, b, d]);
+    // Nothing remembered: the order it had.
+    expect(searchOrder([a, b, c, d], () => false)).toEqual([a, b, c, d]);
+    // The location the customer chose keeps its lead over both.
+    expect(
+      searchOrder(
+        [a, b, c, d],
+        (u) => moved.has(u.id),
+        (u) => u.id === "b",
+      ),
+    ).toEqual([b, c, a, d]);
   });
 });

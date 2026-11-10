@@ -22,7 +22,15 @@ import type { ProtocolUser, RouteOption } from "./types";
  * a quarter of a megabit.
  *
  * Unverified: where that line should sit for home and mobile networks.
- * The hold was measured only from data centres inside Iran. */
+ * The hold was measured only from data centres inside Iran.
+ *
+ * And it cannot yet be moved for one network from what the check itself
+ * measures there. An upload that runs out its leg comes back with no
+ * answer and no byte count (the request is one POST, and it timed out),
+ * so a rung under the line has no upload figure at all -- "220 kbps on a
+ * line that never did better than 330" and "held at 130" are the same
+ * reading. Telling them apart needs a longer upload leg on that network,
+ * not a different judgement of this one. */
 
 export const DOWN_BYTES = 128 * 1024;
 export const UP_BYTES = 256 * 1024;
@@ -221,17 +229,88 @@ export function presentsOwnName(candidate: Pick<ProtocolUser, "protocol" | "conn
  * there (`servers`). */
 export type SlowRungs = {
   keyOf: (candidate: ProtocolUser) => string;
+  /** The servers (`keyOf`) this network's memory has seen pass this check
+   * lately (`movedLately` in connect-history.ts): the only ones a pass
+   * stops looking early for the sake of (`noteSlow`). */
+  moved: Set<string>;
   servers: Set<string>;
   names: Set<string>;
   best: { candidate: ProtocolUser; verdict: Extract<DataVerdict, { state: "slow" }> } | null;
   /** The fallback's credential once it has been put back on the ladder;
    * its check then decides nothing. */
   redialling: string | null;
+  /** The search for something better, from the first slow rung that
+   * moved data on a server this network has seen move (`moved`): when it
+   * was measured, which rungs have been dialled since, the best such rung
+   * -- the one to go back to -- whether it has been put back early
+   * (`endSearch`), and whether the fallback has since been put back again
+   * at the end of the ladder (`slowFallback`). Null until there is one. */
+  search: {
+    since: number;
+    dialled: Set<string>;
+    ended: boolean;
+    again: boolean;
+    best: { candidate: ProtocolUser; verdict: Extract<DataVerdict, { state: "slow" }> };
+  } | null;
 };
 
-export function noSlowRungs(keyOf: (candidate: ProtocolUser) => string = (u) => `route:${u.routeId}`): SlowRungs {
-  return { keyOf, servers: new Set(), names: new Set(), best: null, redialling: null };
+/** `movedLately` is what this network's memory holds as the pass begins:
+ * the rungs that passed this check here in the last day (`movedLately`
+ * in connect-history.ts). None, on a network nothing is known of. */
+export function noSlowRungs(
+  keyOf: (candidate: ProtocolUser) => string = (u) => `route:${u.routeId}`,
+  movedLately: ReadonlyArray<ProtocolUser> = [],
+): SlowRungs {
+  return {
+    keyOf,
+    moved: new Set(movedLately.map(keyOf)),
+    servers: new Set(),
+    names: new Set(),
+    best: null,
+    redialling: null,
+    search: null,
+  };
 }
+
+/** How far a pass looks for something better once a rung has come up and
+ * measured slow on a server this network has seen move: this many further
+ * rungs dialled, or this long, whichever comes first. Then it goes back
+ * to the best such rung and keeps it (`endSearch`).
+ *
+ * A slow rung that moved data is one that works. The ladder used to walk
+ * on from it to its very end before going back, and on a network where
+ * most servers carry nothing that end is minutes away: in November 2026
+ * a customer whose one usual server measured just under the line half
+ * the time waited through rungs at 25-30 s each, of 49, and cancelled --
+ * the fallback that would have connected him was never reached.
+ *
+ * Only for a server this network's memory has seen pass the check in the
+ * last day (`SlowRungs.moved`), because a server whose upload is held
+ * reads exactly as a line that is merely slow does (see the note at the
+ * top): download done, upload out of time. Stopping early for any slow
+ * rung settled the pass on a held server while a clean one sat further
+ * down than the search went -- the thing this check was built to stop.
+ * A held server never passes the check, so it is never in that memory;
+ * the customer's usual server on a slow line passes it about as often as
+ * not, and is. On a network nothing is known of, and for a slow rung on a
+ * server never seen moving here, the pass walks on to the end of the
+ * ladder as it always did.
+ *
+ * What is left of that cost: a server that moved here within the day and
+ * has been held since reads as the usual server having a slow moment,
+ * until that memory is a day old, and a pass may settle on it while a
+ * clean one sits further down. It is said on screen as slow, and recorded
+ * as a failure with its speed, not as what worked here; and the rungs the
+ * search found dead go last next time (`failedLately`), so each pass
+ * looks at different ones.
+ *
+ * Three, because what is tried first is what this network has seen move
+ * (`searchOrder`): if those do not, the untried rest is a long shot.
+ * Forty seconds, so the wait is bounded on a phone as well, where one
+ * dead rung can use most of it. The clock decides only whether another
+ * rung is begun: one in flight runs to its end. */
+export const SLOW_SEARCH_MAX_DIALS = 3;
+export const SLOW_SEARCH_MAX_MS = 40_000;
 
 /** The speed a rung is remembered by (`recordSpeed`): its slower
  * direction, which is what the customer feels. Null when nothing was
@@ -267,9 +346,96 @@ export function noteSlow(
   slow: SlowRungs,
   candidate: ProtocolUser,
   verdict: Extract<DataVerdict, { state: "slow" }>,
+  now: number = Date.now(),
 ): void {
   (presentsOwnName(candidate) ? slow.names : slow.servers).add(slow.keyOf(candidate));
   if (slow.best === null || faster(verdict, slow.best.verdict)) slow.best = { candidate, verdict };
+  // The first slow rung that moved data, on a server this network has
+  // seen move, starts the search's clock; a later one does not start it
+  // again, and is what the pass goes back to if it is the faster. Two
+  // kinds start none and are never gone back to early -- the end of the
+  // ladder still puts the best slow rung back, as it always did. One the
+  // check got nothing through in either direction: it is not known to
+  // work. And one on a server never seen moving here: slow is all a held
+  // server ever reads, so the pass keeps looking for a clean one
+  // (`SLOW_SEARCH_MAX_DIALS`).
+  if ((verdict.downKbps > 0 || verdict.upKbps > 0) && slow.moved.has(slow.keyOf(candidate))) {
+    if (slow.search === null) {
+      slow.search = { since: now, dialled: new Set(), ended: false, again: false, best: { candidate, verdict } };
+    } else if (faster(verdict, slow.search.best.verdict)) {
+      slow.search.best = { candidate, verdict };
+    }
+  }
+}
+
+/** Whether the pass is on its short search (`endSearch`): begun, and not
+ * yet over. Only then is what is left of the ladder put in the search's
+ * order (`searchOrder`); a pass that walks on from a slow rung with no
+ * search keeps the order it had. */
+export function searching(slow: SlowRungs): boolean {
+  return slow.search !== null && !slow.search.ended;
+}
+
+/** A rung is about to be dialled: counted against the search, if one is
+ * on. By credential, so a rung dialled twice -- after a wait for a
+ * network -- is one. */
+export function noteDial(slow: SlowRungs, candidate: ProtocolUser): void {
+  if (slow.search !== null && !slow.search.ended) slow.search.dialled.add(candidate.id);
+}
+
+/** The search's budget afresh, for a pass that has just waited for a
+ * network: that wait was not spent looking. */
+export function restartSearch(slow: SlowRungs, now: number = Date.now()): void {
+  if (slow.search !== null && !slow.search.ended) slow.search = { ...slow.search, since: now, dialled: new Set() };
+}
+
+/** What `endSearch` hands back: the rung to dial again, and what the
+ * search came to. */
+export type SearchEnd = { candidate: ProtocolUser; dials: number; ms: number };
+
+/** Asked before a rung is dialled: whether the search for something
+ * better than a slow rung has used its budget (`SLOW_SEARCH_MAX_DIALS`,
+ * `SLOW_SEARCH_MAX_MS`). If it has, the best slow rung on a server this
+ * network has seen move -- not a faster-reading one on a server it has
+ * not, which may be held -- to be dialled next, ahead of the rungs still
+ * on the ladder, and kept whatever its check says (`keepsSlow`), as at
+ * the end of the ladder. Once.
+ *
+ * Put back in front of the rest, not instead of it: if it does not come
+ * up this time the pass goes on down the ladder as it always did, so no
+ * rung is left undialled by a pass that then fails. Null while there is
+ * budget left, when no search was begun (`noteSlow`), and once the
+ * fallback has been put back either way. */
+export function endSearch(slow: SlowRungs, now: number = Date.now()): SearchEnd | null {
+  const { search } = slow;
+  if (search === null || search.ended || slow.redialling !== null) return null;
+  const ms = Math.max(0, now - search.since);
+  if (search.dialled.size < SLOW_SEARCH_MAX_DIALS && ms < SLOW_SEARCH_MAX_MS) return null;
+  search.ended = true;
+  slow.redialling = search.best.candidate.id;
+  return { candidate: search.best.candidate, dials: search.dialled.size, ms };
+}
+
+/** The line in the technical details where a pass goes back to a slow
+ * rung early. `left` is how many rungs were still on the ladder: not
+ * dialled, and said so -- nothing is claimed about servers nobody tried. */
+export function describeSearchEnd(end: SearchEnd, left: number): string {
+  return `going back to it -- slow, but it works; ${end.dials} more dialled in ${Math.round(end.ms / 1000)} s found nothing better, ${left} further not dialled yet`;
+}
+
+/** What is left of the ladder once a rung has measured slow, in the order
+ * to search it: the rungs this network has seen carry traffic lately
+ * (`moved`, from the connect history) ahead of the rest, each group in
+ * the order it had. The search is short, so it is spent first on what is
+ * likeliest to move. `chosen` rungs -- the location the customer picked
+ * -- keep their lead over both. */
+export function searchOrder(
+  rest: ReadonlyArray<ProtocolUser>,
+  moved: (candidate: ProtocolUser) => boolean,
+  chosen: (candidate: ProtocolUser) => boolean = () => false,
+): ProtocolUser[] {
+  const tier = (candidate: ProtocolUser) => (chosen(candidate) ? 0 : moved(candidate) ? 1 : 2);
+  return [...rest].sort((a, b) => tier(a) - tier(b));
 }
 
 /** Whether to pass over `candidate` without dialling it: its server was
@@ -285,9 +451,18 @@ export function passOverSlow(slow: SlowRungs, candidate: ProtocolUser): boolean 
 /** At the end of the ladder with nothing landed: the best slow rung, put
  * back once, to be kept whatever its check says this time. A slow tunnel
  * beats none, and the customer is told it is slow. Null when there is
- * none, or it has already been put back. */
+ * none, or it has already been put back.
+ *
+ * Where `endSearch` put one back early and it did not land, the best
+ * slow rung of the whole pass is put back here once more: the pass went
+ * on through every other rung after it, and this is the last one, with
+ * the last rung's patience. */
 export function slowFallback(slow: SlowRungs): ProtocolUser | null {
-  if (slow.best === null || slow.redialling !== null) return null;
+  if (slow.best === null) return null;
+  if (slow.redialling !== null) {
+    if (slow.search === null || !slow.search.ended || slow.search.again) return null;
+    slow.search.again = true;
+  }
   slow.redialling = slow.best.candidate.id;
   return slow.best.candidate;
 }

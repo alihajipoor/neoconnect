@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { recordAttempt, recordSpeed, speedFor, type ConnectHistory } from "./connect-history";
+import { FAILED_LAST_MS, recordAttempt, recordDead, recordSpeed, speedFor, type ConnectHistory } from "./connect-history";
 import { reachabilityKey, type ReachabilityMap } from "./reachability";
 import { orderCandidates, lastGoodFor, rememberLastGood } from "./failover";
 import type { Protocol, ProtocolUser } from "./types";
@@ -431,5 +431,98 @@ describe("ordering by measured speed", () => {
     const history = measured([["de", 9_000]]);
     expect(speedFor(history, NET, "de", "XRAY_VLESS_REALITY", NOW)).toBe(9_000);
     expect(speedFor(history, NET, "de", "XRAY_VLESS_REALITY", NOW + 25 * 3_600_000)).toBeNull();
+  });
+});
+
+describe("rungs that have only failed on this network lately", () => {
+  const NET = "home";
+  const NOW = 1_800_000_000_000;
+  const mins = (n: number) => n * 60_000;
+  const reach = (entries: Array<[string, Protocol]>): ReachabilityMap =>
+    Object.fromEntries(entries.map(([routeId, protocol]) => [reachabilityKey(routeId, protocol), "reachable" as const]));
+  const order = (users: ProtocolUser[], opts: Parameters<typeof orderCandidates>[1] = {}) =>
+    orderCandidates(users, { network: NET, now: NOW, ...opts }).map((u) => `${u.routeId}/${u.protocol}`);
+
+  /** The rungs that cost the most: they come up and carry nothing, so
+   * their port answers the probe, and the probe used to put them ahead of
+   * everything it could not ask. */
+  it("go after everything else, an answer to the probe or not", () => {
+    const users = [user("de", "XRAY_VLESS_TLS"), user("fr", "XRAY_VLESS_REALITY"), user("fi", "WIREGUARD")];
+    const history = recordDead({}, NET, "de", "XRAY_VLESS_TLS", NOW - mins(30));
+    const reachability = reach([["de", "XRAY_VLESS_TLS"]]);
+    // Without the memory, the one that answered leads.
+    expect(order(users, { reachability })[0]).toBe("de/XRAY_VLESS_TLS");
+    expect(order(users, { reachability, history })).toEqual(["fi/WIREGUARD", "fr/XRAY_VLESS_REALITY", "de/XRAY_VLESS_TLS"]);
+  });
+
+  it("are never dropped, and are in the ordinary order again after a few hours", () => {
+    const users = [user("de", "WIREGUARD"), user("fr", "XRAY_VLESS_REALITY")];
+    const history = recordDead({}, NET, "de", "WIREGUARD", NOW);
+    expect(order(users, { history })).toEqual(["fr/XRAY_VLESS_REALITY", "de/WIREGUARD"]);
+    // Past the window the failure still counts for what it did before: a
+    // failing rung after an untried one. Nothing more.
+    const later = orderCandidates(users, { network: NET, history, now: NOW + FAILED_LAST_MS + 1 });
+    expect(later).toHaveLength(2);
+    expect(orderCandidates(users, { network: "office", history, now: NOW })[0].routeId).toBe("de");
+  });
+
+  it("do not lead on the strength of the server that worked last time", () => {
+    // What worked last time is a server; the rung on it that carries
+    // nothing here was still dialled second, ahead of every other server.
+    const users = [user("de", "XRAY_VLESS_REALITY"), user("de", "XRAY_VLESS_TLS"), user("fr", "XRAY_VLESS_REALITY")];
+    let history = recordAttempt({}, NET, "de", "XRAY_VLESS_REALITY", true, NOW - mins(60));
+    history = recordDead(history, NET, "de", "XRAY_VLESS_TLS", NOW - mins(50));
+    expect(order(users, { history, lastGoodRouteId: "de" })).toEqual([
+      "de/XRAY_VLESS_REALITY",
+      "fr/XRAY_VLESS_REALITY",
+      "de/XRAY_VLESS_TLS",
+    ]);
+  });
+
+  /** The customer's usual rung landed this morning and he stayed
+   * connected all day. One press during a short outage marked it, and it
+   * went behind every other rung for six hours -- on a network where most
+   * of those carry nothing. */
+  it("are not the rung that carried traffic here earlier today, for failing once since", () => {
+    const users = [user("de", "XRAY_VLESS_REALITY"), user("fr", "XRAY_VLESS_REALITY"), user("fi", "WIREGUARD")];
+    let history = recordAttempt({}, NET, "de", "XRAY_VLESS_REALITY", true, NOW - mins(7 * 60));
+    history = recordDead(history, NET, "de", "XRAY_VLESS_REALITY", NOW - mins(1));
+    expect(order(users, { history, lastGoodRouteId: "de" })[0]).toBe("de/XRAY_VLESS_REALITY");
+    // The rungs he waited through after it, never seen working here, do go last.
+    history = recordDead(history, NET, "fi", "WIREGUARD", NOW - mins(1));
+    expect(order(users, { history, lastGoodRouteId: "de" })).toEqual([
+      "de/XRAY_VLESS_REALITY",
+      "fr/XRAY_VLESS_REALITY",
+      "fi/WIREGUARD",
+    ]);
+  });
+
+  it("stay behind the customer's own choice: the chosen location leads, its failed rungs after its others", () => {
+    const users = [
+      user("de", "XRAY_VLESS_TLS"),
+      user("de", "XRAY_VLESS_REALITY"),
+      user("de-2", "XRAY_VLESS_REALITY"),
+      user("fr", "WIREGUARD"),
+    ];
+    let history = recordDead({}, NET, "de", "XRAY_VLESS_REALITY", NOW - mins(20));
+    history = recordDead(history, NET, "de-2", "XRAY_VLESS_REALITY", NOW - mins(10));
+    expect(order(users, { history, pinnedRouteId: "de", pinnedCountryRouteIds: ["de-2"] })).toEqual([
+      "de/XRAY_VLESS_TLS",
+      "de/XRAY_VLESS_REALITY",
+      "de-2/XRAY_VLESS_REALITY",
+      "fr/WIREGUARD",
+    ]);
+    // And a reconnect still starts where the tunnel was.
+    expect(order(users, { history, resumeRouteId: "de-2" })[0]).toBe("de-2/XRAY_VLESS_REALITY");
+  });
+
+  it("leave a rung that was only slow, or that also worked, where it was", () => {
+    const users = [user("de", "XRAY_VLESS_REALITY"), user("fr", "XRAY_VLESS_REALITY")];
+    // Slow on de: a failure with a speed. Nothing known of fr.
+    let slow = recordAttempt({}, NET, "de", "XRAY_VLESS_REALITY", true, NOW - mins(90));
+    slow = recordAttempt(slow, NET, "de", "XRAY_VLESS_REALITY", false, NOW - mins(80));
+    slow = recordSpeed(slow, NET, "de", "XRAY_VLESS_REALITY", 0);
+    const before = orderCandidates(users, { network: NET, now: NOW, history: slow, lastGoodRouteId: "de" });
+    expect(before[0].routeId).toBe("de");
   });
 });

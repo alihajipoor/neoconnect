@@ -7,7 +7,15 @@ import {
   lastGoodFor,
   rememberLastGood,
 } from "@shared/lib/failover";
-import { recordAttempt, recordSpeed, type ConnectHistory } from "@shared/lib/connect-history";
+import {
+  movedLately,
+  recordAttempt,
+  recordDead,
+  recordSpeed,
+  rungShownDead,
+  workedLately,
+  type ConnectHistory,
+} from "@shared/lib/connect-history";
 import {
   loadConnectHistory,
   loadLastGood,
@@ -135,13 +143,18 @@ import {
   checkDataMoves,
   rememberedKbps,
   rememberedKbpsWith,
+  describeSearchEnd,
   describeSlow,
+  endSearch,
   keepsSlow,
   noSlowRungs,
+  noteDial,
   noteSlow,
   passOverSlow,
   rungSpeeds,
   sampleDownload,
+  searching,
+  searchOrder,
   serverKey,
   slowFallback,
 } from "@shared/lib/data-check";
@@ -2478,6 +2491,14 @@ export function Dashboard({
       historyNow = recordSpeed(historyNow, networkId, routeId, protocol, kbps);
       void saveConnectHistory(historyNow);
     };
+    // A rung that came up and carried nothing, or did not connect: a
+    // failure as it always was, and marked as that kind, so the next pass
+    // on this network leaves it until last (`failedLately`). Not a rung
+    // that was only slow, nor a landing nothing could confirm.
+    const rememberDead = (routeId: string, protocol: ProtocolUser["protocol"]) => {
+      historyNow = recordDead(historyNow, networkId, routeId, protocol);
+      void saveConnectHistory(historyNow);
+    };
 
     const allowedApps = await loadAllowedApps();
     /** Whether any rung got as far as dialling, so there is an engine to
@@ -2548,7 +2569,14 @@ export function Dashboard({
     // servers are passed over for the rest of the pass, and the best of them
     // is dialled once more, and kept, if nothing lands -- a slow tunnel
     // beats none, and the screen says it is slow. The Windows ladder's rule.
-    const slow = noSlowRungs((candidate) => serverKey(candidate, routes));
+    // With what this network's memory has seen pass that check lately: only
+    // for a slow rung on one of those servers does the pass stop looking
+    // early (`endSearch`). A held server reads slow too, and has never
+    // passed the check here.
+    const slow = noSlowRungs(
+      (candidate) => serverKey(candidate, routes),
+      candidates.filter((candidate) => movedLately(history, networkId, candidate.routeId, candidate.protocol)),
+    );
     const queueSlowFallback = (): boolean => {
       if (pass.stopped()) return false;
       const fallback = slowFallback(slow);
@@ -2558,6 +2586,21 @@ export function Dashboard({
     };
     const willDial = (c: ProtocolUser) =>
       !(c.protocol === "IKEV2" && (allowedApps.length > 0 || options.skipIkev2 === true)) && !passOverSlow(slow, c);
+    // Once a rung has measured slow on a server this network has seen move,
+    // the pass looks only a little further (`endSearch`), so what is left
+    // is searched in the order likeliest to move: what this network has
+    // seen carry traffic lately first. The location the customer chose
+    // keeps its lead. Only then (`searching`): a pass that walks on with no
+    // such search keeps the order it had. The Windows ladder's rule.
+    const chosenPlace = new Set(chosenRouteId ? [chosenRouteId, ...sameCountryRouteIds(routes, chosenRouteId)] : []);
+    const searchFrom = (from: number) => {
+      const rest = searchOrder(
+        candidates.slice(from),
+        (later) => workedLately(historyNow, networkId, later.routeId, later.protocol),
+        (later) => chosenPlace.has(later.routeId),
+      );
+      candidates.splice(from, rest.length, ...rest);
+    };
 
     for (let index = 0; index < candidates.length || queueSlowFallback(); index += 1) {
       const candidate = candidates[index];
@@ -2591,6 +2634,20 @@ export function Dashboard({
       if (passOverSlow(slow, candidate)) {
         attempts.push(`${label}: not dialled -- its server was too slow a moment ago`);
         dials.push(null);
+        continue;
+      }
+
+      // Looked far enough for something better than a slow rung that
+      // works: back to it now, ahead of what is left of the ladder, to be
+      // kept (`endSearch`). The rungs after it are not dialled unless it
+      // fails to come up, and the line says how many that is.
+      const back = endSearch(slow);
+      if (back !== null) {
+        const backLabel = customerProtocolLabel(back.candidate.protocol, back.candidate.connection?.transport);
+        attempts.push(`${backLabel}: ${describeSearchEnd(back, candidates.length - index)}`);
+        dials.push(null);
+        candidates.splice(index, 0, back.candidate);
+        index -= 1;
         continue;
       }
 
@@ -2725,6 +2782,9 @@ export function Dashboard({
       }
 
       dialled = true;
+      // Counted against the search for something better than a slow rung,
+      // if one is on (`endSearch`).
+      noteDial(slow, candidate);
       // Whatever the platform has up from here is this rung's engine, and
       // unproven until the egress check says otherwise (`passTunnel`).
       passTunnel.current = "unproven";
@@ -2823,6 +2883,7 @@ export function Dashboard({
               noteSlow(slow, candidate, moved);
               tooSlow = moved;
               outcome = "notCarrying";
+              if (searching(slow)) searchFrom(index + 1);
             }
           }
         }
@@ -2934,7 +2995,7 @@ export function Dashboard({
         } else if (rejectionIsEvidence(verdict)) {
           attempts.push(`${label}: up but not carrying traffic`);
           dials.push({ routeId: candidate.routeId, carried: false });
-          remember(candidate.routeId, candidate.protocol, false);
+          rememberDead(candidate.routeId, candidate.protocol);
         } else {
           attempts.push(`${label}: up, traffic could not be confirmed`);
           dials.push(null);
@@ -2953,8 +3014,10 @@ export function Dashboard({
         const dial = failedDial(candidate.routeId, classified.kind);
         dials.push(dial);
         // Only a network failure teaches the per-network memory anything;
-        // an exhausted quota on this route is not evidence about it.
-        if (dial) remember(candidate.routeId, candidate.protocol, false);
+        // an exhausted quota on this route is not evidence about it. Nor a
+        // dial that failed once the pass had been told to stop, which is
+        // the stop's doing (`rungShownDead`).
+        if (rungShownDead({ up: false, dial }, pass.stopped())) rememberDead(candidate.routeId, candidate.protocol);
         lastError = {
           ...classified,
           detail: `tried ${attempts.length} of ${candidates.length} available\n${attempts.join("\n")}`,

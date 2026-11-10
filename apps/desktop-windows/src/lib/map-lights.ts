@@ -13,13 +13,14 @@ import type { Protocol, RouteOption } from "./types";
  *
  *  - this device's own attempts (`connect-history`), where `ok` means the
  *    ladder's verdict was "connected" -- traffic verified. Only the
- *    successes are evidence here. The desktop records a rung only when it
- *    lands, so its `ok: false` is a tunnel that came up and could not be
- *    confirmed -- Custom mode, an egress check the network filters -- and
- *    that proves nothing either way: it may well have been carrying
- *    traffic. It is a failure for the ladder's ordering, which needs a
- *    reason to try something else first; it is never a reason to draw a
- *    place as failing;
+ *    successes are evidence here. An `ok: false` may be a tunnel that
+ *    came up and could not be confirmed -- Custom mode, an egress check
+ *    the network filters -- and that proves nothing either way: it may
+ *    well have been carrying traffic. Since November 2026 the ladders
+ *    also record the rungs they walked past (`recordDead`), but one
+ *    device's failed dial is one moment on one line. Both are failures
+ *    for the ladder's ordering, which needs a reason to try something
+ *    else first; neither is a reason to draw a place as failing;
  *  - the per-network tags the server sends with the route list
  *    (`worksOnYourIsp`, `failingOnYourIsp`), about at least five other
  *    people on this device's network;

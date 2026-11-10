@@ -54,7 +54,15 @@ import {
 } from "../lib/uplink-watch";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { installSeed, orderCandidates, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
-import { recordAttempt, recordSpeed, type ConnectHistory } from "../lib/connect-history";
+import {
+  movedLately,
+  recordAttempt,
+  recordDead,
+  recordSpeed,
+  rungShownDead,
+  workedLately,
+  type ConnectHistory,
+} from "../lib/connect-history";
 import { probeCandidates } from "../lib/reachability";
 import {
   loadChosenRoute,
@@ -100,13 +108,19 @@ import {
   checkDataMoves,
   rememberedKbps,
   rememberedKbpsWith,
+  describeSearchEnd,
   describeSlow,
+  endSearch,
   keepsSlow,
   noSlowRungs,
+  noteDial,
   noteSlow,
   passOverSlow,
+  restartSearch,
   rungSpeeds,
   sampleDownload,
+  searching,
+  searchOrder,
   serverKey,
   slowFallback,
   type DataVerdict,
@@ -3907,7 +3921,14 @@ export function Dashboard({
       // servers are passed over for the rest of the pass, and the best of them
       // is dialled once more, and kept, if the ladder ends with nothing
       // landed -- a slow tunnel beats none, and the screen says it is slow.
-      const slow = noSlowRungs((candidate) => serverKey(candidate, routes));
+      // With what this network's memory has seen pass that check lately: only
+      // for a slow rung on one of those servers does the pass stop looking
+      // early (`endSearch`). A held server reads slow too, and has never
+      // passed the check here.
+      const slow = noSlowRungs(
+        (candidate) => serverKey(candidate, routes),
+        candidates.filter((candidate) => movedLately(history, networkId, candidate.routeId, candidate.protocol)),
+      );
       const queueSlowFallback = (): boolean => {
         if (stopped()) return false;
         const fallback = slowFallback(slow);
@@ -3915,10 +3936,37 @@ export function Dashboard({
         candidates = [...candidates, fallback];
         return true;
       };
+      // Once a rung has measured slow on a server this network has seen
+      // move, the pass looks only a little further (`endSearch`), so what
+      // is left is searched in the order likeliest to move: what this
+      // network has seen carry traffic lately first. The location the
+      // customer chose keeps its lead. Only then (`searching`): a pass that
+      // walks on with no such search keeps the order it had.
+      const chosenPlace = new Set(chosenRouteId ? [chosenRouteId, ...sameCountryRouteIds(routes, chosenRouteId)] : []);
+      const searchFrom = (from: number) => {
+        candidates = [
+          ...candidates.slice(0, from),
+          ...searchOrder(
+            candidates.slice(from),
+            (later) => workedLately(history, networkId, later.routeId, later.protocol),
+            (later) => chosenPlace.has(later.routeId),
+          ),
+        ];
+      };
+      // This network's memory with what the pass has found so far: the
+      // rungs that came up and carried nothing, or did not connect
+      // (`recordDead`), which the next pass here leaves until last. This
+      // ladder used to remember only the rung it landed on, so every pass
+      // on a network dialled the same dead rungs again in the same order.
+      // Written with the landing, or when the pass is over. A rung taken
+      // back below -- dialled beside the settle, or before the network
+      // went -- is taken back here too.
+      let passHistory = history;
       // Over an index, not an iterator: a rung the service refused for want
       // of a network is dialled again, on the same server, once there is one.
       for (let index = 0; index < candidates.length || queueSlowFallback(); index += 1) {
         const candidate = candidates[index];
+        const historyBeforeRung = passHistory;
         if (stopped() || sessionGeneration() !== sessionAtStart) break;
         // A pass whose guard expired and that a newer pass has replaced
         // stops dialling here, rather than tearing that pass's engine
@@ -3946,6 +3994,19 @@ export function Dashboard({
         if (passOverSlow(slow, candidate)) {
           attempts.push(`${label}: not dialled -- its server was too slow a moment ago`);
           dials.push(null);
+          continue;
+        }
+        // Looked far enough for something better than a slow rung that
+        // works: back to it now, ahead of what is left of the ladder, to
+        // be kept (`endSearch`). The rungs after it are not dialled unless
+        // it fails to come up, and the line says how many that is.
+        const back = endSearch(slow);
+        if (back !== null) {
+          const backLabel = customerProtocolLabel(back.candidate.protocol, back.candidate.connection?.transport);
+          attempts.push(`${backLabel}: ${describeSearchEnd(back, candidates.length - index)}`);
+          dials.push(null);
+          candidates = [...candidates.slice(0, index), back.candidate, ...candidates.slice(index)];
+          index -= 1;
           continue;
         }
         const isLast = !candidates.slice(index + 1).some((later) => !passOverSlow(slow, later));
@@ -4071,6 +4132,9 @@ export function Dashboard({
           // notification, wait for the service's own word, read while it
           // dials (`holdStore.lettingGo`, `dialledUnderHold`).
           if (holdSetting && !holdCovers(candidate.protocol, customMode)) holdStore.lettingGo();
+          // Dialled: counted against the search for something better than
+          // a slow rung, if one is on (`endSearch`).
+          noteDial(slow, candidate);
           // From here a reading the settle beside the dial takes may come
           // through this rung's tunnel (`settleBeside`).
           beside?.dialling();
@@ -4156,6 +4220,10 @@ export function Dashboard({
           // inventing one to fit the type would be a lie in a field the
           // UI shows.
           let reason = "";
+          // What the address check came to, for the memory of rungs that
+          // failed (`rungShownDead`). Null in Custom mode, where there is
+          // none: its probe failing is not the protocol failing.
+          let checked: EgressVerdict["state"] | null = null;
           // Up and proven, and too slow to keep: moved on from without
           // asking the server for fresh credentials -- they work.
           let tooSlow = false;
@@ -4291,6 +4359,7 @@ export function Dashboard({
                   ? combineEvidence(await confirmReachable(), egress)
                   : "degraded";
             reason = checkedAgain ? `${egress.state}, checked again after the IPv4 confinement was let go of` : egress.state;
+            checked = egress.state;
 
             // Its address is proven: now whether it moves any data. A tunnel
             // whose upload is held to a trickle passes the address check and
@@ -4308,6 +4377,7 @@ export function Dashboard({
                   verdict = "degraded";
                   reason = describeSlow(moved);
                   tooSlow = true;
+                  if (searching(slow)) searchFrom(index + 1);
                 }
               }
             }
@@ -4436,7 +4506,7 @@ export function Dashboard({
             // and proved nothing is not evidence that it works.
             {
               let recorded = recordAttempt(
-                history,
+                passHistory,
                 networkId,
                 candidate.routeId,
                 candidate.protocol,
@@ -4537,6 +4607,16 @@ export function Dashboard({
           // not after the rest of the ladder has been walked on the same
           // answer. Not one that was only slow: it carried, so it works.
           if (!tooSlow) carriedNothing.push(candidate);
+          // And held against it on this network, for the next pass's order
+          // -- only where the address check measured it carrying nothing,
+          // and the pass had not been told to stop (`rungShownDead`). Not
+          // every rung moved on from: a stop during the check takes the
+          // tunnel down under it, `indeterminate` is our own API silent
+          // under a tunnel that carries, and Custom mode has no such check.
+          // The phone's rule (`rejectionIsEvidence`).
+          if (rungShownDead({ up: true, egress: checked }, stopped())) {
+            passHistory = recordDead(passHistory, networkId, candidate.routeId, candidate.protocol);
+          }
           // Its tunnel came up: dialled, whatever else is true of it.
           failedRungs.push({ routeId: candidate.routeId, fate: "dialled" });
           lastError = {
@@ -4586,6 +4666,8 @@ export function Dashboard({
               // Still said on screen until the service takes the dial.
               ipv6BaselineRef.current = null;
               redialAfterWait = true;
+              // The wait was not spent looking for a faster server.
+              restartSearch(slow);
               // Rungs this pass dialled before the network went may have
               // failed for that, not for their servers: fi timed out as
               // Wi-Fi left, sg waited, and the pass went on to sg once the
@@ -4597,6 +4679,7 @@ export function Dashboard({
                 failedRungs.length = 0;
                 attempts.length = 0;
                 dials.length = 0;
+                passHistory = history;
                 lastError = null;
                 index = -1;
               } else {
@@ -4611,6 +4694,14 @@ export function Dashboard({
           }
           attempts.push(`${label}: ${classified.detail}`);
           dials.push(failedDial(candidate.routeId, classified.kind));
+          // Remembered against it on this network exactly where the report
+          // counts it against the route: the network's doing, not the
+          // account's or the service's (`failedDial`). And not a dial that
+          // failed once the pass had been told to stop, which is the stop's
+          // doing (`rungShownDead`).
+          if (rungShownDead({ up: false, dial: failedDial(candidate.routeId, classified.kind) }, stopped())) {
+            passHistory = recordDead(passHistory, networkId, candidate.routeId, candidate.protocol);
+          }
           // A rung the service could not dial for want of a network is not
           // one that failed to reach its server (`rungFate`). And when it is
           // the last word, the screen says there is no network rather than
@@ -4642,6 +4733,7 @@ export function Dashboard({
           attempts.pop();
           dials.pop();
           failedRungs.pop();
+          passHistory = historyBeforeRung;
           settleInFront = true;
           redialAfterWait = true;
           index -= 1;
@@ -4668,6 +4760,14 @@ export function Dashboard({
       // without a word on screen. Its verdict is about a tunnel that no
       // longer exists.
       if (ladderGenerationRef.current !== generation) return "failed";
+
+      // What this pass found dead, into this network's memory -- failed or
+      // stopped alike: somebody who gave up on a long connect is who the
+      // next pass must not walk the same way again.
+      if (passHistory !== history && sessionGeneration() === sessionAtStart) {
+        setHistory(passHistory);
+        void saveConnectHistory(passHistory);
+      }
 
       // The clock is set on each engine start, so a run that ultimately
       // failed leaves it running against nothing.

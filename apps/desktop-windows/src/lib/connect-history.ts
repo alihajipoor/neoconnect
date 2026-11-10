@@ -1,3 +1,5 @@
+import type { Dial } from "./attempts";
+import type { EgressVerdict } from "./egress";
 import type { Protocol } from "./types";
 
 /** What has actually worked on this device, lately.
@@ -28,8 +30,13 @@ import type { Protocol } from "./types";
  * that figure is replaced by the download sampled once the app said
  * "Connected" (`sampleDownload`), where one could be taken: a second and
  * a half through the tunnel, against the check's 128 KB, which a good
- * line is through in a few round trips. */
-export type Attempt = { at: number; ok: boolean; kbps?: number };
+ * line is through in a few round trips.
+ *
+ * `dead` marks a rung that came up and carried nothing, or did not
+ * connect (`recordDead`). Not every `ok: false` is one: a rung that was
+ * only slow carried data, and a landing nothing could confirm proved
+ * nothing either way. */
+export type Attempt = { at: number; ok: boolean; kbps?: number; dead?: true };
 
 /** Keyed `network|routeId|protocol`. Newest last. */
 export type ConnectHistory = Record<string, Attempt[]>;
@@ -85,8 +92,59 @@ export function recordAttempt(
   ok: boolean,
   now: number = Date.now(),
 ): ConnectHistory {
-  const key = keyFor(network, routeId, protocol);
-  const kept = [...(history[key] ?? []), { at: now, ok }].slice(-KEEP_PER_KEY);
+  return append(history, keyFor(network, routeId, protocol), { at: now, ok });
+}
+
+/** Adds a rung that came up and carried nothing, or did not connect: a
+ * failure like any other to `scoreFor`, and marked, so the next pass on
+ * this network can leave it until last (`failedLately`). */
+export function recordDead(
+  history: ConnectHistory,
+  network: string | null,
+  routeId: string,
+  protocol: Protocol,
+  now: number = Date.now(),
+): ConnectHistory {
+  return append(history, keyFor(network, routeId, protocol), { at: now, ok: false, dead: true });
+}
+
+/** How a rung the ladder moved on from ended, for `rungShownDead`. */
+export type RungEnd =
+  /** Its tunnel came up: what the address check through it came to, or
+   * null where none ran -- Custom mode on Windows, whose own probe says
+   * nothing about the protocol. */
+  | { up: true; egress: EgressVerdict["state"] | null }
+  /** It did not connect: the dial the report counts for it, null where
+   * the failure was the account's or the device's (`failedDial`). */
+  | { up: false; dial: Dial };
+
+/** Whether a rung the ladder moved on from is to be remembered as dead
+ * on this network (`recordDead`). Both ladders ask it; on the phone a
+ * rung that came up has been through `rejectionIsEvidence`, the same
+ * rule, by then.
+ *
+ * A mark sends the rung behind every other for hours (`failedLately`),
+ * so it takes a measurement, and the ladder moves on from more than it
+ * measures:
+ *
+ * - Came up, and the address check measured it carrying nothing: the old
+ *   address came back, or nothing answered at all. Not `indeterminate`,
+ *   which is our own API silent under a tunnel that plainly carries
+ *   traffic -- a backend being redeployed -- and not a rung with no such
+ *   check behind it.
+ * - Did not connect, for a reason that is the network's.
+ * - And never once the pass has been told to stop: the stop takes the
+ *   tunnel down at once, and a check still running then reads the bare
+ *   network, a dial still running fails. The Windows ladder marked the
+ *   customer's usual rung dead for a press of Stop during its check. */
+export function rungShownDead(end: RungEnd, stopped: boolean): boolean {
+  if (stopped) return false;
+  if (!end.up) return end.dial !== null;
+  return end.egress === "bypassingTunnel" || end.egress === "unreachable";
+}
+
+function append(history: ConnectHistory, key: string, attempt: Attempt): ConnectHistory {
+  const kept = [...(history[key] ?? []), attempt].slice(-KEEP_PER_KEY);
   const next: ConnectHistory = { ...history, [key]: kept };
 
   if (Object.keys(next).length <= KEEP_KEYS) return next;
@@ -196,6 +254,91 @@ export function speedFor(
     if (newest === null || attempt.at >= newest.at) newest = attempt;
   }
   return newest?.kbps ?? null;
+}
+
+/** Whether this combination carried traffic on this network lately: any
+ * verified attempt in the last `SPEED_FRESH_MS`. Looser than `scoreFor`
+ * on purpose -- a server that read slow on its last two tries and moved
+ * on the one before scores under one never tried, and is still the
+ * likelier of the two to move. For a pass with little left to spend
+ * (`searchOrder` in data-check.ts). */
+export function workedLately(
+  history: ConnectHistory,
+  network: string | null,
+  routeId: string,
+  protocol: Protocol,
+  now: number = Date.now(),
+): boolean {
+  const attempts = history[keyFor(network, routeId, protocol)] ?? [];
+  return attempts.some((attempt) => attempt.ok && now - attempt.at <= SPEED_FRESH_MS);
+}
+
+/** Whether this combination passed the data check on this network
+ * lately: a verified attempt in the last `SPEED_FRESH_MS` with a speed
+ * measured in both directions (`rememberedKbps` is the slower one, and
+ * nothing for a check that could not be run).
+ *
+ * Stricter than `workedLately`, for the one question that needs it:
+ * whether a rung that reads slow now is a server that works here having
+ * a slow moment, or one whose upload is held (`noteSlow` in
+ * data-check.ts). A held server never passes the check, so it is never
+ * this -- but it can land as verified where the check was not run at
+ * all, and that landing must not vouch for it. */
+export function movedLately(
+  history: ConnectHistory,
+  network: string | null,
+  routeId: string,
+  protocol: Protocol,
+  now: number = Date.now(),
+): boolean {
+  const attempts = history[keyFor(network, routeId, protocol)] ?? [];
+  return attempts.some(
+    (attempt) => attempt.ok && attempt.kbps !== undefined && attempt.kbps > 0 && now - attempt.at <= SPEED_FRESH_MS,
+  );
+}
+
+/** How long a rung that failed on a network is left until last there.
+ *
+ * A few hours: long enough that somebody reconnecting through an evening
+ * does not pay for the same dead rungs on every pass, short enough that
+ * a block lifted overnight is found by the morning. Order only -- the
+ * rung is still dialled, after the others. */
+export const FAILED_LAST_MS = 6 * 60 * 60 * 1000;
+
+/** Whether this combination has only failed on this network lately: tried
+ * in the last `FAILED_LAST_MS`, every time it came up and carried
+ * nothing or did not connect (`recordDead`), and not seen carrying
+ * traffic here in the last day (`workedLately`).
+ *
+ * Every time, not the last time, and only `dead` attempts count -- a rung
+ * that was slow carried data, and a landing that could not be confirmed
+ * is not known to have failed.
+ *
+ * And never a rung that worked here within the day, however it has
+ * failed since: that is left to `scoreFor`, which weighs the two, as it
+ * was before this existed. One failure used to be enough once the last
+ * success was six hours old, so the customer's usual rung, landed in the
+ * morning, went behind every other rung for six hours on one press of
+ * Connect during a short outage -- and on a network where most servers
+ * carry nothing, that is most of the ladder at 25-30 s a rung. What this
+ * is for is the rung that has not worked here at all lately. The cost: a
+ * server cut off today keeps the place it had for up to a day after it
+ * last worked, as it did before.
+ *
+ * Still one failure for a rung whose last success here is over a day
+ * old: evidence that old describes a network that may no longer exist
+ * (`HALF_LIFE_MS`). */
+export function failedLately(
+  history: ConnectHistory,
+  network: string | null,
+  routeId: string,
+  protocol: Protocol,
+  now: number = Date.now(),
+): boolean {
+  const attempts = history[keyFor(network, routeId, protocol)] ?? [];
+  const recent = attempts.filter((attempt) => now - attempt.at <= FAILED_LAST_MS);
+  if (recent.length === 0 || !recent.every((attempt) => attempt.dead === true)) return false;
+  return !workedLately(history, network, routeId, protocol, now);
 }
 
 /** Forgets everything recorded against one network.

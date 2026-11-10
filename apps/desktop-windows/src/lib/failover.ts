@@ -1,4 +1,4 @@
-import { scoreFor, speedFor, type ConnectHistory } from "./connect-history";
+import { failedLately, scoreFor, speedFor, type ConnectHistory } from "./connect-history";
 import { reachabilityKey, reachabilityOf, type ReachabilityMap } from "./reachability";
 import type { IspTag, Protocol, ProtocolUser } from "./types";
 
@@ -208,14 +208,41 @@ export function orderCandidates(
   const lastGoodLeads = Boolean(lastGoodRouteId) && !refused(lastGoodRouteId as string) && !outpaced;
   const pinnedCountry = new Set(pinnedRouteId ? (pinnedCountryRouteIds ?? []) : []);
 
-  const priority = (u: ProtocolUser): number => {
-    if (resumeRouteId && u.routeId === resumeRouteId) return -5;
-    if (pinnedRouteId && u.routeId === pinnedRouteId) return -4;
-    if (pinnedCountry.has(u.routeId)) return -3;
+  // In two steps, with `failedHere` between them: where a dropped tunnel
+  // was and what the customer chose lead whatever is remembered of them;
+  // what the app itself would lead with does not lead with a rung that
+  // has only failed here lately.
+  const chosen = (u: ProtocolUser): number => {
+    if (resumeRouteId && u.routeId === resumeRouteId) return -3;
+    if (pinnedRouteId && u.routeId === pinnedRouteId) return -2;
+    if (pinnedCountry.has(u.routeId)) return -1;
+    return 0;
+  };
+  const remembered = (u: ProtocolUser): number => {
+    if (chosen(u) !== 0) return 0;
     if (lastGoodLeads && u.routeId === lastGoodRouteId) return -2;
     if (preferredRouteId && u.routeId === preferredRouteId) return -1;
     return 0;
   };
+
+  // A rung that has only failed on this network in the last few hours --
+  // came up and carried nothing, or did not connect -- after everything
+  // else (`failedLately`). Order only: blocks change, so it is still
+  // dialled, last. Never one that carried traffic here within the day: a
+  // failure or two since does not send the customer's usual rung behind
+  // the whole ladder, and it leads or not as it did before this.
+  //
+  // `byEvidence` below already put a failing rung after an untried one,
+  // but only among rungs the probe and the last-good route had not
+  // already told apart. The rungs that cost the most are the ones that
+  // come up and carry nothing, and their port answers the probe: on a
+  // home network in November 2026 where two servers of seven carried
+  // data, a pass walked the other five's rungs at 25-30 s each, every
+  // time. Behind the customer's own choice, as everything remembered is:
+  // within the chosen location its failed rungs go after its others, and
+  // the location still leads.
+  const failedHere = (u: ProtocolUser): number =>
+    history && failedLately(history, network ?? null, u.routeId, u.protocol, now) ? 1 : 0;
 
   // A WebSocket-carried credential sorts after its TCP sibling: the
   // extra framing costs a little speed, and its advantage -- surviving a
@@ -320,7 +347,9 @@ export function orderCandidates(
   return [...users].sort(
     (a, b) =>
       standing(a) - standing(b) ||
-      priority(a) - priority(b) ||
+      chosen(a) - chosen(b) ||
+      failedHere(a) - failedHere(b) ||
+      remembered(a) - remembered(b) ||
       liveness(a) - liveness(b) ||
       byEvidence(a, b) ||
       bySpeed(a, b) ||
