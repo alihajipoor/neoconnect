@@ -8141,3 +8141,71 @@ would not trigger while those two names answer.
 
 **Not done:** the Play upload of 0.2.37 (the owner drags the bundle in);
 the Mac re-sign of the endpoint lists, which still name dead servers.
+
+## 2026-11-10 (evening) — desktop 0.9.61 and mobile 0.2.38: Automatic orders by what connects on the customer's network
+
+**Why:** the owner asked why only a couple of servers work on each ISP,
+and for Automatic to start from what connects there. Seven days of
+connect reports gave the answer: which server works is decided per ISP
+by the server's address. Every server runs the same setup and the
+pattern holds on the protocols that use no name of ours; on a server
+that is held for an ISP every protocol comes up and carries nothing.
+Two servers at one provider carry on most of the filtered ISPs; one ISP
+shows the opposite pattern. The fixed protocol order was wrong there too
+(its first entry landed once in fourteen dials on working servers), and
+the per-route tag for "works on your ISP" needs five customers per route
+per ISP in 48 h, which at this customer count almost never happens.
+
+**Live:** backend from main `fdef0977` (dump
+`pre-connect-order-hints-20261110T202223Z`, every node back within
+seconds, the Iranian relay included), then desktop 0.9.61 and Android
+0.2.38 from main `0bfa34f8` (Release Desktop run 42901644397, Release
+Android run 42901643887; CI passed). No iOS build.
+
+**What changed:**
+- The route list carries `ispHint` per route for the caller's network:
+  whether the route's server works or fails for other customers there,
+  and whether its protocol lands or fails on servers that work there.
+  Evidence is the latest dial per customer per route over 7 days, from
+  at least 3 distinct customers; the caller's ISP first, then its
+  country, where a country verdict needs customers on 3 distinct
+  networks. "Works" is said only where something is shown to fail, so
+  an open network's order is as before.
+- The ladder orders rungs this device has no evidence for by those
+  hints, and uses the network's protocol tiers ahead of the fixed order.
+  This device's own evidence and the customer's pick still lead.
+- The data check's upload leg gets up to 12 s when the network's typical
+  passing upload (middle of the last five) is under about 437 kbps;
+  otherwise 8 s as before. The bounded search uses a monotonic clock.
+- A review found two defects before the merge, both fixed: "works"
+  herding new devices on open networks, and one ISP's customers making a
+  country-wide verdict.
+
+**Checked before release:**
+- A replay of the 7 days of production dials through the new module:
+  most filtered ISPs get the two working servers first and the held ones
+  last; the ISP with the opposite pattern gets its own working server
+  first; one large ISP gets no "works" because its evidence is mixed;
+  open networks get nothing but one failing server on one network.
+- VM (`C:\Users\aliha\Claude\vm\results\auto2`): ordinary connects land
+  on the first rung with the exit IP matching; under a 210 kbit/s
+  throttle a 10.7 s upload passed with an 11.6 s leg and landed as a
+  normal connection; at 120 kbit/s it still read slow and the bounded
+  search ran; a reconnect after an engine kill landed.
+
+**Unverified:** the hint-driven order on a real filtered network (the
+VM's network is open, so its list carried no server verdicts); a phone;
+the 12 s cap's margin against a held server (about a tenth).
+
+**Seen on the VM, open:** a rung kept as "slow" on a heavily throttled
+line was dropped about 30 s later as not carrying traffic and the app
+reconnected, twice in two rounds. After a throttled stretch the app's
+reports lost their per-rung routes (no network attestation: the
+baseline was being answered by a mirror), which starves this evidence;
+the existing task for reports losing their servers covers it.
+
+**Decided by the owner today:** no extra door servers. The two Iranian
+boxes are the doors and each must work alone (checked: each answered by
+itself from inside). Every VPN server should double as a door by
+address, with the details riding in the server list so they follow
+server changes; that work is on `claude/server-doors`, not merged.
