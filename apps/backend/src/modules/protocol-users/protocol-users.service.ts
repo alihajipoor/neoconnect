@@ -15,6 +15,7 @@ import { liveOnceActiveWhere } from "./live-credentials";
 import { sharedWireGuardReserve, wireGuardPoolSize } from "./wireguard-subnet";
 import { DeviceSlotsService } from "../device-slots/device-slots.service";
 import { RelayAuthService } from "../relay-auth/relay-auth.service";
+import { doorOf, type DoorColumns } from "../node-doors/door";
 
 /** How many signed-in devices of one customer may hold credentials of
  * their own at once. See `enforceDeviceLimit`.
@@ -1354,7 +1355,7 @@ const CLIENT_VISIBLE_PUBLIC_PARAMS: Record<string, readonly string[]> = {
 };
 
 function connectionInfo(
-  node: { publicIp: string },
+  node: DoorColumns,
   protocolConfig: {
     protocol: string;
     listenPort: number;
@@ -1371,6 +1372,7 @@ function connectionInfo(
       publicParams[key] = source[key];
     }
   }
+  const door = doorOf(node);
 
   return {
     host: node.publicIp,
@@ -1385,5 +1387,14 @@ function connectionInfo(
     transport: protocolConfig.transport ?? "TCP",
     security: protocolConfig.security ?? "NONE",
     publicParams,
+    // This server as a door to the panel API: its address, a port, the
+    // pins of the key it presents there and the name to send (see
+    // node-doors/door.ts). Here because this is the list an app must
+    // hold to connect at all and keeps on the device, so the doors it
+    // knows are the servers it knows, and a replaced server brings its
+    // own. Left out -- not null -- for a server with no door verified
+    // lately, so the answer is then exactly what it was before doors.
+    // An app from before them ignores the field.
+    ...(door ? { door } : {}),
   };
 }

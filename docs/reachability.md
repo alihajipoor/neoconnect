@@ -202,3 +202,46 @@ check against a real held server -- nothing outside Iran is held.
 Not built: a scan of several tunnels at once on a new network, to pick
 the fastest before connecting. It needs new work in the Windows service
 (a test path per concurrent exit) and in the phone engines.
+
+## Server doors (2026-11-10, the backend half)
+
+The owner's decision: every VPN server is also a door to the panel API,
+by address, and nothing about it is set by hand, because servers are
+replaced often. The mirrors above are reached by name, and names are
+what gets poisoned; the servers' addresses mostly stay reachable.
+
+- **A door** is a server's address, a port where it already serves the
+  API mirror, the SPKI pin of the key its certificate carries there (and
+  the one before it, for a week after a change), and the server name to
+  send in the hello, or none. No shared certificate and no new port: a
+  key common to the fleet would let a scanner list it.
+- **The backend learns it by asking the node** (`modules/node-doors`),
+  every 15 minutes and about 45 seconds after a node comes online. It
+  connects to the node's address under a neutral server name, on the
+  port the door was last seen on, then the node's own TLS inbounds, then
+  `NODE_DOOR_PORTS`. A port is a door only if its certificate chains to
+  a public CA, is within its dates and names a host of ours -- a name the
+  database records for that node (its mirror host, its TLS inbounds'
+  server names, its IKEv2 name) or any host under `NODE_DOOR_DOMAINS` --
+  and the API's health check answers through it. No agent, installer or
+  node change. A check that fails writes nothing.
+- **The apps get it with the server list they already keep**:
+  `GET /customer/protocol-users`, as `connection.door =
+  { host, port, pins, sni }` on each credential. Left out for a server
+  whose door has not passed a check in the last hour, so an old app, and
+  a new app against an old backend, see what they always saw.
+- **Switches** (`infra/.env`, all optional): `NODE_DOORS=off` stops the
+  checks and takes doors out of every answer; `NODE_DOOR_PORTS`,
+  `NODE_DOOR_SNI`, `NODE_DOOR_DOMAINS`.
+- **A renewal changes the pin.** certbot makes a new key each time, so a
+  server's pin changes every couple of months. The backend sees it at
+  the next check; an app holding the older list cannot open that
+  server's door until it has fetched the list again, through another
+  door, a name or the relay.
+
+Checked for real, read-only, from an unfiltered network: the check
+passes against live servers by address on both kinds of port (the TLS
+inbound's fallback and nginx's own listener), with a neutral server name
+and with none, and the two ports of one server present different keys.
+Unverified: anything from inside a filtered network, and the whole
+client half, which is not built yet -- no app reads `door` today.

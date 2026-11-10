@@ -1,6 +1,7 @@
 import { InjectQueue } from "@nestjs/bullmq";
 import { Injectable, OnModuleInit } from "@nestjs/common";
 import { Queue } from "bullmq";
+import { DOOR_CYCLE_MS } from "../node-doors/door";
 import { SWEEPS_QUEUE } from "./jobs.constants";
 
 const QUOTA_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -106,5 +107,9 @@ export class SweepsSchedulerService implements OnModuleInit {
       {},
       { repeat: { every: BLOCK_WATCH_INTERVAL_MS }, jobId: "block-watch-sweep" },
     );
+    // Each node's door to the panel API (modules/node-doors). The cadence
+    // is the door's own: what is handed out is measured in these rounds.
+    // Runs whatever NODE_DOORS says, and does nothing when it is off.
+    await this.queue.add("node-doors", {}, { repeat: { every: DOOR_CYCLE_MS }, jobId: "node-doors-sweep" });
   }
 }

@@ -20,6 +20,10 @@ const OPTIONAL_KNOBS = [
   "BLOCK_WATCH",
   "BLOCK_WATCH_TUNING",
   "HEARTBEAT_GAP_PAGE_MINUTES",
+  "NODE_DOORS",
+  "NODE_DOOR_PORTS",
+  "NODE_DOOR_SNI",
+  "NODE_DOOR_DOMAINS",
 ];
 
 const COMPOSE = readFileSync(join(__dirname, "..", "..", "..", "infra", "docker-compose.prod.yml"), "utf8");
