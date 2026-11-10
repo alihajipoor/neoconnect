@@ -22,6 +22,7 @@ const {
   rungSpeeds,
   SAMPLE_MS,
   sampleDownload,
+  searching,
   searchOrder,
   serverKey,
   SLOW_SEARCH_MAX_DIALS,
@@ -282,8 +283,11 @@ describe("the search for something better than a slow rung", () => {
   const SLOW = { state: "slow", downKbps: 2400, upKbps: 0 } as const;
   const de = user("de", "198.51.100.3");
   const others = ["a", "b", "c", "d"].map((id, i) => user(id, `198.51.100.${10 + i}`));
+  /** A pass on a network whose memory has seen `moved` carry traffic
+   * lately -- the customer's usual server, by default. */
+  const pass = (moved: ProtocolUser[] = [de]) => noSlowRungs((u) => serverKey(u, []), moved);
   const begun = () => {
-    const slow = noSlowRungs((u) => serverKey(u, []));
+    const slow = pass();
     noteSlow(slow, de, SLOW, START);
     return slow;
   };
@@ -331,8 +335,64 @@ describe("the search for something better than a slow rung", () => {
     expect(endSearch(slow, START + 5_000)).toBeNull();
   });
 
+  /** The regression this guards: a held server reads slow exactly as a
+   * slow line does -- download done, upload out of time. Stopping early
+   * for it kept the customer on about 0.1 Mbps up while a clean server
+   * sat a few rungs further down, never dialled. */
+  it("is not begun by a slow rung on a server this network has not seen move: the pass walks on, as it did", () => {
+    const [held, alsoHeld, dead, deadToo] = others;
+    // No memory of this network at all.
+    const slow = noSlowRungs((u) => serverKey(u, []));
+    noteSlow(slow, held, { state: "slow", downKbps: 3000, upKbps: 0 }, START);
+    noteDial(slow, alsoHeld);
+    noteSlow(slow, alsoHeld, { state: "slow", downKbps: 2000, upKbps: 0 }, START + 10_000);
+    noteDial(slow, dead);
+    noteDial(slow, deadToo);
+    expect(slow.search).toBeNull();
+    // Nor is what is left of the ladder put in another order for it.
+    expect(searching(slow)).toBe(false);
+    expect(endSearch(slow, START + 10 * SLOW_SEARCH_MAX_MS)).toBeNull();
+    // Its other protocols are still passed over, and at the very end of
+    // the ladder it is still the fallback: both as before.
+    expect(passOverSlow(slow, user("held-ss", "198.51.100.10", "SHADOWSOCKS"))).toBe(true);
+    expect(slowFallback(slow)).toBe(held);
+
+    // The same with a memory that knows another server: a pinned
+    // country's held server is not what moved here.
+    const pinned = pass([de]);
+    noteSlow(pinned, held, { state: "slow", downKbps: 3000, upKbps: 0 }, START);
+    for (const other of [alsoHeld, dead, deadToo]) noteDial(pinned, other);
+    expect(endSearch(pinned, START + 10 * SLOW_SEARCH_MAX_MS)).toBeNull();
+  });
+
+  it("is begun by the first slow rung on a server seen moving, and goes back to that one -- not to a faster-reading one never seen moving", () => {
+    const [held, a, b, c] = others;
+    const slow = pass([de]);
+    // A held server first: nothing begins.
+    noteSlow(slow, held, { state: "slow", downKbps: 5000, upKbps: 0 }, START);
+    noteDial(slow, de);
+    expect(endSearch(slow, START + 50_000)).toBeNull();
+    // The usual server, slow this time: the clock starts here.
+    noteSlow(slow, de, SLOW, START + 50_000);
+    expect(slow.search?.since).toBe(START + 50_000);
+    expect(searching(slow)).toBe(true);
+    for (const other of [a, b, c]) noteDial(slow, other);
+    // The held one read the faster download; it is not what is kept.
+    expect(endSearch(slow, START + 60_000)?.candidate).toBe(de);
+    expect(searching(slow)).toBe(false);
+    expect(keepsSlow(slow, de)).toBe(true);
+    expect(keepsSlow(slow, held)).toBe(false);
+  });
+
+  it("knows a server by any of its rungs: the one that moved here need not be the one that is slow now", () => {
+    const slow = pass([user("de-ss", "198.51.100.3", "SHADOWSOCKS")]);
+    noteSlow(slow, de, SLOW, START);
+    expect(endSearch(slow, START + SLOW_SEARCH_MAX_MS)?.candidate).toBe(de);
+  });
+
   it("is one search for the pass: a second slow rung neither restarts the clock nor the count, and the better of the two is kept", () => {
-    const slow = begun();
+    const slow = pass([de, others[0]]);
+    noteSlow(slow, de, SLOW, START);
     noteDial(slow, others[0]);
     noteSlow(slow, others[0], { state: "slow", downKbps: 900, upKbps: 140 }, START + 15_000);
     noteDial(slow, others[1]);
@@ -344,7 +404,7 @@ describe("the search for something better than a slow rung", () => {
    * at all. That one is not known to work, so the pass does not stop
    * looking for its sake. */
   it("is not begun by a rung that moved nothing either way, which is still the fallback at the end", () => {
-    const nothing = noSlowRungs((u) => serverKey(u, []));
+    const nothing = pass();
     noteSlow(nothing, de, { state: "slow", downKbps: 0, upKbps: 0 }, START);
     for (const other of others) noteDial(nothing, other);
     expect(endSearch(nothing, START + 10 * SLOW_SEARCH_MAX_MS)).toBeNull();
@@ -352,7 +412,7 @@ describe("the search for something better than a slow rung", () => {
 
     // One that moves data, later in the pass, begins the search then --
     // and is what the pass goes back to.
-    const later = noSlowRungs((u) => serverKey(u, []));
+    const later = pass([de, others[0]]);
     noteSlow(later, de, { state: "slow", downKbps: 0, upKbps: 0 }, START);
     noteSlow(later, others[0], SLOW, START + 100_000);
     expect(endSearch(later, START + 100_000 + SLOW_SEARCH_MAX_MS - 1)).toBeNull();

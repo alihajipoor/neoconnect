@@ -228,7 +228,9 @@ export function orderCandidates(
   // A rung that has only failed on this network in the last few hours --
   // came up and carried nothing, or did not connect -- after everything
   // else (`failedLately`). Order only: blocks change, so it is still
-  // dialled, last.
+  // dialled, last. Never one that carried traffic here within the day: a
+  // failure or two since does not send the customer's usual rung behind
+  // the whole ladder, and it leads or not as it did before this.
   //
   // `byEvidence` below already put a failing rung after an untried one,
   // but only among rungs the probe and the last-good route had not

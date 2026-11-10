@@ -479,6 +479,24 @@ describe("rungs that have only failed on this network lately", () => {
     ]);
   });
 
+  /** The customer's usual rung landed this morning and he stayed
+   * connected all day. One press during a short outage marked it, and it
+   * went behind every other rung for six hours -- on a network where most
+   * of those carry nothing. */
+  it("are not the rung that carried traffic here earlier today, for failing once since", () => {
+    const users = [user("de", "XRAY_VLESS_REALITY"), user("fr", "XRAY_VLESS_REALITY"), user("fi", "WIREGUARD")];
+    let history = recordAttempt({}, NET, "de", "XRAY_VLESS_REALITY", true, NOW - mins(7 * 60));
+    history = recordDead(history, NET, "de", "XRAY_VLESS_REALITY", NOW - mins(1));
+    expect(order(users, { history, lastGoodRouteId: "de" })[0]).toBe("de/XRAY_VLESS_REALITY");
+    // The rungs he waited through after it, never seen working here, do go last.
+    history = recordDead(history, NET, "fi", "WIREGUARD", NOW - mins(1));
+    expect(order(users, { history, lastGoodRouteId: "de" })).toEqual([
+      "de/XRAY_VLESS_REALITY",
+      "fr/XRAY_VLESS_REALITY",
+      "fi/WIREGUARD",
+    ]);
+  });
+
   it("stay behind the customer's own choice: the chosen location leads, its failed rungs after its others", () => {
     const users = [
       user("de", "XRAY_VLESS_TLS"),

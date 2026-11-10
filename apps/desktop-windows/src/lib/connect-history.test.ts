@@ -6,9 +6,11 @@ import {
   failedLately,
   forgetNetwork,
   latestAttempt,
+  movedLately,
   recordAttempt,
   recordDead,
   recordSpeed,
+  rungShownDead,
   scoreFor,
   workedLately,
   type ConnectHistory,
@@ -177,8 +179,32 @@ describe("a rung that has only failed here lately", () => {
     let h = recordAttempt({}, NET, "de-1", "XRAY_VLESS_TLS", true, NOW - hours(2));
     h = recordDead(h, NET, "de-1", "XRAY_VLESS_TLS", NOW - hours(1));
     expect(failed(h)).toBe(false);
-    // The success out of the window, the failure in it.
-    expect(failed(h, NOW + hours(4) + 1)).toBe(true);
+  });
+
+  /** One failure used to be enough once the last success was six hours
+   * old: the customer's usual rung, landed in the morning, went behind
+   * every other rung for six hours on one press during a short outage --
+   * most of them on servers that carry nothing for him. */
+  it("is not one that carried traffic here in the last day, however it has failed since", () => {
+    let h = recordAttempt({}, NET, "de-1", "XRAY_VLESS_TLS", true, NOW - hours(7));
+    h = recordDead(h, NET, "de-1", "XRAY_VLESS_TLS", NOW - 60_000);
+    expect(failed(h)).toBe(false);
+    // Nor on a second press, and a third, while the outage lasts.
+    h = recordDead(h, NET, "de-1", "XRAY_VLESS_TLS", NOW - 30_000);
+    h = recordDead(h, NET, "de-1", "XRAY_VLESS_TLS", NOW);
+    expect(failed(h)).toBe(false);
+    // Still failing once that success is a day old: then it is.
+    expect(failed(h, NOW + hours(5))).toBe(false);
+    h = recordDead(h, NET, "de-1", "XRAY_VLESS_TLS", NOW + hours(16));
+    expect(failed(h, NOW + hours(17))).toBe(false);
+    expect(failed(h, NOW + hours(17) + 1)).toBe(true);
+  });
+
+  it("is one failure, for a rung not seen carrying traffic here in a day", () => {
+    // The server that has been cut off on this network since last week.
+    let h = recordAttempt({}, NET, "de-1", "XRAY_VLESS_TLS", true, NOW - hours(30));
+    h = recordDead(h, NET, "de-1", "XRAY_VLESS_TLS", NOW - hours(1));
+    expect(failed(h)).toBe(true);
   });
 
   it("is not one that was only slow, nor a landing nothing could confirm", () => {
@@ -216,5 +242,78 @@ describe("a rung that carried traffic here lately", () => {
     expect(workedLately(h, "home", "de-1", "SHADOWSOCKS", NOW + hours(5))).toBe(false);
     expect(workedLately(h, "office", "de-1", "SHADOWSOCKS", NOW)).toBe(false);
     expect(workedLately(recordDead({}, "home", "de-1", "SHADOWSOCKS", NOW), "home", "de-1", "SHADOWSOCKS", NOW)).toBe(false);
+  });
+});
+
+/** The one question `workedLately` is too loose for: whether a rung that
+ * reads slow now is a server that works here, or one whose upload is
+ * held. A held server never passes the data check. */
+describe("a rung that passed the data check here lately", () => {
+  const moved = (h: ConnectHistory, now = NOW) => movedLately(h, "home", "de-1", "SHADOWSOCKS", now);
+
+  it("is a verified attempt in the last day with a speed measured both ways", () => {
+    let h = recordAttempt({}, "home", "de-1", "SHADOWSOCKS", true, NOW - hours(20));
+    h = recordSpeed(h, "home", "de-1", "SHADOWSOCKS", 310);
+    // Slow since, as the customer's usual server on a slow line is about
+    // half the time: still the server that works here.
+    h = recordAttempt(h, "home", "de-1", "SHADOWSOCKS", false, NOW - hours(1));
+    h = recordSpeed(h, "home", "de-1", "SHADOWSOCKS", 0);
+    expect(moved(h)).toBe(true);
+    expect(moved(h, NOW + hours(5))).toBe(false);
+    expect(movedLately(h, "office", "de-1", "SHADOWSOCKS", NOW)).toBe(false);
+  });
+
+  it("is not a held server, however it landed", () => {
+    // Kept as the slow fallback: a failure, at its upload's 0 kbps.
+    let fallback = recordAttempt({}, "home", "de-1", "SHADOWSOCKS", false, NOW - hours(1));
+    fallback = recordSpeed(fallback, "home", "de-1", "SHADOWSOCKS", 0);
+    expect(moved(fallback)).toBe(false);
+    // Landed as verified where the check could not be run at all: it
+    // worked, by the looser question, and nothing vouches for its upload.
+    const unmeasured = recordAttempt({}, "home", "de-1", "SHADOWSOCKS", true, NOW - hours(1));
+    expect(workedLately(unmeasured, "home", "de-1", "SHADOWSOCKS", NOW)).toBe(true);
+    expect(moved(unmeasured)).toBe(false);
+    // Nor one that only came up and carried nothing.
+    expect(moved(recordDead({}, "home", "de-1", "SHADOWSOCKS", NOW))).toBe(false);
+  });
+});
+
+/** What the memory above is written from. A mark sends a rung behind
+ * every other for hours, so it is made only on a measurement, and never
+ * on what a pass found after it had been told to stop. */
+describe("a rung shown to be dead", () => {
+  it("is one that came up and was measured carrying nothing", () => {
+    expect(rungShownDead({ up: true, egress: "unreachable" }, false)).toBe(true);
+    expect(rungShownDead({ up: true, egress: "bypassingTunnel" }, false)).toBe(true);
+    // It carried: landed, or only slow.
+    expect(rungShownDead({ up: true, egress: "throughTunnel" }, false)).toBe(false);
+  });
+
+  /** Our own API silent under a tunnel that plainly carries traffic -- a
+   * backend being redeployed -- reads `indeterminate`, and a rung that is
+   * not the last is moved on from for it. Nothing measured it dead. */
+  it("is not one nothing could be compared for", () => {
+    expect(rungShownDead({ up: true, egress: "indeterminate" }, false)).toBe(false);
+  });
+
+  /** Custom mode on Windows: the split-tunnel probe failing is not the
+   * protocol failing, and there is no address check to say otherwise. */
+  it("is not one that had no address check at all", () => {
+    expect(rungShownDead({ up: true, egress: null }, false)).toBe(false);
+  });
+
+  it("is one that did not connect, where that is counted against the route", () => {
+    expect(rungShownDead({ up: false, dial: { routeId: "de-1", carried: false } }, false)).toBe(true);
+    // The account's doing, or the device's: no dial, no mark.
+    expect(rungShownDead({ up: false, dial: null }, false)).toBe(false);
+  });
+
+  /** Stop, or another location chosen, while a rung is being checked:
+   * the stop takes the tunnel down at once, and the check then reads the
+   * bare network. That is the stop's doing, not the server's. */
+  it("is never one judged after the pass was told to stop", () => {
+    expect(rungShownDead({ up: true, egress: "unreachable" }, true)).toBe(false);
+    expect(rungShownDead({ up: true, egress: "bypassingTunnel" }, true)).toBe(false);
+    expect(rungShownDead({ up: false, dial: { routeId: "de-1", carried: false } }, true)).toBe(false);
   });
 });

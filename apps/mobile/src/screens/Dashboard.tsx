@@ -7,7 +7,15 @@ import {
   lastGoodFor,
   rememberLastGood,
 } from "@shared/lib/failover";
-import { recordAttempt, recordDead, recordSpeed, workedLately, type ConnectHistory } from "@shared/lib/connect-history";
+import {
+  movedLately,
+  recordAttempt,
+  recordDead,
+  recordSpeed,
+  rungShownDead,
+  workedLately,
+  type ConnectHistory,
+} from "@shared/lib/connect-history";
 import {
   loadConnectHistory,
   loadLastGood,
@@ -145,6 +153,7 @@ import {
   passOverSlow,
   rungSpeeds,
   sampleDownload,
+  searching,
   searchOrder,
   serverKey,
   slowFallback,
@@ -2560,7 +2569,14 @@ export function Dashboard({
     // servers are passed over for the rest of the pass, and the best of them
     // is dialled once more, and kept, if nothing lands -- a slow tunnel
     // beats none, and the screen says it is slow. The Windows ladder's rule.
-    const slow = noSlowRungs((candidate) => serverKey(candidate, routes));
+    // With what this network's memory has seen pass that check lately: only
+    // for a slow rung on one of those servers does the pass stop looking
+    // early (`endSearch`). A held server reads slow too, and has never
+    // passed the check here.
+    const slow = noSlowRungs(
+      (candidate) => serverKey(candidate, routes),
+      candidates.filter((candidate) => movedLately(history, networkId, candidate.routeId, candidate.protocol)),
+    );
     const queueSlowFallback = (): boolean => {
       if (pass.stopped()) return false;
       const fallback = slowFallback(slow);
@@ -2570,10 +2586,12 @@ export function Dashboard({
     };
     const willDial = (c: ProtocolUser) =>
       !(c.protocol === "IKEV2" && (allowedApps.length > 0 || options.skipIkev2 === true)) && !passOverSlow(slow, c);
-    // Once a rung has measured slow the pass looks only a little further
-    // (`endSearch`), so what is left is searched in the order likeliest to
-    // move: what this network has seen carry traffic lately first. The
-    // location the customer chose keeps its lead. The Windows ladder's rule.
+    // Once a rung has measured slow on a server this network has seen move,
+    // the pass looks only a little further (`endSearch`), so what is left
+    // is searched in the order likeliest to move: what this network has
+    // seen carry traffic lately first. The location the customer chose
+    // keeps its lead. Only then (`searching`): a pass that walks on with no
+    // such search keeps the order it had. The Windows ladder's rule.
     const chosenPlace = new Set(chosenRouteId ? [chosenRouteId, ...sameCountryRouteIds(routes, chosenRouteId)] : []);
     const searchFrom = (from: number) => {
       const rest = searchOrder(
@@ -2865,7 +2883,7 @@ export function Dashboard({
               noteSlow(slow, candidate, moved);
               tooSlow = moved;
               outcome = "notCarrying";
-              searchFrom(index + 1);
+              if (searching(slow)) searchFrom(index + 1);
             }
           }
         }
@@ -2996,8 +3014,10 @@ export function Dashboard({
         const dial = failedDial(candidate.routeId, classified.kind);
         dials.push(dial);
         // Only a network failure teaches the per-network memory anything;
-        // an exhausted quota on this route is not evidence about it.
-        if (dial) rememberDead(candidate.routeId, candidate.protocol);
+        // an exhausted quota on this route is not evidence about it. Nor a
+        // dial that failed once the pass had been told to stop, which is
+        // the stop's doing (`rungShownDead`).
+        if (rungShownDead({ up: false, dial }, pass.stopped())) rememberDead(candidate.routeId, candidate.protocol);
         lastError = {
           ...classified,
           detail: `tried ${attempts.length} of ${candidates.length} available\n${attempts.join("\n")}`,

@@ -61,7 +61,19 @@ for (const [name, pass, dial] of [
       expect(pass).toMatch(/searchOrder\(\s*candidates\.slice\(from\),\s*\(later\) => workedLately\(\w+, networkId, later\.routeId, later\.protocol\),\s*\(later\) => chosenPlace\.has\(later\.routeId\),\s*\)/);
       const noted = loop.indexOf("noteSlow(slow, candidate, moved);");
       expect(noted).toBeGreaterThan(0);
-      expect(loop.slice(noted, noted + 400)).toContain("searchFrom(index + 1);");
+      // Only while the short search is on: a pass that walks on from a
+      // slow rung with no search keeps the order it had.
+      expect(loop.slice(noted, noted + 400)).toContain("if (searching(slow)) searchFrom(index + 1);");
+      expect(loop.split("searchFrom(index + 1);").length - 1).toBe(1);
+    });
+
+    it("stops looking early only for a server this network's memory has seen pass the check", () => {
+      // Without it every slow rung began the search, a held server's too.
+      // `movedLately`, not `workedLately`: a landing whose check could not
+      // be run does not vouch for a server.
+      expect(pass).toMatch(
+        /const slow = noSlowRungs\(\s*\(candidate\) => serverKey\(candidate, routes\),\s*candidates\.filter\(\(candidate\) => movedLately\(history, networkId, candidate\.routeId, candidate\.protocol\)\),\s*\);/,
+      );
     });
   });
 }
@@ -69,16 +81,26 @@ for (const [name, pass, dial] of [
 describe("the Windows ladder's memory of rungs that failed", () => {
   const loop = windowsPass.slice(windowsPass.indexOf(LOOP));
 
-  it("remembers a rung that came up and carried nothing, and not one that was only slow", () => {
+  it("remembers a rung that came up only where the address check measured it carrying nothing, and the pass had not been stopped", () => {
+    // What the check came to, kept for the mark: null in Custom mode,
+    // where there is none, and the last reading where it ran twice.
+    expect(loop).toContain("let checked: EgressVerdict[\"state\"] | null = null;");
+    const judged = loop.indexOf("reason = checkedAgain ?");
+    expect(judged).toBeGreaterThan(0);
+    expect(loop.slice(judged, judged + 200)).toContain("checked = egress.state;");
+    expect(loop.split("checked = ").length - 1).toBe(1);
     expect(loop).toContain(
-      "if (!tooSlow) passHistory = recordDead(passHistory, networkId, candidate.routeId, candidate.protocol);",
+      "if (rungShownDead({ up: true, egress: checked }, stopped())) {\n            passHistory = recordDead(passHistory, networkId, candidate.routeId, candidate.protocol);",
     );
+    // Nothing else marks one that came up: not every rung moved on from.
+    expect(loop).not.toContain("if (!tooSlow) passHistory = recordDead(");
   });
 
-  it("remembers a rung that did not connect only where the report counts it against the route", () => {
+  it("remembers a rung that did not connect only where the report counts it against the route, and the pass had not been stopped", () => {
     expect(loop).toContain(
-      "if (failedDial(candidate.routeId, classified.kind) !== null) {\n            passHistory = recordDead(passHistory, networkId, candidate.routeId, candidate.protocol);",
+      "if (rungShownDead({ up: false, dial: failedDial(candidate.routeId, classified.kind) }, stopped())) {\n            passHistory = recordDead(passHistory, networkId, candidate.routeId, candidate.protocol);",
     );
+    expect(loop.split("passHistory = recordDead(").length - 1).toBe(2);
   });
 
   it("takes a rung back out of the memory wherever it takes it back out of the report", () => {
@@ -110,8 +132,15 @@ describe("the phone ladder's memory of rungs that failed", () => {
     expect(phonePass).toContain(
       "attempts.push(`${label}: up but not carrying traffic`);\n          dials.push({ routeId: candidate.routeId, carried: false });\n          rememberDead(candidate.routeId, candidate.protocol);",
     );
-    expect(phonePass).toContain("if (dial) rememberDead(candidate.routeId, candidate.protocol);");
+    // A dial that failed as the pass was being stopped is the stop's doing.
+    expect(phonePass).toContain(
+      "if (rungShownDead({ up: false, dial }, pass.stopped())) rememberDead(candidate.routeId, candidate.protocol);",
+    );
     expect(phonePass.split("rememberDead(candidate.routeId, candidate.protocol);").length - 1).toBe(2);
+    // One that came up is marked only on a measured negative, and a stop
+    // during its check has ended the pass before that.
+    const judged = phonePass.indexOf("} else if (rejectionIsEvidence(verdict)) {");
+    expect(judged).toBeGreaterThan(phonePass.indexOf("if (verdict === null || pass.stopped()) {"));
     expect(phonePass).toContain("remember(candidate.routeId, candidate.protocol, false, rememberedKbps(tooSlow));");
     expect(phonePass).toContain("remember(candidate.routeId, candidate.protocol, proven && !keptSlow, rememberedKbps(measured));");
     expect(phonePass).toContain("historyNow = recordDead(historyNow, networkId, routeId, protocol);");
