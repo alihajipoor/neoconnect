@@ -4,6 +4,7 @@ import { connectStarting, pathChangingIn, probeAddendum } from "./control-plane-
 import { newTrace, renderTrace } from "./endpoint-trace";
 import { isSnapshotStale, loadSnapshot, SNAPSHOT_TTL_MS, updateSnapshotProtocolUsers } from "./credential-cache";
 import { getProtocolUsers } from "./customer";
+import { namesBlockedHere } from "./names-check";
 import type { ResumeTrigger } from "./resume";
 import { sessionGeneration } from "./session-end";
 import type { ProtocolUser } from "./types";
@@ -476,6 +477,11 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
     apiEndpoint: tried === "" ? "none dialled" : tried,
     reason:
       `${TRIGGER_LABEL[trigger]} config refresh failed (${detail}) after ${elapsedMs}ms; ${consequence}` +
+      // What the last look at how the API's names resolve on this network
+      // found, when it found no public address for any of them
+      // (names-check.ts). About the names only: it does not say an
+      // address was dialled, nor that one could not be reached.
+      (namesBlockedHere() ? "; the API's names did not resolve to a public address here when last looked at" : "") +
       (appState ? `; app showed ${appState}` : "") +
       // The refresh's own window. The probe after it says the same for
       // itself, in its addendum.

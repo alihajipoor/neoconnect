@@ -210,6 +210,28 @@ seconds: the phone tells the endpoint order nothing about its tunnel, and
 on either platform one can come up with no pass in the app (a
 quick-settings tile, always-on VPN, a tunnel kept across a restart).
 
+**Names that do not resolve (2026-11-10).** A read the relay may carry no
+longer waits out every name's connection deadline where none of them
+resolves to a public address. Still unanswered half a second in, and with
+every condition above holding (`relayOpenFor` in last-resort.ts), the app
+asks the system resolver about the names it is racing
+(`names_resolve_public` in names_check.rs: public, not public or no
+answer per name, a second and a half at most, and no address returned).
+If every name is "not public" or "no answer", and at least one is "not
+public", the race is stopped and the relay is asked then. If any name is
+public nothing changes, and the trigger is R1.2's as before. Nor if the
+resolver has only not answered: that is what slow names and a link still
+coming up look like, and the names work there. The existing look for the
+10.10.34.x block page already ends a race whose every name is on it;
+this adds the other answers a network gives in a name's place, and a mix
+of those with silence. The relay is still never asked beside the
+race, and when it has no answer the ordinary routes are asked again in
+full. Reads only: a write keeps R1.2. The backend's answer starts relay
+mode as usual, which is what keeps later requests from looking again;
+`namesBlockedHere()` in names-check.ts holds the verdict per network for
+fifteen minutes. Shown against fakes only: no network that answers this
+way has been exercised.
+
 **Screens (en, fa).** Consent prompt at each app's root; a neutral "App
 data: backup route" chip above every screen while relay mode lasts, its
 detail "blocked on this network" unless `/relay/status` says an intranet

@@ -15,13 +15,16 @@ import {
 } from "./endpoint-demotion";
 import { beginAttempt, failureOutcome, newTrace, settleAttempt, type EndpointTrace, type TraceEntry } from "./endpoint-trace";
 import {
+  normalRouteAnswers,
   noteNormalRouteAnswered,
+  relayOpenFor,
   relayRequest,
   skipNormalRoutes,
   type RelayAnswer,
   type RelayOutcome,
   type RelayUse,
 } from "./last-resort";
+import { namesAnsweredHere, namesCheckAfterMs, namesFailHere } from "./names-check";
 import { clearTokens, getTokens, setTokens } from "./session";
 import { announceSessionRevoked } from "./session-revoked";
 import type { TokenPair } from "./types";
@@ -1331,8 +1334,9 @@ export async function publicRequest<T>(
   // sign-in's attempt, whose relay leg is auth.ts's own.
   if (relay === undefined || via !== undefined) return await publicDirect<T>(path, plain, trace, via);
   return await withLastResort<T>(
+    askedOf(path, plain),
     trace ?? newTrace(),
-    (traced) => publicDirect<T>(path, plain, traced),
+    (traced, stop) => publicDirect<T>(path, stoppable(plain, stop), traced),
     (normal) => viaRelay<T>(path, plain, relay, normal),
   );
 }
@@ -1379,7 +1383,9 @@ async function publicDirect<T>(
 /** Whether `failure` is the kind only blocking explains, so the relay of
  * last resort may be asked (R1.2): nothing answered anywhere, and every
  * address asked failed in transport -- a timeout, a connection that
- * failed, or a name on Iran's block page. Never after any answer at all,
+ * failed, or a name on Iran's block page -- or was stopped unanswered
+ * because none of the names resolved to a public address here (`names`,
+ * see `ordinaryUnlessNamesFail`). Never after any answer at all,
  * however unhelpful (an HTTP status, a page, the backend answering a
  * challenge moments before), and never after this machine or the scope
  * refused a request (`local`, `scope`): those are not the network's,
@@ -1389,7 +1395,14 @@ export function everyRouteFailed(failure: RequestFailure, trace: EndpointTrace):
   if (failure.blockPage) return true;
   let failed = 0;
   for (const entry of trace.entries) {
-    if (entry.outcome === "timeout" || entry.outcome === "net" || entry.outcome === "blockpage") failed += 1;
+    if (
+      entry.outcome === "timeout" ||
+      entry.outcome === "net" ||
+      entry.outcome === "blockpage" ||
+      entry.outcome === "names"
+    ) {
+      failed += 1;
+    }
     // Still out when the caller's time ran out: no answer, and no verdict.
     else if (entry.outcome !== "pending") return false;
   }
@@ -1408,25 +1421,155 @@ interface RelayLeg<T> {
  * failure's `error` is; the screens word it by its code. */
 export const RELAY_DISCONNECT = "Disconnect to use the backup route.";
 
+/** What a request asks, as the relay's own conditions read it. */
+interface Asked {
+  method: string;
+  path: string;
+}
+
+function askedOf(path: string, init: RequestInit): Asked {
+  return { method: (init.method ?? "GET").toUpperCase(), path };
+}
+
+/** A request over the ordinary routes: its trace, and a signal that gives
+ * it up when `ordinaryUnlessNamesFail` has one to give. */
+type Ordinary<T> = (trace: EndpointTrace, stop?: AbortSignal) => Promise<ApiResult<T>>;
+
+/** `init` with `stop` as one more reason to give the request up, beside
+ * its caller's own signal. Stopped the way a caller's deadline stops a
+ * race -- its signal, which every address's own controller follows
+ * (`staggeredRace`) -- and never by refusing the request inside `fetch`. */
+function stoppable<I extends RequestInit>(init: I, stop: AbortSignal | undefined): I {
+  if (stop === undefined) return init;
+  const outer = init.signal ?? null;
+  if (outer === null) return { ...init, signal: stop };
+  const either = new AbortController();
+  const abort = () => either.abort();
+  if (outer.aborted || stop.aborted) abort();
+  else {
+    outer.addEventListener("abort", abort, { once: true });
+    stop.addEventListener("abort", abort, { once: true });
+  }
+  return { ...init, signal: either.signal };
+}
+
+/** Whether any address in the trace has answered, with any status. */
+function heardFrom(trace: EndpointTrace): boolean {
+  return trace.entries.some((entry) => /^h\d/.test(entry.outcome));
+}
+
+/** A read over the ordinary routes, given up on early when none of their
+ * names resolves to a public address on this network and at least one
+ * resolves to an address that is not public (`namesFailHere` in
+ * names-check.ts). `namesFailed` says it was: the relay is then asked
+ * now, not after the ten seconds and more those names would each have
+ * taken to time out.
+ *
+ * Nothing changes where the names work, which is nearly everywhere. The
+ * race starts as it always has. Only if it is still unanswered
+ * `NAMES_CHECK_AFTER_MS` later is anything looked at, and then, in
+ * order: that the relay would really take this call now -- every one of
+ * its conditions, unchanged (`relayOpenFor`), so never with a tunnel up
+ * or a connect running, never with the backup route switched off, never
+ * for a call it does not carry -- and only then how the names resolve.
+ * One name with a public address, or a resolver that has only not
+ * answered yet, and the race is left to finish as before, the relay
+ * behind `everyRouteFailed` as before. The relay is never asked first on
+ * such a network and never beside the race: the race is stopped before
+ * the relay is asked.
+ *
+ * Stopped only while nothing has answered: not this request (`heardFrom`),
+ * nor any other on an ordinary route since it began
+ * (`normalRouteAnswers`). An answer of any kind is the names working.
+ *
+ * A read only. It may be sent again, which is what happens when the relay
+ * then has no answer (`withLastResort`); a write may not be, and keeps
+ * the path it had.
+ *
+ * The addresses already asked are marked `names` in the trace: stopped
+ * because of how the names resolve here, which is all that is known.
+ * None of them is said to have failed, and none is demoted. */
+async function ordinaryUnlessNamesFail<T>(
+  asked: Asked,
+  trace: EndpointTrace,
+  normal: Ordinary<T>,
+): Promise<{ result: ApiResult<T>; namesFailed: boolean }> {
+  if (asked.method !== "GET") return { result: await normal(trace), namesFailed: false };
+  const stop = new AbortController();
+  const since = normalRouteAnswers();
+  const answered = () => heardFrom(trace) || normalRouteAnswers() !== since;
+  let over = false;
+  let headStart: ReturnType<typeof setTimeout> | undefined;
+  const racing = normal(trace, stop.signal).finally(() => {
+    over = true;
+    clearTimeout(headStart);
+  });
+  const look = (async (): Promise<boolean> => {
+    try {
+      await new Promise<void>((resolve) => {
+        headStart = setTimeout(resolve, namesCheckAfterMs());
+      });
+      if (over || answered()) return false;
+      if (!(await relayOpenFor(asked.method, asked.path))) return false;
+      if (over || answered()) return false;
+      const failing = await namesFailHere(await apiEndpoints());
+      // Answered while the names were looked at, and the tunnel was read
+      // as down a moment ago: they work here, whatever the resolver said.
+      if (failing && answered()) namesAnsweredHere();
+      return failing;
+    } catch {
+      return false;
+    }
+  })();
+  const failing = await Promise.race([racing.then(() => false), look]);
+  if (!failing || over || answered()) return { result: await racing, namesFailed: false };
+  stop.abort();
+  const result = await racing;
+  // An answer that landed as the race was stopped is still the answer.
+  if (result.ok || !result.noResponse || answered()) {
+    if (answered()) namesAnsweredHere();
+    return { result, namesFailed: false };
+  }
+  for (const entry of trace.entries) settleAttempt(entry, "names");
+  return { result, namesFailed: true };
+}
+
+/** The relay, and the ordinary routes in full when it has nothing: not
+ * sent, or sent and unanswered. The relay is not asked twice. */
+async function relayThenOrdinary<T>(
+  trace: EndpointTrace,
+  normal: Ordinary<T>,
+  relayed: (normal: RequestFailure | null) => Promise<RelayLeg<T>>,
+): Promise<ApiResult<T>> {
+  const leg = notForThisNetwork(await relayed(null));
+  if (leg.result) return leg.result;
+  const result = await normal(trace);
+  return leg.dialled && !result.ok ? { ...result, relayTried: true } : result;
+}
+
 /** Runs a request over the ordinary routes, and over the relay when they
  * have all failed as only blocking explains -- or the relay first, while
  * relay mode says they were found blocked minutes ago and they are not
  * due to be asked again (`skipNormalRoutes`). Never both at once: the
- * relay is never raced (R1.1). */
+ * relay is never raced (R1.1).
+ *
+ * A read whose names turn out not to resolve to a public address on this
+ * network does not wait for them to time out
+ * (`ordinaryUnlessNamesFail`): it goes on to the relay then, as relay
+ * mode's requests do, and back to the ordinary routes, in full, if the
+ * relay has nothing. The backend's answer through the relay starts relay
+ * mode as it always has (last-resort.ts), so the requests after it go
+ * there first and nothing looks at the names again until the ordinary
+ * routes are next due. */
 async function withLastResort<T>(
+  asked: Asked,
   trace: EndpointTrace,
-  normal: (trace: EndpointTrace) => Promise<ApiResult<T>>,
+  normal: Ordinary<T>,
   relayed: (normal: RequestFailure | null) => Promise<RelayLeg<T>>,
 ): Promise<ApiResult<T>> {
-  if (skipNormalRoutes()) {
-    const leg = notForThisNetwork(await relayed(null));
-    if (leg.result) return leg.result;
-    // Not sent, or sent and unanswered: the ordinary routes are asked
-    // after all, and the relay is not asked twice.
-    const result = await normal(trace);
-    return leg.dialled && !result.ok ? { ...result, relayTried: true } : result;
-  }
-  const result = await normal(trace);
+  if (skipNormalRoutes()) return await relayThenOrdinary(trace, normal, relayed);
+  const { result, namesFailed } = await ordinaryUnlessNamesFail(asked, trace, normal);
+  if (namesFailed) return await relayThenOrdinary(trace, normal, relayed);
   if (result.ok || !everyRouteFailed(result, trace)) return result;
   const leg = notForThisNetwork(await relayed(result));
   if (leg.result) return leg.result;
@@ -2587,8 +2730,9 @@ export async function apiRequest<T>(path: string, init?: ApiInit, trace?: Endpoi
   const { relay, ...plain } = init ?? {};
   if (relay === undefined) return await apiDirect<T>(path, plain, trace);
   return await withLastResort<T>(
+    askedOf(path, plain),
     trace ?? newTrace(),
-    (traced) => apiDirect<T>(path, plain, traced),
+    (traced, stop) => apiDirect<T>(path, stoppable(plain, stop), traced),
     (normal) => relayAuthenticated<T>(path, plain, relay, normal),
   );
 }

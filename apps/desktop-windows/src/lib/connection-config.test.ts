@@ -295,6 +295,34 @@ describe("refreshConnectionConfig", () => {
     expect(reason).toContain("connecting on cached credentials");
   });
 
+  /** What the last look at how the API's names resolve here found, when
+   * it found no public address for any of them (names-check.ts). Said
+   * about the names, in a report that otherwise only says no answer came
+   * -- and never as an address that could not be reached: none was
+   * dialled to find it out. */
+  it("says when the API's names did not resolve to a public address here", async () => {
+    const names = await import("./names-check");
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockReturnValue(new Promise(() => undefined));
+
+    await refreshConnectionConfig({ held, budgetMs: 30, trigger: "resume" });
+    expect((await firstReport<{ reason: string }>()).reason).not.toContain("names");
+
+    reportAttempt.mockClear();
+    names.resetNamesCheckForTests({ resolve: async (hosts) => hosts.map(() => "not-public") });
+    try {
+      expect(await names.namesFailHere(["https://a.example/api"])).toBe(true);
+      await refreshConnectionConfig({ held, budgetMs: 30, trigger: "resume" });
+      const { reason } = await firstReport<{ reason: string }>();
+      expect(reason).toMatch(/^resume config refresh failed \(no answer within 30ms\) after \d+ms; /);
+      expect(reason).toContain("; the API's names did not resolve to a public address here when last looked at");
+      expect(reason).not.toMatch(/reach/i);
+    } finally {
+      names.resetNamesCheckForTests();
+    }
+  });
+
   /** With a tunnel up the refresh went through it, which is a different
    * failure from one on the bare network. Labelled as what the screen
    * showed, because that is all it is. And how long it waited, which is

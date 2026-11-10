@@ -16,7 +16,10 @@ import { relayAllows } from "./relay-calls";
  * and auth.ts's: a request opts in, and only after every ordinary
  * attempt has failed in a way only blocking explains
  * (`everyRouteFailed` in api.ts), or while relay mode says the ordinary
- * routes were found blocked minutes ago.
+ * routes were found blocked minutes ago. A read need not wait for those
+ * attempts to time out where none of their names resolves to a public
+ * address on this network (names-check.ts): the order is the same, and
+ * so is every check below.
  *
  * The order of checks below is the spec's, and the reason for each:
  *
@@ -382,6 +385,14 @@ export function noteNormalRouteAnswered(): void {
   if (Object.keys(load().mode).length > 0) endRelayMode();
 }
 
+/** How many times the backend has answered on an ordinary route in this
+ * run. For a request deciding whether to stop waiting for those routes
+ * (`ordinaryUnlessNamesFail` in api.ts): one answer since it began, to
+ * any request, and they are not to be given up on. */
+export function normalRouteAnswers(): number {
+  return normalAnswers;
+}
+
 /** Whether a request opted into the relay should skip the ordinary routes
  * and go straight to it: relay mode holds, and the ordinary routes were
  * asked less than `NORMAL_PROBE_MS` ago. When they are due, this answers
@@ -661,6 +672,35 @@ export async function relayRequest(call: RelayCall, _use: RelayUse): Promise<Rel
     // Nothing above dials anything, and `send` answers for its own
     // failures: whatever threw, the relay was not asked.
     return { kind: "skipped", reason: "none" };
+  }
+}
+
+/** Whether the relay would be dialled for this call if it were asked
+ * now: every condition `relayRequest` and `send` hold it to, and nothing
+ * sent, counted or changed.
+ *
+ * The call is one the relay carries; this build has a relay and the
+ * signed list names one; the backend has not refused this network for its
+ * region in the last day; the customer has not switched the backup route
+ * off; the device's allowance has room; and the tunnel is down, as its
+ * owner reports it now, with no connect under way. The tunnel is asked
+ * last, because it is the only one of them that asks anything.
+ *
+ * For a request about to stop waiting for the ordinary routes because
+ * none of their names resolves here (`ordinaryUnlessNamesFail` in
+ * api.ts): it must not, unless the relay is really there to go to. Every
+ * condition is checked again when the call is sent. Never throws. */
+export async function relayOpenFor(method: string, path: string): Promise<boolean> {
+  try {
+    if (!relayAllows(method, path)) return false;
+    if (!relaySupported()) return false;
+    if ((await lastResortEntries()).length === 0) return false;
+    if (relayOff(networkKey())) return false;
+    if (!backupRouteOn()) return false;
+    if (!withinBudget(clock())) return false;
+    return (await tunnelState()) === "down";
+  } catch {
+    return false;
   }
 }
 

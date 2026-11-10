@@ -591,6 +591,88 @@ describe("relay sign-up on offer", () => {
   });
 });
 
+describe("whether the relay would take a call now", () => {
+  const open = () => lr.relayOpenFor("GET", "/customer/me");
+
+  it("is every condition a call is sent under, and sends nothing to find out", async () => {
+    expect(await open()).toBe(true);
+
+    // A call the relay does not carry.
+    expect(await lr.relayOpenFor("GET", "/customer/devices")).toBe(false);
+    expect(await lr.relayOpenFor("DELETE", "/customer/me")).toBe(false);
+
+    // The customer's switch.
+    lr.setBackupRouteOn(false);
+    expect(await open()).toBe(false);
+    lr.setBackupRouteOn(true);
+
+    // A signed list that names no relay.
+    entries = [];
+    expect(await open()).toBe(false);
+    entries = [BOX_A];
+
+    // A tunnel up, or one that cannot be read.
+    tunnelUp = true;
+    expect(await open()).toBe(false);
+    tunnelUp = null;
+    expect(await open()).toBe(false);
+    tunnelUp = false;
+
+    // A connect under way, even with the tunnel down.
+    ladderPass.running.current = true;
+    ladderPass.startedAt.current = Date.now();
+    expect(await open()).toBe(false);
+    ladderPass.running.current = false;
+
+    expect(await open()).toBe(true);
+    expect(sent).toEqual([]);
+  });
+
+  it("is shut for a day on a network the backend refused for its region", async () => {
+    replies = [json(403, { code: "RELAY_REGION" })];
+    await lr.relayRequest(ME, "background");
+    expect(await open()).toBe(false);
+    now += lr.RELAY_REGION_OFF_MS;
+    expect(await open()).toBe(true);
+  });
+
+  it("is shut once the device's allowance for the hour is spent", async () => {
+    for (let i = 0; i < lr.RELAY_HOURLY_LIMIT; i += 1) {
+      replies = [json(200, {})];
+      expect((await lr.relayRequest(ME, "background")).kind).toBe("answered");
+    }
+    expect(await open()).toBe(false);
+    now += 3_600_000;
+    expect(await open()).toBe(true);
+  });
+
+  it("leaves relay mode and the allowance as they were", async () => {
+    replies = [json(200, {})];
+    await lr.relayRequest(ME, "background");
+    expect(lr.relayModeActive()).toBe(true);
+    // A tunnel up shuts it, and is not taken here as the end of relay
+    // mode: that is the sending call's to decide, and the watch's.
+    tunnelUp = true;
+    expect(await open()).toBe(false);
+    tunnelUp = false;
+    expect(lr.relayModeActive()).toBe(true);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("is never open in a build with no tunnel to read -- the web portal", async () => {
+    lr.resetLastResortForTests({ now: () => now, transport: async () => json(200, {}) });
+    expect(await open()).toBe(false);
+  });
+});
+
+describe("answers on the ordinary routes", () => {
+  it("are counted, for a request deciding whether to stop waiting for them", () => {
+    const before = lr.normalRouteAnswers();
+    lr.noteNormalRouteAnswered();
+    expect(lr.normalRouteAnswers()).toBe(before + 1);
+  });
+});
+
 describe("the install id", () => {
   it("is stable for the install and shaped as the backend accepts it", () => {
     const id = lr.relayInstallId();

@@ -76,10 +76,27 @@ export type TracePhase = "challenge" | "health" | "req" | "refresh" | "retry";
  *   nothing else, so a race, or a write's first try, stopped the request
  *   or did not send it (see `blockPageLook` in api.ts). Found by a lookup
  *   of its own beside the request's, through the same system resolver.
+ * - `names`: the app stopped waiting for this address, unanswered,
+ *   because none of the request's names resolved to a public address on
+ *   this network, and asked the backup route instead (see
+ *   `ordinaryUnlessNamesFail` in api.ts). Its milliseconds are how long
+ *   it had been asked for by then. It says how the names resolved, not
+ *   that the address was tried to its deadline and failed: when the
+ *   backup route gives no answer either, the address is asked again in
+ *   full, and that attempt follows as an entry of its own.
  * - `pending`: not settled yet. Rendered as `budget` when a caller gives
  *   up waiting -- see `renderTrace`.
  */
-export type TraceOutcome = `h${number}` | "timeout" | "scope" | "local" | "cancel" | "net" | "blockpage" | "pending";
+export type TraceOutcome =
+  | `h${number}`
+  | "timeout"
+  | "scope"
+  | "local"
+  | "cancel"
+  | "net"
+  | "blockpage"
+  | "names"
+  | "pending";
 
 export interface TraceEntry {
   phase: TracePhase;
