@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
@@ -6,14 +6,17 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(
 const {
   checkDataMoves,
   describeSearchEnd,
+  describeSlow,
   DOWN_BYTES,
   endSearch,
   judgeDataCheck,
   judgeSample,
   keepsSlow,
+  LEG_MS,
   noSlowRungs,
   noteDial,
   noteSlow,
+  passedUploadKbps,
   passOverSlow,
   presentsOwnName,
   rememberedKbps,
@@ -29,6 +32,9 @@ const {
   SLOW_SEARCH_MAX_MS,
   slowFallback,
   UP_BYTES,
+  UP_LEG_MAX_MS,
+  UP_LEG_SHARE,
+  uploadLegMs,
 } = await import("./data-check");
 import type { DataCheck } from "./data-check";
 import type { ProtocolUser } from "./types";
@@ -469,5 +475,242 @@ describe("the search for something better than a slow rung", () => {
         (u) => u.id === "b",
       ),
     ).toEqual([b, c, a, d]);
+  });
+});
+
+/** A line that is merely slow must not read as a server that is held: the
+ * upload leg is given time by what this network's own working uploads
+ * have managed (`typicalUploadKbps` in connect-history.ts). */
+describe("the upload leg's time", () => {
+  it("is the usual eight seconds on a network nothing is remembered of", () => {
+    expect(LEG_MS).toBe(8_000);
+    expect(uploadLegMs(null)).toBe(8_000);
+    expect(uploadLegMs(undefined)).toBe(8_000);
+    // And for a figure that is no speed at all.
+    for (const none of [0, -5, Number.NaN]) expect(uploadLegMs(none)).toBe(8_000);
+  });
+
+  /** 256 KB at 60% of 300 kbps: 2,097,152 bits at 180 kbps. */
+  it("is about eleven and a half seconds where uploads typically pass at 300 kbps", () => {
+    expect(UP_LEG_SHARE).toBe(0.6);
+    expect(uploadLegMs(300)).toBe(11_651);
+    expect(uploadLegMs(300)).toBeLessThan(UP_LEG_MAX_MS);
+  });
+
+  it("stops at the cap however slow the line", () => {
+    expect(UP_LEG_MAX_MS).toBe(12_000);
+    expect(uploadLegMs(150)).toBe(12_000);
+    expect(uploadLegMs(1)).toBe(12_000);
+  });
+
+  it("is the usual eight seconds wherever uploads are fast", () => {
+    expect(uploadLegMs(2_000)).toBe(8_000);
+    expect(uploadLegMs(50_000)).toBe(8_000);
+    expect(uploadLegMs(Number.POSITIVE_INFINITY)).toBe(8_000);
+    // The line between: 60% of 437 kbps is the 262 kbps eight seconds ask.
+    expect(uploadLegMs(437)).toBe(8_000);
+    expect(uploadLegMs(430)).toBeGreaterThan(8_000);
+  });
+
+  it("is never under the usual leg nor over the cap, and never shorter for a slower line", () => {
+    let last = Number.POSITIVE_INFINITY;
+    for (let kbps = 50; kbps <= 5_000; kbps += 25) {
+      const ms = uploadLegMs(kbps);
+      expect(ms).toBeGreaterThanOrEqual(LEG_MS);
+      expect(ms).toBeLessThanOrEqual(UP_LEG_MAX_MS);
+      expect(ms).toBeLessThanOrEqual(last);
+      last = ms;
+    }
+  });
+
+  /** The hold as measured: a first 63-95 KB at once, then about 0.1 Mbps.
+   * The cap has to stay under the quickest of those -- and does by little
+   * more than a second, which is the whole margin. */
+  it("stays under the held upload's signature, by about a tenth", () => {
+    const heldMs = (freeKb: number, kbps: number) => ((UP_BYTES - freeKb * 1024) * 8) / kbps;
+    expect(heldMs(95, 100)).toBeGreaterThan(13_000);
+    expect(heldMs(63, 100)).toBeGreaterThan(15_000);
+    expect(UP_LEG_MAX_MS).toBeLessThan(heldMs(95, 100));
+    // How thin: a hold one tenth less strict, with the largest free
+    // burst, finishes just inside the cap.
+    expect(heldMs(95, 110)).toBeLessThan(UP_LEG_MAX_MS);
+    expect(heldMs(95, 109)).toBeGreaterThan(UP_LEG_MAX_MS);
+  });
+});
+
+describe("the data check on a network with a slow line", () => {
+  const BASE = "https://api.example/api";
+  type Asked = { timeoutMs: number; upTimeoutMs?: number };
+
+  /** The Rust side's upload leg, for an upload that needs `needsMs`: done
+   * with its time if that is inside the leg, and otherwise no answer and
+   * no bytes at the leg's end (`data_check_v4`). */
+  const uploadTaking = (needsMs: number) => (_command: string, asked: Asked) => {
+    const legMs = asked.upTimeoutMs ?? asked.timeoutMs;
+    const up = needsMs <= legMs ? leg(200, UP_BYTES, needsMs) : leg(null, 0, legMs);
+    return Promise.resolve({ down: leg(200, DOWN_BYTES, 900), up, peer: null });
+  };
+
+  afterEach(() => {
+    invoke.mockReset();
+    vi.useRealTimers();
+  });
+
+  it("passes an upload that took ten seconds where uploads typically pass at 300 kbps, with its real speed", async () => {
+    invoke.mockImplementation(uploadTaking(10_000));
+    const verdict = await checkDataMoves(BASE, uploadLegMs(300));
+    expect(verdict).toEqual({ state: "moves", downKbps: 1165, upKbps: 210, upLegMs: 11_651 });
+    // The download's leg is the one it always had; only the upload's is longer.
+    expect(invoke).toHaveBeenLastCalledWith("data_check_v4", {
+      base: BASE,
+      downBytes: DOWN_BYTES,
+      upBytes: UP_BYTES,
+      timeoutMs: 8_000,
+      upTimeoutMs: 11_651,
+    });
+    // What the report says it moved, and what the line is remembered by.
+    expect(rungSpeeds(verdict, null)).toEqual({ downKbps: 1165, upKbps: 210 });
+    expect(passedUploadKbps(verdict)).toBe(210);
+  });
+
+  it("fails the same upload where uploads are fast, asked exactly as it always was", async () => {
+    invoke.mockImplementation(uploadTaking(10_000));
+    const verdict = await checkDataMoves(BASE, uploadLegMs(2_000));
+    expect(verdict).toEqual({ state: "slow", downKbps: 1165, upKbps: 0 });
+    expect(invoke).toHaveBeenLastCalledWith("data_check_v4", {
+      base: BASE,
+      downBytes: DOWN_BYTES,
+      upBytes: UP_BYTES,
+      timeoutMs: 8_000,
+    });
+    expect(passedUploadKbps(verdict)).toBeNull();
+  });
+
+  it("fails it on a network nothing is remembered of", async () => {
+    invoke.mockImplementation(uploadTaking(10_000));
+    await expect(checkDataMoves(BASE, uploadLegMs(null))).resolves.toEqual({ state: "slow", downKbps: 1165, upKbps: 0 });
+    await expect(checkDataMoves(BASE)).resolves.toEqual({ state: "slow", downKbps: 1165, upKbps: 0 });
+  });
+
+  /** The held server's thirteen seconds: over the cap, so over every leg. */
+  it.each([null, 150, 300, 2_000])("fails an upload that took thirteen seconds, whatever the line (%s kbps)", async (typical) => {
+    invoke.mockImplementation(uploadTaking(13_000));
+    const verdict = await checkDataMoves(BASE, uploadLegMs(typical));
+    expect(verdict.state).toBe("slow");
+    expect(verdict).toMatchObject({ upKbps: 0 });
+  });
+
+  it("holds whatever leg it is passed between the usual one and the cap", async () => {
+    invoke.mockImplementation(uploadTaking(1_000));
+    await checkDataMoves(BASE, 60_000);
+    expect(invoke.mock.calls[0][1]).toMatchObject({ timeoutMs: 8_000, upTimeoutMs: 12_000 });
+    await checkDataMoves(BASE, 100);
+    expect(invoke.mock.calls[1][1]).not.toHaveProperty("upTimeoutMs");
+    await checkDataMoves(BASE, Number.NaN);
+    expect(invoke.mock.calls[2][1]).not.toHaveProperty("upTimeoutMs");
+  });
+
+  /** The guard against an IPC reply that never comes used to be two usual
+   * legs and two seconds. A download that used its eight seconds and an
+   * upload that used most of twelve answers after that -- and a check the
+   * guard ends reads `unmeasured`, which lands the rung unchecked. */
+  it("waits out both legs before giving a check up as unmeasured", async () => {
+    vi.useFakeTimers();
+    invoke.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve({ down: leg(200, DOWN_BYTES, 7_900), up: leg(200, UP_BYTES, 11_900), peer: null }), 19_800);
+        }),
+    );
+    const answered = checkDataMoves(BASE, 12_000);
+    await vi.advanceTimersByTimeAsync(19_800);
+    await expect(answered).resolves.toMatchObject({ state: "moves", upKbps: 176, upLegMs: 12_000 });
+
+    // And no longer than that: a reply that never comes is given up on
+    // two seconds after both legs must have ended.
+    invoke.mockImplementation(() => new Promise(() => undefined));
+    let verdict: unknown = "waiting";
+    void checkDataMoves(BASE, 12_000).then((v) => {
+      verdict = v;
+    });
+    await vi.advanceTimersByTimeAsync(8_000 + 12_000 + 1_999);
+    expect(verdict).toBe("waiting");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(verdict).toEqual({ state: "unmeasured" });
+
+    // The usual check's guard is the one it had.
+    verdict = "waiting";
+    void checkDataMoves(BASE).then((v) => {
+      verdict = v;
+    });
+    await vi.advanceTimersByTimeAsync(2 * 8_000 + 1_999);
+    expect(verdict).toBe("waiting");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(verdict).toEqual({ state: "unmeasured" });
+  });
+
+  it("says how long the upload was given in a slow rung's line, only where that was longer", () => {
+    expect(describeSlow({ state: "slow", downKbps: 1165, upKbps: 0 })).toBe("too slow (1165 kbps down, 0 kbps up)");
+    expect(describeSlow({ state: "slow", downKbps: 1165, upKbps: 0, upLegMs: 11_651 })).toBe(
+      "too slow (1165 kbps down, 0 kbps up, upload given 11.7 s)",
+    );
+  });
+
+  it("remembers a line by the uploads of checks that passed, and no others", () => {
+    expect(passedUploadKbps({ state: "moves", downKbps: 2621, upKbps: 1748 })).toBe(1748);
+    expect(passedUploadKbps({ state: "slow", downKbps: 2621, upKbps: 140 })).toBeNull();
+    expect(passedUploadKbps({ state: "unmeasured" })).toBeNull();
+    expect(passedUploadKbps(null)).toBeNull();
+  });
+});
+
+/** The search's forty seconds are time spent looking, not the difference
+ * between two readings of the time of day, which a device changes under
+ * a running pass when it sets its clock. */
+describe("the search's clock", () => {
+  const user = (id: string, host: string): ProtocolUser =>
+    ({ id, routeId: `${id}-route`, protocol: "XRAY_VLESS_REALITY", connection: { host } }) as unknown as ProtocolUser;
+  const de = user("de", "198.51.100.3");
+  const SLOW = { state: "slow", downKbps: 2400, upKbps: 0 } as const;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("does not end a search because the time of day jumped forward", () => {
+    const monotonic = vi.spyOn(performance, "now").mockReturnValue(5_000);
+    const wall = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+    const slow = noSlowRungs((u) => serverKey(u, []), [de]);
+    noteSlow(slow, de, SLOW);
+    expect(slow.search?.since).toBe(5_000);
+    // The clock is set an hour on; ten seconds have passed.
+    wall.mockReturnValue(1_800_000_000_000 + 3_600_000);
+    monotonic.mockReturnValue(15_000);
+    expect(endSearch(slow)).toBeNull();
+    // Forty seconds of looking ends it, and that is what it reports.
+    monotonic.mockReturnValue(5_000 + SLOW_SEARCH_MAX_MS);
+    expect(endSearch(slow)).toEqual({ candidate: de, dials: 0, ms: 40_000 });
+  });
+
+  it("still ends it after forty seconds when the time of day jumped back", () => {
+    const monotonic = vi.spyOn(performance, "now").mockReturnValue(1_000);
+    const wall = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+    const slow = noSlowRungs((u) => serverKey(u, []), [de]);
+    noteSlow(slow, de, SLOW);
+    wall.mockReturnValue(1_800_000_000_000 - 3_600_000);
+    monotonic.mockReturnValue(1_000 + SLOW_SEARCH_MAX_MS);
+    expect(endSearch(slow)?.ms).toBe(40_000);
+  });
+
+  it("starts the budget afresh on the same clock after a wait for a network", () => {
+    const monotonic = vi.spyOn(performance, "now").mockReturnValue(1_000);
+    vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+    const slow = noSlowRungs((u) => serverKey(u, []), [de]);
+    noteSlow(slow, de, SLOW);
+    monotonic.mockReturnValue(301_000);
+    restartSearch(slow);
+    expect(slow.search?.since).toBe(301_000);
+    monotonic.mockReturnValue(301_000 + SLOW_SEARCH_MAX_MS - 1);
+    expect(endSearch(slow)).toBeNull();
   });
 });

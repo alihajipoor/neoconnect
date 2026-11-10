@@ -293,6 +293,14 @@ fn millis_since(started: Instant) -> u64 {
 /// count of that over its time is a shorter sample, still a reading. No
 /// upload is made (`up` comes back empty). Absent, as every call before
 /// it, the check is exactly the one described above.
+///
+/// With `up_timeout_ms`, the upload gets that long in place of
+/// `timeout_ms`, and the download keeps `timeout_ms`. The upload is the
+/// leg that tells a held server from a usable one, and how long a usable
+/// one needs for it depends on the customer's own line: the frontend
+/// asks for more than its usual eight seconds only on a network where it
+/// has measured uploads that need it (`uploadLegMs` in data-check.ts).
+/// Absent, as every call before it, both legs get `timeout_ms`.
 #[tauri::command]
 pub async fn data_check_v4(
     base: String,
@@ -300,6 +308,7 @@ pub async fn data_check_v4(
     up_bytes: u64,
     timeout_ms: u64,
     sample_ms: Option<u64>,
+    up_timeout_ms: Option<u64>,
 ) -> Result<DataCheck, String> {
     let up_url = bulk_url(&base).map_err(str::to_string)?;
     let down_bytes = down_bytes.clamp(1, DATA_CHECK_MAX_BYTES);
@@ -307,6 +316,7 @@ pub async fn data_check_v4(
     let mut down_url = up_url.clone();
     down_url.query_pairs_mut().append_pair("bytes", &down_bytes.to_string());
     let timeout = Duration::from_millis(timeout_ms.max(1)).min(MAX_TIMEOUT);
+    let up_timeout = up_timeout_ms.map_or(timeout, |ms| Duration::from_millis(ms.max(1)).min(MAX_TIMEOUT));
     let client = ipv4_client(timeout)?;
     let mut peer = None;
 
@@ -342,8 +352,11 @@ pub async fn data_check_v4(
     }
     let body = incompressible(up_bytes as usize);
     let started = Instant::now();
+    // The request's own time, over the client's: the whole exchange, from
+    // connecting to the last byte of the answer, as the client's is.
     let sent = client
         .post(up_url)
+        .timeout(up_timeout)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .body(body)
         .send()
@@ -784,6 +797,7 @@ mod tests {
             1,
             5_000,
             Some(400),
+            None,
         ))
         .unwrap();
         assert_eq!(check.down.status, Some(200), "{check:?}");
@@ -820,6 +834,7 @@ mod tests {
             1,
             5_000,
             Some(10),
+            None,
         ))
         .unwrap();
         assert_eq!(check.down.status, Some(200), "{check:?}");
@@ -828,6 +843,103 @@ mod tests {
         assert_eq!(check.up, DataLeg { status: None, bytes: 0, ms: 0 });
         let request_line = server.join().unwrap().unwrap();
         assert!(request_line.starts_with("GET /api/health/bulk?bytes=20000&ms=250 "), "{request_line}");
+    }
+
+    /// Serves one data check: the download asked for, then the upload,
+    /// read whole and answered `delay` later with what arrived -- an
+    /// upload that takes that long to get through. Each on a connection
+    /// of its own, as `Connection: close` makes the client open.
+    fn serve_check(listener: std::net::TcpListener, delay: Duration) -> std::thread::JoinHandle<Option<()>> {
+        use std::io::{BufRead, BufReader, Read, Write};
+        std::thread::spawn(move || {
+            listener.set_nonblocking(false).ok()?;
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().ok()?;
+                let mut reader = BufReader::new(stream.try_clone().ok()?);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).ok()?;
+                let mut length = 0usize;
+                let mut line = String::new();
+                while reader.read_line(&mut line).ok()? > 2 {
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().ok()?;
+                    }
+                    line.clear();
+                }
+                let mut stream = stream;
+                if request_line.starts_with("GET ") {
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n")
+                        .ok()?;
+                    stream.write_all(&[0x5Au8; 1000]).ok()?;
+                } else {
+                    let mut body = vec![0u8; length];
+                    reader.read_exact(&mut body).ok()?;
+                    std::thread::sleep(delay);
+                    let answer = format!("{{\"received\":{length}}}");
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        answer.len(),
+                    );
+                    stream.write_all(head.as_bytes()).ok()?;
+                    stream.write_all(answer.as_bytes()).ok()?;
+                }
+            }
+            Some(())
+        })
+    }
+
+    /// The upload's own time (`up_timeout_ms`): an upload that needs
+    /// longer than the time the download is given finishes, and is timed
+    /// as what it took, when it is given longer.
+    #[test]
+    fn gives_the_upload_the_time_asked_for_it() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = serve_check(listener, Duration::from_millis(2_500));
+
+        let check = tauri::async_runtime::block_on(data_check_v4(
+            format!("http://localhost:{port}/api"),
+            1_000,
+            4_096,
+            1_000,
+            None,
+            Some(8_000),
+        ))
+        .unwrap();
+        assert_eq!(check.down.status, Some(200), "{check:?}");
+        assert_eq!(check.down.bytes, 1_000, "{check:?}");
+        assert_eq!(check.up.status, Some(200), "{check:?}");
+        assert_eq!(check.up.bytes, 4_096, "{check:?}");
+        // Past the download's second, and timed as what it took.
+        assert!((2_500..8_000).contains(&check.up.ms), "{check:?}");
+        assert_eq!(server.join().unwrap(), Some(()));
+    }
+
+    /// Without it the check is the one every call before made: the same
+    /// upload runs out of the one time both legs share, and comes back
+    /// with no answer and no bytes.
+    #[test]
+    fn holds_the_upload_to_the_shared_time_when_none_is_asked_for_it() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = serve_check(listener, Duration::from_millis(2_500));
+
+        let check = tauri::async_runtime::block_on(data_check_v4(
+            format!("http://localhost:{port}/api"),
+            1_000,
+            4_096,
+            1_000,
+            None,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(check.down.status, Some(200), "{check:?}");
+        assert_eq!(check.up.status, None, "{check:?}");
+        assert_eq!(check.up.bytes, 0, "{check:?}");
+        assert!((950..2_500).contains(&check.up.ms), "{check:?}");
+        // The server is left to answer into a connection the client has gone from.
+        drop(server);
     }
 
     const OK_JSON: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"ip\":\"192.0.2.1\"}";

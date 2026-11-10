@@ -35,8 +35,14 @@ import type { Protocol } from "./types";
  * `dead` marks a rung that came up and carried nothing, or did not
  * connect (`recordDead`). Not every `ok: false` is one: a rung that was
  * only slow carried data, and a landing nothing could confirm proved
- * nothing either way. */
-export type Attempt = { at: number; ok: boolean; kbps?: number; dead?: true };
+ * nothing either way.
+ *
+ * `up` is the upload alone, in kilobits a second, on an attempt whose
+ * data check passed (`recordUpload`). `kbps` cannot stand in for it: it
+ * is the slower direction, and after the sample it may be the download.
+ * What it is for is the line, not the rung -- how fast uploads that work
+ * go on this network (`typicalUploadKbps`). */
+export type Attempt = { at: number; ok: boolean; kbps?: number; dead?: true; up?: number };
 
 /** Keyed `network|routeId|protocol`. Newest last. */
 export type ConnectHistory = Record<string, Attempt[]>;
@@ -233,6 +239,77 @@ export function recordSpeed(
   if (!attempts || attempts.length === 0 || !(kbps >= 0)) return history;
   const stamped = attempts.map((attempt, i) => (i === attempts.length - 1 ? { ...attempt, kbps: Math.round(kbps) } : attempt));
   return { ...history, [key]: stamped };
+}
+
+/** Stamps the upload a passed data check measured onto this
+ * combination's newest attempt -- the one just recorded for the same
+ * rung, as `recordSpeed` does. Only for a check that passed
+ * (`passedUploadKbps` in data-check.ts): an upload that ran out of time
+ * has no figure, and what a slow rung managed is not what this network's
+ * working uploads look like. */
+export function recordUpload(
+  history: ConnectHistory,
+  network: string | null,
+  routeId: string,
+  protocol: Protocol,
+  upKbps: number,
+): ConnectHistory {
+  const key = keyFor(network, routeId, protocol);
+  const attempts = history[key];
+  if (!attempts || attempts.length === 0 || !(upKbps > 0)) return history;
+  const stamped = attempts.map((attempt, i) => (i === attempts.length - 1 ? { ...attempt, up: Math.round(upKbps) } : attempt));
+  return { ...history, [key]: stamped };
+}
+
+/** How many of a network's latest passing uploads say what is typical
+ * there. A few: enough that one odd reading -- a burst, a busy minute --
+ * is outvoted, few enough that a line that has changed is believed
+ * within a handful of connects. */
+export const UPLOADS_COUNTED = 5;
+
+/** How long a passing upload says anything about a network's line.
+ *
+ * A week, not the day the rest of this memory lasts (`SPEED_FRESH_MS`).
+ * That day is about filtering, which changes overnight; this is about
+ * how fast the customer's own line uploads, which does not. And the
+ * customer it is for connects on a line where the check reads slow half
+ * the time: forgotten after a day, somebody who connects every other
+ * day would never have it. What it costs when it is stale is bounded --
+ * a few seconds more for a rung that is slow (`UP_LEG_MAX_MS`). */
+export const UPLOAD_FRESH_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** How fast uploads that passed the data check have gone on this network
+ * lately, in kilobits a second, or `null` when none is remembered: the
+ * middle of the latest `UPLOADS_COUNTED`, on any server and protocol,
+ * from the last `UPLOAD_FRESH_MS`.
+ *
+ * The network's, not a rung's, because it is the line being measured:
+ * every working server here uploads through the same one. With an even
+ * count the higher of the middle two -- the reading that asks more of
+ * the next rung, since a lower one gives its upload longer
+ * (`uploadLegMs` in data-check.ts).
+ *
+ * Nothing for a network that is not known: every such network shares one
+ * bucket here, and one slow line must not speak for all of them. */
+export function typicalUploadKbps(history: ConnectHistory, network: string | null, now: number = Date.now()): number | null {
+  if (network === null) return null;
+  const prefix = `${network}|`;
+  const passed: Array<{ at: number; up: number }> = [];
+  for (const [key, attempts] of Object.entries(history)) {
+    if (!key.startsWith(prefix)) continue;
+    for (const attempt of attempts) {
+      if (!attempt.ok || attempt.up === undefined || !(attempt.up > 0)) continue;
+      if (now - attempt.at > UPLOAD_FRESH_MS) continue;
+      passed.push({ at: attempt.at, up: attempt.up });
+    }
+  }
+  if (passed.length === 0) return null;
+  const latest = passed
+    .sort((a, b) => b.at - a.at)
+    .slice(0, UPLOADS_COUNTED)
+    .map((one) => one.up)
+    .sort((a, b) => a - b);
+  return latest[Math.floor(latest.length / 2)];
 }
 
 /** How long a measured speed says anything about a network. */

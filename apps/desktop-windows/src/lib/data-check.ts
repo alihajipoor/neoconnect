@@ -24,28 +24,79 @@ import type { ProtocolUser, RouteOption } from "./types";
  * Unverified: where that line should sit for home and mobile networks.
  * The hold was measured only from data centres inside Iran.
  *
- * And it cannot yet be moved for one network from what the check itself
- * measures there. An upload that runs out its leg comes back with no
- * answer and no byte count (the request is one POST, and it timed out),
- * so a rung under the line has no upload figure at all -- "220 kbps on a
- * line that never did better than 330" and "held at 130" are the same
- * reading. Telling them apart needs a longer upload leg on that network,
- * not a different judgement of this one. */
+ * An upload that runs out its leg comes back with no answer and no byte
+ * count (the request is one POST, and it timed out), so a rung under the
+ * line has no upload figure at all -- "220 kbps on a line that never did
+ * better than 330" and "held at 130" are the same reading. A different
+ * judgement of that reading cannot tell them apart; a longer upload leg
+ * can, so on a network whose own passing uploads have been slow the
+ * upload is given longer (`uploadLegMs`). The download's leg, and every
+ * leg on a network nothing is remembered of, is `LEG_MS` as it was. */
 
 export const DOWN_BYTES = 128 * 1024;
 export const UP_BYTES = 256 * 1024;
 export const LEG_MS = 8_000;
+
+/** The longest the upload leg is ever given, whatever a network's memory
+ * says.
+ *
+ * Under the held server's signature, and not by much. A held upload was
+ * measured at about thirteen seconds or more for these 256 KB: a first
+ * 63-95 KB at once, then about 0.1 Mbps -- 13.2 s with the largest free
+ * burst, nearer 16 s with the smallest. Twelve seconds asks for 175 kbps
+ * over the whole upload; the fastest held one managed about 159. That is
+ * a margin of about a tenth, on two rounds of measurement from data
+ * centres: a hold a tenth less strict than the one measured, or a larger
+ * free burst, finishes inside it and passes -- on a network whose own
+ * uploads are slow enough to have been given this long, and only there.
+ * It must not be raised without measuring the hold again. */
+export const UP_LEG_MAX_MS = 12_000;
+
+/** How much of a network's typical passing upload a rung has to manage.
+ * A line's upload varies from one minute to the next -- the customer
+ * this is for passed at 265 to 365 kbps on his usual servers, and ran
+ * out of time on them about as often -- so a rung is asked for well
+ * under what is typical, not for the typical itself, which a healthy
+ * line misses half the time. */
+export const UP_LEG_SHARE = 0.6;
+
+/** How long the upload leg gets on a network whose passing uploads have
+ * typically gone at `typicalUpKbps` (`typicalUploadKbps` in
+ * connect-history.ts): the time `UP_BYTES` take at `UP_LEG_SHARE` of
+ * that, never under `LEG_MS` and never over `UP_LEG_MAX_MS`.
+ *
+ * So it follows the line, not a list of networks. Where nothing is
+ * remembered, and wherever uploads are fast -- typically 437 kbps or
+ * more, which is everywhere the old line was not a problem -- it is
+ * exactly `LEG_MS`, and the check is the one it always was. Only a
+ * network that has itself shown working uploads slower than that gives
+ * its next rung longer: the customer whose only working servers upload
+ * at about 300 kbps read "slow" on them every other connect, with eight
+ * seconds asking for 262.
+ *
+ * What it cannot do: a line that never once uploads 256 KB in eight
+ * seconds has no passing upload to remember, so it is never given
+ * longer. */
+export function uploadLegMs(typicalUpKbps: number | null | undefined): number {
+  if (typicalUpKbps === null || typicalUpKbps === undefined || !(typicalUpKbps > 0)) return LEG_MS;
+  // Bits over kilobits a second is milliseconds.
+  const needed = Math.ceil((UP_BYTES * 8) / (typicalUpKbps * UP_LEG_SHARE));
+  return Math.min(Math.max(needed, LEG_MS), UP_LEG_MAX_MS);
+}
 
 /** What one direction measured (`DataLeg` in health_ip.rs). `status` is
  * null when no answer came back at all. */
 export type DataLeg = { status: number | null; bytes: number; ms: number };
 export type DataCheck = { down: DataLeg; up: DataLeg; peer: string | null };
 
+/** `upLegMs` is how long the upload leg was given, where that was more
+ * than `LEG_MS` (`uploadLegMs`); absent on every check that ran as it
+ * always did. The speeds are what was measured either way. */
 export type DataVerdict =
   /** Both directions finished in time. */
-  | { state: "moves"; downKbps: number; upKbps: number }
+  | { state: "moves"; downKbps: number; upKbps: number; upLegMs?: number }
   /** A direction did not finish in time, or carried nothing. */
-  | { state: "slow"; downKbps: number; upKbps: number }
+  | { state: "slow"; downKbps: number; upKbps: number; upLegMs?: number }
   /** Nothing of ours took part -- busy, an error page, a backend without
    * the endpoint, a build without the command -- so nothing is known
    * about the tunnel either way, and the rung is judged as before. */
@@ -72,21 +123,42 @@ export function judgeDataCheck(
 }
 
 /** Runs the check through `base`. Never throws: a check that could not
- * be run is `unmeasured`, never `slow`. */
-export async function checkDataMoves(base: string | undefined): Promise<DataVerdict> {
+ * be run is `unmeasured`, never `slow`.
+ *
+ * `upLegMs` is how long the upload leg gets (`uploadLegMs`), held here
+ * between `LEG_MS` and `UP_LEG_MAX_MS` whatever is passed. Left out, or
+ * at `LEG_MS`, the command is asked exactly as it always was. Longer,
+ * and the upload alone is given it (`up_timeout_ms` in health_ip.rs);
+ * the verdict then says so (`DataVerdict.upLegMs`).
+ *
+ * Nothing else times this check: both ladders await it after the
+ * address check's own budget is spent, the impatient one included. The
+ * one clock that could cut it short is the guard below, and that must
+ * outlast both legs -- a check it ended reads `unmeasured`, which lands
+ * the rung as if no check had been made at all. */
+export async function checkDataMoves(base: string | undefined, upLegMs: number = LEG_MS): Promise<DataVerdict> {
   if (!base) return { state: "unmeasured" };
+  const upMs = Number.isFinite(upLegMs) ? Math.min(Math.max(Math.round(upLegMs), LEG_MS), UP_LEG_MAX_MS) : LEG_MS;
+  const longer = upMs > LEG_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   // The command has its own timeouts; this only guards against an IPC
   // reply that never comes.
   const stalled = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), 2 * LEG_MS + 2_000);
+    timer = setTimeout(() => resolve(null), LEG_MS + upMs + 2_000);
   });
   try {
     const check = await Promise.race([
-      invoke<DataCheck>("data_check_v4", { base, downBytes: DOWN_BYTES, upBytes: UP_BYTES, timeoutMs: LEG_MS }),
+      invoke<DataCheck>("data_check_v4", {
+        base,
+        downBytes: DOWN_BYTES,
+        upBytes: UP_BYTES,
+        timeoutMs: LEG_MS,
+        ...(longer ? { upTimeoutMs: upMs } : {}),
+      }),
       stalled,
     ]);
-    return judgeDataCheck(check);
+    const verdict = judgeDataCheck(check);
+    return longer && verdict.state !== "unmeasured" ? { ...verdict, upLegMs: upMs } : verdict;
   } catch {
     return { state: "unmeasured" };
   } finally {
@@ -241,10 +313,12 @@ export type SlowRungs = {
   redialling: string | null;
   /** The search for something better, from the first slow rung that
    * moved data on a server this network has seen move (`moved`): when it
-   * was measured, which rungs have been dialled since, the best such rung
-   * -- the one to go back to -- whether it has been put back early
-   * (`endSearch`), and whether the fallback has since been put back again
-   * at the end of the ladder (`slowFallback`). Null until there is one. */
+   * was measured (`since`, a reading of the search's own clock, not a
+   * time of day -- `searchClock`), which rungs have been dialled since,
+   * the best such rung -- the one to go back to -- whether it has been
+   * put back early (`endSearch`), and whether the fallback has since been
+   * put back again at the end of the ladder (`slowFallback`). Null until
+   * there is one. */
   search: {
     since: number;
     dialled: Set<string>;
@@ -312,6 +386,15 @@ export function noSlowRungs(
 export const SLOW_SEARCH_MAX_DIALS = 3;
 export const SLOW_SEARCH_MAX_MS = 40_000;
 
+/** The upload a rung is remembered by for its network's line
+ * (`recordUpload` in connect-history.ts): what the check measured, where
+ * the check passed. Null for a rung that was slow -- its upload has no
+ * figure, or not one a working line is known by -- and where nothing was
+ * measured. */
+export function passedUploadKbps(verdict: DataVerdict | null): number | null {
+  return verdict !== null && verdict.state === "moves" && verdict.upKbps > 0 ? verdict.upKbps : null;
+}
+
 /** The speed a rung is remembered by (`recordSpeed`): its slower
  * direction, which is what the customer feels. Null when nothing was
  * measured. */
@@ -342,11 +425,28 @@ function faster(a: { downKbps: number; upKbps: number }, b: { downKbps: number; 
   return a.upKbps !== b.upKbps ? a.upKbps > b.upKbps : a.downKbps > b.downKbps;
 }
 
+/** The clock the search's budget is counted on (`SLOW_SEARCH_MAX_MS`),
+ * and the seconds it says it looked for (`describeSearchEnd`): one that
+ * only runs forward, and that nothing sets.
+ *
+ * Not the time of day, which is what `Date.now()` reads and which moves:
+ * a phone sets its clock from the network as it joins one, a PC from a
+ * time server as it wakes, and either can do so in the middle of a pass.
+ * Forward, and the search ended at once, on a "40 s" nobody waited;
+ * back, and it did not end at all on its clock, with the customer
+ * waiting. Milliseconds since the page loaded, so nothing to store or
+ * to compare with a timestamp -- `search.since` is only ever taken from
+ * a later reading of this. Where the clock is missing, the time of day,
+ * as before. */
+function searchClock(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
+
 export function noteSlow(
   slow: SlowRungs,
   candidate: ProtocolUser,
   verdict: Extract<DataVerdict, { state: "slow" }>,
-  now: number = Date.now(),
+  now: number = searchClock(),
 ): void {
   (presentsOwnName(candidate) ? slow.names : slow.servers).add(slow.keyOf(candidate));
   if (slow.best === null || faster(verdict, slow.best.verdict)) slow.best = { candidate, verdict };
@@ -385,7 +485,7 @@ export function noteDial(slow: SlowRungs, candidate: ProtocolUser): void {
 
 /** The search's budget afresh, for a pass that has just waited for a
  * network: that wait was not spent looking. */
-export function restartSearch(slow: SlowRungs, now: number = Date.now()): void {
+export function restartSearch(slow: SlowRungs, now: number = searchClock()): void {
   if (slow.search !== null && !slow.search.ended) slow.search = { ...slow.search, since: now, dialled: new Set() };
 }
 
@@ -406,7 +506,7 @@ export type SearchEnd = { candidate: ProtocolUser; dials: number; ms: number };
  * rung is left undialled by a pass that then fails. Null while there is
  * budget left, when no search was begun (`noteSlow`), and once the
  * fallback has been put back either way. */
-export function endSearch(slow: SlowRungs, now: number = Date.now()): SearchEnd | null {
+export function endSearch(slow: SlowRungs, now: number = searchClock()): SearchEnd | null {
   const { search } = slow;
   if (search === null || search.ended || slow.redialling !== null) return null;
   const ms = Math.max(0, now - search.since);
@@ -472,7 +572,11 @@ export function keepsSlow(slow: SlowRungs, candidate: ProtocolUser): boolean {
   return slow.redialling === candidate.id;
 }
 
-/** The line in the technical details for a rung passed over as slow. */
+/** The line in the technical details for a rung passed over as slow.
+ * Where the upload was given longer than usual it says how long: a rung
+ * that ran out of that is likelier held than one that ran out of eight
+ * seconds, and the line is all a report carries of it. */
 export function describeSlow(verdict: Extract<DataVerdict, { state: "slow" }>): string {
-  return `too slow (${verdict.downKbps} kbps down, ${verdict.upKbps} kbps up)`;
+  const given = verdict.upLegMs !== undefined ? `, upload given ${(verdict.upLegMs / 1000).toFixed(1)} s` : "";
+  return `too slow (${verdict.downKbps} kbps down, ${verdict.upKbps} kbps up${given})`;
 }

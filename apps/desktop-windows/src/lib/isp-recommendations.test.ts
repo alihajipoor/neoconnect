@@ -182,8 +182,9 @@ const LADDER = [user("r-wg", "WIREGUARD"), user("r-reality", "XRAY_VLESS_REALITY
 const ids = (users: ProtocolUser[]) => users.map((u) => u.routeId);
 const tag = (code: IspTag["code"]): IspTag => ({ code, customers: 6, outOf: 7, windowHours: 48 });
 
-/** Other people's experience as a tie-break on a network this device
- * knows nothing about -- the first run, which is when people quit. */
+/** Other people's experience as a tie-break for the routes this device
+ * has no results of its own for -- all of them on a first run, which is
+ * when people quit. The coarser signals are in isp-order.test.ts. */
 describe("orderCandidates with per-ISP tags", () => {
   const tags = { "r-tls": "worksOnYourIsp", "r-wg": "failingOnYourIsp" } as const;
 
@@ -195,10 +196,22 @@ describe("orderCandidates with per-ISP tags", () => {
     expect(ids(orderCandidates(LADDER, { network: "home" }))).toEqual(["r-wg", "r-reality", "r-tls"]);
   });
 
-  /** ac56993 stands: on a network the device has seen, its own results
-   * order the ladder and other people's play no part. */
-  it("ignores the tags once the device has any history on this network", () => {
+  /** ac56993 stands for what the device has tried: its own results on a
+   * route decide that route. The routes it has not tried here used to
+   * fall to the fixed order the moment it knew anything about the
+   * network; they are placed by other people's results now. */
+  it("orders by the device's own results first, and the routes it has not tried by the tags", () => {
     const history = recordAttempt({}, "home", "r-reality", "XRAY_VLESS_REALITY", true, 0);
+    expect(ids(orderCandidates(LADDER, { ispTags: tags, history, network: "home", now: 0 }))).toEqual([
+      "r-reality",
+      "r-tls",
+      "r-wg",
+    ]);
+  });
+
+  it("does not let a tag outrank the device's own result on that route", () => {
+    // Failed here for this device, however it does for others.
+    const history = recordAttempt({}, "home", "r-tls", "XRAY_VLESS_TLS", false, 0);
     expect(ids(orderCandidates(LADDER, { ispTags: tags, history, network: "home", now: 0 }))).toEqual([
       "r-reality",
       "r-wg",
@@ -206,7 +219,7 @@ describe("orderCandidates with per-ISP tags", () => {
     ]);
   });
 
-  it("ignores them when there is a last-good route here", () => {
+  it("keeps what worked here last time ahead of them", () => {
     expect(ids(orderCandidates(LADDER, { ispTags: tags, lastGoodRouteId: "r-wg", network: "home" }))[0]).toBe("r-wg");
   });
 

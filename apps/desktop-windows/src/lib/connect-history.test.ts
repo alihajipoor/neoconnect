@@ -10,8 +10,12 @@ import {
   recordAttempt,
   recordDead,
   recordSpeed,
+  recordUpload,
   rungShownDead,
   scoreFor,
+  typicalUploadKbps,
+  UPLOAD_FRESH_MS,
+  UPLOADS_COUNTED,
   workedLately,
   type ConnectHistory,
 } from "./connect-history";
@@ -315,5 +319,100 @@ describe("a rung shown to be dead", () => {
     expect(rungShownDead({ up: true, egress: "unreachable" }, true)).toBe(false);
     expect(rungShownDead({ up: true, egress: "bypassingTunnel" }, true)).toBe(false);
     expect(rungShownDead({ up: false, dial: { routeId: "de-1", carried: false } }, true)).toBe(false);
+  });
+});
+
+/** How fast uploads that work go on a network: the line's own speed, which
+ * the data check's upload leg is given time by (`uploadLegMs` in
+ * data-check.ts). */
+describe("a network's typical passing upload", () => {
+  /** One rung landed with a passed check, `up` kbps up, `ago` before NOW. */
+  const passed = (h: ConnectHistory, network: string | null, routeId: string, up: number, ago = 0): ConnectHistory =>
+    recordUpload(recordAttempt(h, network, routeId, "XRAY_VLESS_REALITY", true, NOW - ago), network, routeId, "XRAY_VLESS_REALITY", up);
+
+  it("is nothing on a network nothing has passed on", () => {
+    expect(typicalUploadKbps({}, "wifi", NOW)).toBeNull();
+    // Attempts, and a speed, but no passed check's upload.
+    let h = recordAttempt({}, "wifi", "de-1", "WIREGUARD", true, NOW);
+    h = recordSpeed(h, "wifi", "de-1", "WIREGUARD", 900);
+    expect(typicalUploadKbps(h, "wifi", NOW)).toBeNull();
+  });
+
+  it("is the one upload remembered, when there is one", () => {
+    expect(typicalUploadKbps(passed({}, "wifi", "de-1", 310), "wifi", NOW)).toBe(310);
+  });
+
+  it("is the middle of the latest few, across every server and protocol on the network", () => {
+    let h: ConnectHistory = {};
+    h = passed(h, "wifi", "de-1", 280, hours(5));
+    h = passed(h, "wifi", "fi-1", 2400, hours(4)); // one burst
+    h = passed(h, "wifi", "de-1", 300, hours(3));
+    h = passed(h, "wifi", "tr-1", 340, hours(2));
+    h = passed(h, "wifi", "de-1", 310, hours(1));
+    expect(typicalUploadKbps(h, "wifi", NOW)).toBe(310);
+  });
+
+  it("counts only the latest few, so a line that has changed is believed", () => {
+    expect(UPLOADS_COUNTED).toBe(5);
+    let h: ConnectHistory = {};
+    // A slow week, then five connects on a line that is now fast.
+    for (let i = 0; i < 6; i += 1) h = passed(h, "wifi", `old-${i}`, 300, hours(100 + i));
+    for (let i = 0; i < 5; i += 1) h = passed(h, "wifi", `new-${i}`, 4000 + i, hours(5 - i));
+    expect(typicalUploadKbps(h, "wifi", NOW)).toBe(4002);
+  });
+
+  /** A lower reading gives the next upload longer, so of two middle
+   * values the one that asks more is taken. */
+  it("takes the higher of the middle two", () => {
+    let h = passed({}, "wifi", "de-1", 290, hours(2));
+    h = passed(h, "wifi", "fi-1", 350, hours(1));
+    expect(typicalUploadKbps(h, "wifi", NOW)).toBe(350);
+  });
+
+  it("is the line's for a week, and nothing after", () => {
+    const h = passed({}, "wifi", "de-1", 300, UPLOAD_FRESH_MS - 1);
+    expect(typicalUploadKbps(h, "wifi", NOW)).toBe(300);
+    expect(typicalUploadKbps(passed({}, "wifi", "de-1", 300, UPLOAD_FRESH_MS + 1), "wifi", NOW)).toBeNull();
+  });
+
+  it("is each network's own, and no network's when the network is not known", () => {
+    let h = passed({}, "asn:1", "de-1", 300);
+    h = passed(h, "asn:12", "de-1", 5000);
+    expect(typicalUploadKbps(h, "asn:1", NOW)).toBe(300);
+    expect(typicalUploadKbps(h, "asn:12", NOW)).toBe(5000);
+    expect(typicalUploadKbps(h, "asn:2", NOW)).toBeNull();
+    // Every unknown network shares one bucket: one slow line there must
+    // not speak for all of them.
+    expect(typicalUploadKbps(passed({}, null, "de-1", 300), null, NOW)).toBeNull();
+  });
+
+  it("never counts an attempt that did not land as working", () => {
+    let h = recordAttempt({}, "wifi", "de-1", "WIREGUARD", false, NOW);
+    h = recordUpload(h, "wifi", "de-1", "WIREGUARD", 300);
+    expect(typicalUploadKbps(h, "wifi", NOW)).toBeNull();
+  });
+
+  it("is stamped on the attempt just recorded, and survives the speed stamped after it", () => {
+    let h = recordAttempt({}, "wifi", "de-1", "WIREGUARD", true, NOW - 10);
+    h = recordAttempt(h, "wifi", "de-1", "WIREGUARD", true, NOW);
+    h = recordSpeed(h, "wifi", "de-1", "WIREGUARD", 280);
+    h = recordUpload(h, "wifi", "de-1", "WIREGUARD", 301.6);
+    // The sample after landing replaces the speed, not the upload.
+    h = recordSpeed(h, "wifi", "de-1", "WIREGUARD", 302);
+    expect(h["wifi|de-1|WIREGUARD"]).toEqual([
+      { at: NOW - 10, ok: true },
+      { at: NOW, ok: true, kbps: 302, up: 302 },
+    ]);
+    // Nothing to stamp, or nothing measured: left as it was.
+    expect(recordUpload(h, "wifi", "fi-1", "WIREGUARD", 300)).toBe(h);
+    expect(recordUpload(h, "wifi", "de-1", "WIREGUARD", 0)).toBe(h);
+    expect(recordUpload(h, "wifi", "de-1", "WIREGUARD", Number.NaN)).toBe(h);
+  });
+
+  it("is kept within the memory's own bounds, and goes when the network is forgotten", () => {
+    let h: ConnectHistory = {};
+    for (let i = 0; i < KEEP_PER_KEY + 4; i += 1) h = passed(h, "wifi", "de-1", 300 + i, hours(20 - i));
+    expect(h["wifi|de-1|XRAY_VLESS_REALITY"]).toHaveLength(KEEP_PER_KEY);
+    expect(typicalUploadKbps(forgetNetwork(h, "wifi"), "wifi", NOW)).toBeNull();
   });
 });
