@@ -385,6 +385,16 @@ export function orderCandidates(
   // likelier. Shown to work goes first, the route's own word ahead of its
   // server's. Order only, as everything here is: every rung is dialled.
   //
+  // A working server's lead is ahead of how quickly it answered the probe
+  // and of this install's own order (`late`, `shuffled`). Where some
+  // servers carry nothing that is the point of it. Where they all carry
+  // it would be wrong -- every new device would start on whichever
+  // servers earlier customers happened to use, and the spread the seed
+  // exists for would be gone -- so the server says "works" only on a
+  // network where something is shown not to get through (isp-order.ts in
+  // the backend). On any other it says nothing of servers, and this is 0
+  // for all of them.
+  //
   // Below everything the device itself knows (a pin, a last-good, the
   // live probe, its own history and speeds) and above the fixed order.
   // With nothing from the server -- an older one, or a network it could

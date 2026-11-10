@@ -53,6 +53,34 @@ import { FAILING_SHARE, WINDOW_HOURS, WORKS_SHARE } from "./isp-signal";
  * is largely national with per-ISP differences, so the country is a
  * better guess than a constant and a worse one than the ISP.
  *
+ * A country's verdict is a claim about ISPs nobody has tried the server
+ * on, so it has to rest on several of them, not on several customers of
+ * one (`MIN_COUNTRY_NETWORKS`).
+ *
+ * # Where everything gets through
+ *
+ * On a network with no filtering every server that three customers have
+ * used "works", which tells it from the other servers by nothing but who
+ * happened to use it. The apps dial what works ahead of what nobody can
+ * speak for, and stop at the first rung that carries: so every new
+ * device there would start on the servers earlier customers used -- a
+ * far one somebody picked on purpose included -- and a nearer or a newly
+ * added server would never be dialled automatically, and so never
+ * collect the three customers to compete. Spreading new devices across
+ * servers is what the apps do when told nothing.
+ *
+ * So a server is called working only on a network where something -- a
+ * server or a protocol, at the ISP or across its country -- is shown NOT
+ * to get through; elsewhere nothing is said of servers at all. That is
+ * read off the whole window, not off the failing verdicts still fresh:
+ * those lapse within two days of everyone having learnt to avoid what
+ * fails, which is exactly when the working servers' lead is doing its
+ * job. Once the window holds no such failures either, new devices are
+ * spread again, and the ones that meet a blocked server bring it back.
+ *
+ * What lands is said everywhere: it picks no server, and among
+ * protocols that land the apps' fixed order still decides.
+ *
  * # What it is not
  *
  * Not shown to anyone, and never about fewer than
@@ -78,6 +106,22 @@ export const ORDER_WINDOW_HOURS = 7 * 24;
  * one person with a second account. */
 export const MIN_ORDER_CUSTOMERS = 3;
 
+/** The fewest networks a verdict for a whole country has to rest on --
+ * again on the side it claims: customers it carried for on three
+ * networks, or failed for on three.
+ *
+ * Which server works goes by the ISP: of the servers measured, two
+ * carried data on almost every filtered ISP and the others on one or two
+ * and nothing on the rest. So customers on one network say what that
+ * network does, and three of them on one ISP must not make a verdict for
+ * every other ISP in the country nobody has tried the server on -- a
+ * server that carries on one would be dialled first on all of them, and
+ * an office or campus that blocks one would send it last for a country.
+ * Three because "one or two" is exactly what has to be ruled out. It
+ * also means three accounts on one network cannot set a country's order;
+ * the reports are the apps' own word. */
+export const MIN_COUNTRY_NETWORKS = 3;
+
 /** How recent the newest failure behind a "fails" verdict has to be.
  *
  * A negative verdict sends a server or protocol to the back of the
@@ -102,7 +146,8 @@ export interface IspHint {
    * hints only while it is still on this one. */
   asn: number;
   /** How the route's server has done for customers on that network.
-   * Absent when too few tried it to say. */
+   * Absent when too few tried it to say -- and "works" is absent on a
+   * network where nothing is shown to fail. */
   server?: ServerVerdict;
   /** Whether the route's protocol lands there, on servers that work
    * there. Absent when too few tried it to say. */
@@ -148,8 +193,11 @@ export function protocolKey(kind: RouteKind): string {
 
 /** One customer's standing on one server or protocol. */
 interface Side {
-  /** Any counted dial of theirs carried traffic. */
-  carried: boolean;
+  /** The networks a counted dial of theirs carried traffic on. Any at
+   * all, and it carried for them. */
+  carriedOn: Set<number>;
+  /** The networks a counted dial of theirs failed on. */
+  failedOn: Set<number>;
   /** Their newest counted failure, epoch ms; 0 for none. */
   failedAt: number;
 }
@@ -162,14 +210,22 @@ interface Evidence {
   protocols: Tally;
 }
 
-function note(tally: Tally, key: string, customerId: string, carried: boolean, at: number): void {
+function sideOf(tally: Tally, key: string, customerId: string): Side {
   let customers = tally.get(key);
   if (!customers) tally.set(key, (customers = new Map<string, Side>()));
-  const held = customers.get(customerId) ?? { carried: false, failedAt: 0 };
-  customers.set(customerId, {
-    carried: held.carried || carried,
-    failedAt: carried ? held.failedAt : Math.max(held.failedAt, at),
-  });
+  let side = customers.get(customerId);
+  if (!side) customers.set(customerId, (side = { carriedOn: new Set(), failedOn: new Set(), failedAt: 0 }));
+  return side;
+}
+
+function note(tally: Tally, key: string, dial: OrderDial): void {
+  const side = sideOf(tally, key, dial.customerId);
+  if (dial.carried) {
+    side.carriedOn.add(dial.asn);
+  } else {
+    side.failedOn.add(dial.asn);
+    side.failedAt = Math.max(side.failedAt, dial.at);
+  }
 }
 
 /** One network's dials as evidence about servers and protocols, by the
@@ -186,19 +242,22 @@ function evidenceOn(dials: Array<OrderDial & { kind: RouteKind }>): Evidence {
   for (const dial of dials) {
     const server = serverKey(dial.kind);
     const protocol = protocolKey(dial.kind);
-    if (dial.carried || carriedBy.has(protocol)) note(evidence.servers, server, dial.customerId, dial.carried, dial.at);
-    if (dial.carried || carriedOn.has(server)) note(evidence.protocols, protocol, dial.customerId, dial.carried, dial.at);
+    if (dial.carried || carriedBy.has(protocol)) note(evidence.servers, server, dial);
+    if (dial.carried || carriedOn.has(server)) note(evidence.protocols, protocol, dial);
   }
   return evidence;
 }
 
 /** Adds one network's tally into a wider one. A customer seen on two
- * networks is still one customer: carried anywhere is carried. */
+ * networks is still one customer: carried anywhere is carried. Which
+ * networks each was seen on is kept (`MIN_COUNTRY_NETWORKS`). */
 function merge(into: Tally, from: Tally): void {
   for (const [key, customers] of from) {
     for (const [customerId, side] of customers) {
-      if (side.carried) note(into, key, customerId, true, 0);
-      if (side.failedAt > 0) note(into, key, customerId, false, side.failedAt);
+      const held = sideOf(into, key, customerId);
+      for (const asn of side.carriedOn) held.carriedOn.add(asn);
+      for (const asn of side.failedOn) held.failedOn.add(asn);
+      held.failedAt = Math.max(held.failedAt, side.failedAt);
     }
   }
 }
@@ -210,34 +269,57 @@ interface Count {
   carried: number;
   /** The newest failure among the ones it did not, epoch ms; 0 for none. */
   lastFailedAt: number;
+  /** How many networks it carried on, for those it carried for. */
+  carriedNetworks: number;
+  /** How many networks it failed on, for those it never carried for. */
+  failedNetworks: number;
 }
 
-const NOBODY: Count = { tried: 0, carried: 0, lastFailedAt: 0 };
+const NOBODY: Count = { tried: 0, carried: 0, lastFailedAt: 0, carriedNetworks: 0, failedNetworks: 0 };
 
 function count(customers: Map<string, Side> | undefined): Count {
   if (!customers) return NOBODY;
   let carried = 0;
   let lastFailedAt = 0;
+  const carriedOn = new Set<number>();
+  const failedOn = new Set<number>();
   for (const side of customers.values()) {
-    if (side.carried) carried += 1;
-    else lastFailedAt = Math.max(lastFailedAt, side.failedAt);
+    if (side.carriedOn.size > 0) {
+      carried += 1;
+      for (const asn of side.carriedOn) carriedOn.add(asn);
+    } else {
+      lastFailedAt = Math.max(lastFailedAt, side.failedAt);
+      for (const asn of side.failedOn) failedOn.add(asn);
+    }
   }
-  return { tried: customers.size, carried, lastFailedAt };
+  return {
+    tried: customers.size,
+    carried,
+    lastFailedAt,
+    carriedNetworks: carriedOn.size,
+    failedNetworks: failedOn.size,
+  };
 }
 
-/** What one level's count says by itself, if anything: the tag's own
- * shares, over fewer people. */
-function verdictOf(c: Count, now: number): "good" | "bad" | null {
-  if (c.carried >= MIN_ORDER_CUSTOMERS && c.carried >= WORKS_SHARE * c.tried) return "good";
+/** What one level's count shows, however old its failures: the tag's own
+ * shares, over fewer people, on at least `networks` networks -- one for
+ * an ISP, which is one, and `MIN_COUNTRY_NETWORKS` for a country. */
+function shownBy(c: Count, networks: number): "good" | "bad" | null {
+  if (c.carried >= MIN_ORDER_CUSTOMERS && c.carriedNetworks >= networks && c.carried >= WORKS_SHARE * c.tried) {
+    return "good";
+  }
   const failed = c.tried - c.carried;
-  if (
-    failed >= MIN_ORDER_CUSTOMERS &&
-    c.carried <= FAILING_SHARE * c.tried &&
-    c.lastFailedAt >= now - FAILS_FRESH_HOURS * 3_600_000
-  ) {
+  if (failed >= MIN_ORDER_CUSTOMERS && c.failedNetworks >= networks && c.carried <= FAILING_SHARE * c.tried) {
     return "bad";
   }
   return null;
+}
+
+/** What one level's count says by itself, if anything: what it shows,
+ * less a failing verdict nobody has renewed (`FAILS_FRESH_HOURS`). */
+function verdictOf(c: Count, now: number, networks: number): "good" | "bad" | null {
+  const shown = shownBy(c, networks);
+  return shown === "bad" && c.lastFailedAt < now - FAILS_FRESH_HOURS * 3_600_000 ? null : shown;
 }
 
 /** The ISP's own verdict where it has one; otherwise the country's,
@@ -245,12 +327,22 @@ function verdictOf(c: Count, now: number): "good" | "bad" | null {
  * that works for most of a country and failed for the one customer who
  * tried it on this ISP is not known to work here, and the reverse. */
 export function decide(isp: Count, country: Count | null, now: number): "good" | "bad" | null {
-  const own = verdictOf(isp, now);
+  const own = verdictOf(isp, now, 1);
   if (own !== null || country === null) return own;
-  const wide = verdictOf(country, now);
+  const wide = verdictOf(country, now, MIN_COUNTRY_NETWORKS);
   if (wide === "good") return isp.carried >= WORKS_SHARE * isp.tried ? "good" : null;
   if (wide === "bad") return isp.carried <= FAILING_SHARE * isp.tried ? "bad" : null;
   return null;
+}
+
+/** Whether anything at one level -- a server or a protocol -- is shown
+ * not to get through, inside the window. Fresh or not: this is asked
+ * about the network, not about that server or protocol (`networkOrder`). */
+function showsFailing(evidence: Evidence, networks: number): boolean {
+  for (const tally of [evidence.servers, evidence.protocols]) {
+    for (const customers of tally.values()) if (shownBy(count(customers), networks) === "bad") return true;
+  }
+  return false;
 }
 
 export interface NetworkOrder {
@@ -295,10 +387,15 @@ export function networkOrder(
     }
   }
 
+  // A server is called working only where something is shown not to get
+  // through: "Where everything gets through", at the top of this file.
+  const filtered = showsFailing(isp, 1) || (country !== null && showsFailing(country, MIN_COUNTRY_NETWORKS));
+
   const servers = new Map<string, ServerVerdict>();
   for (const key of new Set([...isp.servers.keys(), ...(country?.servers.keys() ?? [])])) {
     const verdict = decide(count(isp.servers.get(key)), country && count(country.servers.get(key)), now);
-    if (verdict) servers.set(key, verdict === "good" ? "works" : "fails");
+    if (verdict === "bad") servers.set(key, "fails");
+    else if (verdict === "good" && filtered) servers.set(key, "works");
   }
   const protocols = new Map<string, ProtocolVerdict>();
   for (const key of new Set([...isp.protocols.keys(), ...(country?.protocols.keys() ?? [])])) {

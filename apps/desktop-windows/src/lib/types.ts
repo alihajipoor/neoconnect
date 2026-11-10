@@ -237,7 +237,9 @@ export interface IspHint {
    * read only while the device is still on this one. */
   asn: number;
   /** Whether other people on that network got traffic through this
-   * route's server, on any protocol. */
+   * route's server, on any protocol. "works" is said only on a network
+   * where something is shown not to get through: where everything does,
+   * it would tell servers apart by nothing but who happened to use them. */
   server?: "works" | "fails";
   /** Whether this route's protocol gets through there, on servers that
    * work there. */

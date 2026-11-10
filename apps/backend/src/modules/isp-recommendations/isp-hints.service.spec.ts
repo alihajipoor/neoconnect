@@ -8,11 +8,14 @@ import { MIN_ORDER_CUSTOMERS, ORDER_WINDOW_HOURS } from "./isp-order";
 
 const HOUR = 3_600_000;
 const NOW = Date.UTC(2026, 10, 10, 12, 0, 0);
-/** Two ISPs registered in one country, one in another, and one the table
- * does not know. */
+/** Four ISPs registered in one country -- the caller's and three more,
+ * which is how many a verdict for the country has to rest on
+ * (`MIN_COUNTRY_NETWORKS`) -- one in another, and one the table does not
+ * know. */
 const ISP = 64500;
 const NEIGHBOUR = 64501;
 const ABROAD = 64502;
+const NEIGHBOURS = [NEIGHBOUR, 64503, 64504];
 const UNPLACED = 64999;
 
 const ROUTES = [
@@ -46,6 +49,8 @@ function build(rows: ReturnType<typeof row>[], networks: number[] = [ISP, NEIGHB
       "198.51.100.0\t198.51.100.127\t64500\tIR\tEXAMPLE-ISP",
       "198.51.100.128\t198.51.100.255\t64501\tIR\tEXAMPLE-NEIGHBOUR",
       "203.0.113.0\t203.0.113.255\t64502\tDE\tEXAMPLE-ABROAD",
+      "192.0.2.0\t192.0.2.127\t64503\tIR\tEXAMPLE-THIRD",
+      "192.0.2.128\t192.0.2.255\t64504\tIR\tEXAMPLE-FOURTH",
     ]),
   );
   const groupBy = jest.fn().mockResolvedValue(networks.map((asn) => ({ asn })));
@@ -110,10 +115,26 @@ describe("IspRecommendationsService.hintsFor", () => {
 
   /** Too few customers on the caller's own ISP: the country's stand in. */
   it("falls back to the caller's country where its own network has too little", async () => {
-    const { service } = build(each(NEIGHBOUR, "n"));
+    const { service } = build(
+      NEIGHBOURS.flatMap((asn) => each(asn, `on${asn}-`)),
+      [ISP, ...NEIGHBOURS, ABROAD],
+    );
     const hints = await service.hintsFor(ISP, NOW);
     expect(hints.get("s1-reality")).toEqual({ asn: ISP, server: "works", protocol: "lands" });
     expect(hints.get("s3-reality")).toEqual({ asn: ISP, server: "fails", protocol: "lands" });
+  });
+
+  /** Which server works goes by the ISP: one neighbouring network's
+   * customers do not speak for the country. */
+  it("takes nothing from a single other network in the country", async () => {
+    const { service } = build(each(NEIGHBOUR, "n"));
+    for (const hint of (await service.hintsFor(ISP, NOW)).values()) expect(hint).toEqual({ asn: ISP });
+    // Its own customers are told what they saw.
+    expect((await service.hintsFor(NEIGHBOUR, NOW)).get("s3-reality")).toEqual({
+      asn: NEIGHBOUR,
+      server: "fails",
+      protocol: "lands",
+    });
   });
 
   it("takes nothing from another country's networks", async () => {
