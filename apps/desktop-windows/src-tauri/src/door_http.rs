@@ -38,6 +38,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -69,13 +70,15 @@ pub enum DoorError {
     PinMismatch,
     /// The TLS handshake failed for any other reason. Nothing was sent.
     Tls,
-    /// No connection within the connect timeout, handshake included.
+    /// No connection within the connect timeout, handshake included, or
+    /// within the caller's time where that is the shorter (`unsent`).
     /// Nothing was sent.
     ConnectTimeout,
     /// The connection was refused, reset or unroutable before the
     /// handshake finished. Nothing was sent.
     Connect,
-    /// No complete answer within the caller's time.
+    /// No complete answer within the caller's time, from a server whose
+    /// handshake had got as far as its certificate.
     Timeout,
     /// The connection was cut after the request went out.
     Network,
@@ -413,10 +416,11 @@ impl reqwest::dns::Resolve for ToTheDoor {
 /// connection to a different socket behind it, and nothing has checked
 /// that one. The server name is sent only when the door has one. No
 /// session resumption: a resumed session skips the certificate, and with
-/// it the pin.
-fn door_tls_config(door: &Door) -> ClientConfig {
+/// it the pin -- and the count in `handshakes`, which is of the times a
+/// server's certificate was looked at (`unsent`).
+fn door_tls_config(door: &Door, handshakes: Arc<AtomicU64>) -> ClientConfig {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let verifier = pin_verifier(door.pins.clone(), &provider, Arc::default());
+    let verifier = pin_verifier(door.pins.clone(), &provider, handshakes);
     let mut config = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .expect("ring supports the default TLS versions")
@@ -429,9 +433,9 @@ fn door_tls_config(door: &Door) -> ClientConfig {
     config
 }
 
-fn door_client(door: &Door) -> Result<reqwest::Client, DoorError> {
+fn door_client(door: &Door, handshakes: Arc<AtomicU64>) -> Result<reqwest::Client, DoorError> {
     reqwest::Client::builder()
-        .use_preconfigured_tls(door_tls_config(door))
+        .use_preconfigured_tls(door_tls_config(door, handshakes))
         .dns_resolver(Arc::new(ToTheDoor(SocketAddr::V4(door.address))))
         // A proxy would be handed the server's address, and a name to
         // look up for itself.
@@ -459,7 +463,8 @@ fn door_client(door: &Door) -> Result<reqwest::Client, DoorError> {
 }
 
 async fn exchange(call: Call) -> Result<RelayResponse, DoorError> {
-    let client = door_client(&call.door)?;
+    let handshakes = Arc::new(AtomicU64::new(0));
+    let client = door_client(&call.door, Arc::clone(&handshakes))?;
     let mut request = client
         .request(call.method, call.url)
         .headers(call.headers)
@@ -471,8 +476,31 @@ async fn exchange(call: Call) -> Result<RelayResponse, DoorError> {
     if let Some(body) = call.body {
         request = request.body(body);
     }
-    let response = request.send().await.map_err(|err| classify(&err))?;
+    let response = request.send().await.map_err(|err| unsent(classify(&err), &handshakes))?;
     Ok(read_response_within(response, MAX_RESPONSE_BODY).await?)
+}
+
+/// `err`, or `ConnectTimeout` in place of a `Timeout` that came before
+/// the server's certificate was ever looked at.
+///
+/// The caller's time can be shorter than the connect timeout: the last of
+/// three doors is given what the first two left of twelve seconds. Then it
+/// is the call's own time that ends a connection still being made, and
+/// that reads as `Timeout` -- the request may have gone out -- when not a
+/// byte of it had. A write would end there, counted as taken by a server
+/// that was never connected to.
+///
+/// The count settles it. The verifier is asked in every handshake, since
+/// no session is resumed, and before the handshake can finish; nothing of
+/// the request is written until it has finished; and this client makes
+/// the one connection. So a count still at zero is a handshake that did
+/// not finish, and a request that did not leave this machine. A count of
+/// one says only that it may have.
+fn unsent(err: DoorError, handshakes: &AtomicU64) -> DoorError {
+    match err {
+        DoorError::Timeout if handshakes.load(Ordering::SeqCst) == 0 => DoorError::ConnectTimeout,
+        other => other,
+    }
 }
 
 /// Which `DoorError` a failure to send is: the relay's reading of it
@@ -548,6 +576,22 @@ mod tests {
         headers: &[(&str, &str)],
         body: Option<&str>,
     ) -> Result<RelayResponse, DoorError> {
+        ask_within(host, port, pins, sni, method, path, headers, body, 5_000)
+    }
+
+    /// `ask`, with the caller's time given.
+    #[allow(clippy::too_many_arguments)]
+    fn ask_within(
+        host: &str,
+        port: u16,
+        pins: Vec<String>,
+        sni: Option<&str>,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
+        timeout_ms: u64,
+    ) -> Result<RelayResponse, DoorError> {
         tauri::async_runtime::block_on(door_request(
             host.to_string(),
             port,
@@ -557,7 +601,7 @@ mod tests {
             path.to_string(),
             Some(header_set(headers)),
             body.map(str::to_string),
-            5_000,
+            timeout_ms,
         ))
     }
 
@@ -708,6 +752,53 @@ mod tests {
         let seen = door.finish();
         assert_eq!(answer, Err(DoorError::Network));
         assert!(!DoorError::Network.undelivered());
+        assert_eq!(seen.requests.len(), 1);
+    }
+
+    /// The caller's time can be shorter than the connect timeout: the
+    /// last of three doors is given what the first two left. Then it is
+    /// the call's own time that ends a connection still being made -- here
+    /// to a server that takes the connection and never says a word. No
+    /// byte of the request was sent, and the error has to say so: called
+    /// `Timeout`, a write would end there, counted as taken by a server
+    /// that never finished its handshake, and be offered to nobody else.
+    #[test]
+    fn time_that_runs_out_before_the_handshake_is_known_not_to_have_carried_the_request() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let started = std::time::Instant::now();
+        let answer =
+            ask_within("127.0.0.1", port, vec![pin_of(&[6; 32])], Some(NAME), "POST", "/customer/vouchers/redeem", &[], Some("{}"), 500);
+        let took = started.elapsed();
+        assert_eq!(answer, Err(DoorError::ConnectTimeout));
+        assert!(DoorError::ConnectTimeout.undelivered());
+        // The caller's time, not the connect timeout.
+        assert!(took < CONNECT_TIMEOUT - Duration::from_secs(1), "{took:?}");
+        drop(listener);
+    }
+
+    /// The server finished the handshake, took the request, and said
+    /// nothing in the caller's time. The request went out, whatever
+    /// became of it, so this stays the failure a write is not sent again
+    /// after.
+    #[test]
+    fn time_that_runs_out_after_the_request_went_out_is_not_undelivered() {
+        // Answers the request with nothing, then waits for another.
+        let door = TestDoor::start(vec![vec![Step::Answer(Vec::new()), Step::HangUp]]);
+        let answer = ask_within(
+            "127.0.0.1",
+            door.port,
+            vec![door.pin()],
+            Some(NAME),
+            "POST",
+            "/customer/vouchers/redeem",
+            &[],
+            Some("{}"),
+            1_500,
+        );
+        let seen = door.finish();
+        assert_eq!(answer, Err(DoorError::Timeout));
+        assert!(!DoorError::Timeout.undelivered());
         assert_eq!(seen.requests.len(), 1);
     }
 
