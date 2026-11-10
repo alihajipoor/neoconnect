@@ -9,7 +9,12 @@ import { CurrentAdmin } from "../../common/decorators/current-admin.decorator";
 import { AuthenticatedAdmin } from "../auth/types";
 import { listWindow, sendPage } from "../../common/pagination";
 import { ResellersService } from "./resellers.service";
-import { GenerateVoucherDto, ResendVoucherDto, SetBalanceDto } from "./dto/reseller.dto";
+import {
+  ActivateForCustomerDto,
+  GenerateVoucherDto,
+  ResendVoucherDto,
+  SetBalanceDto,
+} from "./dto/reseller.dto";
 
 /**
  * What a reseller can do, and nothing else.
@@ -55,6 +60,17 @@ export class ResellerController {
   @ApiOperation({ summary: "Mint a code, spending one token of that plan" })
   generate(@CurrentAdmin() admin: AuthenticatedAdmin, @Body() dto: GenerateVoucherDto) {
     return this.resellers.generate(admin.sub, dto.planId, dto.recipientEmail);
+  }
+
+  /** For the customer who cannot redeem a code themselves. Answers 404
+   * for an address with no account, which tells a reseller whether one
+   * exists -- accepted by the owner, since this cannot work otherwise.
+   * Logged like every other change an admin makes, by
+   * AdminAuditInterceptor. */
+  @Post("activate")
+  @ApiOperation({ summary: "Put a plan straight onto a customer's account, spending one token" })
+  activate(@CurrentAdmin() admin: AuthenticatedAdmin, @Body() dto: ActivateForCustomerDto) {
+    return this.resellers.activate(admin.sub, dto.planId, dto.customerEmail);
   }
 
   @Post("vouchers/:id/resend")

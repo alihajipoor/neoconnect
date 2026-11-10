@@ -79,7 +79,7 @@ describe("a reseller and a retired plan", () => {
       resellerTokenBalance: { findMany: jest.fn(async () => [{ planId: "plan-old", balance: 3 }]) },
       $transaction: jest.fn(async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx)),
     };
-    const service = new ResellersService(prisma as never, {} as never, {} as never, {} as never);
+    const service = new ResellersService(prisma as never, {} as never, {} as never, {} as never, {} as never);
     return { service, prisma, tx };
   }
 

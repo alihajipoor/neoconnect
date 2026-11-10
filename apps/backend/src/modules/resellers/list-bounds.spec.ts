@@ -47,7 +47,7 @@ describe("GET /reseller/vouchers bounds", () => {
       },
       $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
     };
-    service = new ResellersService(prisma as any, {} as any, {} as any, {} as any);
+    service = new ResellersService(prisma as any, {} as any, {} as any, {} as any, {} as any);
   });
 
   function argsOf() {

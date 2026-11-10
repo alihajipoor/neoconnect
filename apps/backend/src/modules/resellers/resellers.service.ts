@@ -1,18 +1,22 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
+  HttpException,
   Injectable,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { AdminRole, Prisma } from "@prisma/client";
+import { AdminRole, CustomerStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
 import { AppLinksService } from "../app-links/app-links.service";
 import { resellerVoucherEmail, toLocale } from "../email/templates";
 import { randomCode } from "../vouchers/voucher-code";
+import { VouchersService } from "../vouchers/vouchers.service";
 
 /** Where a recipient goes to redeem. The portal reads ?voucher= and
  * takes them to the plans screen whether or not they already have an
@@ -42,6 +46,32 @@ const RESELLER_VOUCHER_FIELDS = {
   redemptions: { select: { redeemedAt: true }, take: 1 },
 } satisfies Prisma.VoucherSelect;
 
+/** How long a second identical activation is refused for. Long enough
+ * for a double click, a double submit or an impatient retry; short
+ * enough that a reseller who really does mean two is not kept waiting. */
+export const REPEAT_WINDOW_MS = 30_000;
+
+/** The note on a code `activate` minted. Operator-facing like every
+ * other note, and also how a repeat of the same activation is
+ * recognised -- no code `generate` mints carries it. */
+function activationNote(email: string): string {
+  return `Activated by reseller for ${email}`;
+}
+
+/** The machine-readable `code` of a refusal that carries one. */
+function codeOf(err: HttpException): unknown {
+  const body = err.getResponse();
+  return typeof body === "object" && body !== null ? (body as { code?: unknown }).code : undefined;
+}
+
+/** Why redeem failed, as a sentence a reseller may be shown. Only a
+ * refusal written to be shown is passed on: anything else is a fault
+ * whose own text may quote a query. */
+function reasonOf(err: unknown): string {
+  if (!(err instanceof HttpException)) return "Something went wrong on our side.";
+  return /[.!?]$/.test(err.message) ? err.message : `${err.message}.`;
+}
+
 /** One row of a reseller's history, as the panel reads it. */
 export interface ResellerVoucherRow {
   id: string;
@@ -65,6 +95,7 @@ export class ResellersService {
     private readonly email: EmailService,
     private readonly appLinks: AppLinksService,
     private readonly config: ConfigService,
+    private readonly vouchers: VouchersService,
   ) {}
 
   // ----------------------------------------------------------- balances
@@ -120,11 +151,42 @@ export class ResellersService {
       );
     }
 
-    const voucher = await this.prisma.$transaction(async (tx) => {
+    const voucher = await this.mint(adminUserId, plan, {
+      recipientEmail: recipientEmail ?? null,
+      note: recipientEmail ? `Reseller code for ${recipientEmail}` : "Reseller code",
+    });
+
+    let emailed = false;
+    if (recipientEmail) {
+      emailed = await this.sendVoucherEmail(voucher.code, plan.name, recipientEmail, null);
+    }
+
+    return { ...voucher, emailed };
+  }
+
+  /** The spend and the code, in one transaction: what `generate` and
+   * `activate` both mean by "mint".
+   *
+   * `refuse` runs inside that transaction, after the spend and before
+   * anything is created, and refuses by throwing -- which rolls the
+   * spend back. */
+  private mint(
+    adminUserId: string,
+    plan: { id: string; name: string },
+    fields: { recipientEmail: string | null; note: string },
+    refuse?: (tx: Prisma.TransactionClient) => Promise<void>,
+  ) {
+    return this.prisma.$transaction(async (tx) => {
       const spent = await tx.resellerTokenBalance.updateMany({
-        where: { adminUserId, planId, balance: { gt: 0 } },
+        where: { adminUserId, planId: plan.id, balance: { gt: 0 } },
         data: { balance: { decrement: 1 } },
       });
+
+      // After the spend, not before it: see refuseRepeat. And before the
+      // balance is judged, so the second of two submissions against a
+      // last token is told it is a repeat rather than that the tokens
+      // ran out.
+      if (refuse) await refuse(tx);
 
       if (spent.count === 0) {
         throw new BadRequestException(
@@ -144,14 +206,14 @@ export class ResellersService {
         return tx.voucher.create({
           data: {
             code,
-            planId,
+            planId: plan.id,
             // One customer, one use. A reseller's code is sold to a
             // named person, so an unlimited-use code would be a leak
             // rather than a feature.
             maxRedemptions: 1,
             issuedByAdminId: adminUserId,
-            recipientEmail: recipientEmail ?? null,
-            note: recipientEmail ? `Reseller code for ${recipientEmail}` : "Reseller code",
+            recipientEmail: fields.recipientEmail,
+            note: fields.note,
           },
           include: { plan: { select: { id: true, name: true } } },
         });
@@ -160,13 +222,203 @@ export class ResellersService {
       // Throwing rolls back the decrement, so the token is not lost.
       throw new BadRequestException("Could not generate a unique code, please try again");
     });
+  }
 
-    let emailed = false;
-    if (recipientEmail) {
-      emailed = await this.sendVoucherEmail(voucher.code, plan.name, recipientEmail, null);
+  // --------------------------------------------------------- activation
+
+  /**
+   * Put a plan straight onto a customer's account, spending one token.
+   *
+   * Exactly "mint one code and redeem it for that customer", and built
+   * that way on purpose: the code is redeemed through
+   * VouchersService.redeem, the same call the customer's own redeem
+   * route makes, so whatever that path enforces and provisions applies
+   * here without a second copy of it. It exists because a customer
+   * cannot always redeem a code themselves -- the App Store build has no
+   * screen to type one into.
+   *
+   * What the customer's route gets from its session, this has to ask
+   * for, because nobody is signed in as the customer here:
+   *
+   *   - the account must be ACTIVE. Sign-in refuses a disabled account,
+   *     so one never reaches redeem; redeem itself does not look.
+   *   - an account whose address is unconfirmed is `restricted`, as it is
+   *     on the customer's route: such an account either cannot sign in at
+   *     all or is limited to single-use codes for a relay-only plan
+   *     (docs/relay-last-resort.md, F1). redeem enforces that; this only
+   *     tells it which kind of account it has.
+   *
+   * All or nothing, without one transaction. redeem writes through the
+   * shared client, creates the subscription and then talks to the nodes,
+   * and none of that can run inside a transaction of ours. So the code is
+   * minted first (the spend and the insert together, as `generate` does),
+   * redeemed, and if redeem refuses, taken back through `revoke` -- which
+   * deletes it and refunds the token together. A crash between those
+   * steps leaves an ordinary unused code in the reseller's own list,
+   * addressed to that customer, which they can delete for the refund: a
+   * token is never gone without something to show for it, and never
+   * spent twice.
+   *
+   * The one case this cannot undo is redeem failing after it has claimed
+   * the code -- the subscription could not be created, or was created and
+   * could not be set up on the servers. That is redeem's own rule (a
+   * claimed code stays spent, with the record of who it went to), revoke
+   * rightly refuses a redeemed code, and the reseller is told exactly
+   * that instead of being told nothing happened.
+   */
+  async activate(adminUserId: string, planId: string, customerEmail: string) {
+    // Already done by the DTO; repeated because the lookup below is an
+    // exact match and this method does not know who called it.
+    const email = customerEmail.trim().toLowerCase();
+
+    const plan = await this.prisma.subscriptionPlan.findUnique({
+      where: { id: planId },
+      select: { id: true, name: true, isActive: true },
+    });
+    if (!plan) throw new NotFoundException("That plan does not exist");
+    if (!plan.isActive) {
+      throw new BadRequestException(
+        `${plan.name} is no longer offered, so it cannot be activated. Your ${plan.name} tokens are unchanged.`,
+      );
     }
 
-    return { ...voucher, emailed };
+    const customer = await this.prisma.customer.findUnique({
+      where: { email },
+      select: { id: true, status: true, emailVerifiedAt: true },
+    });
+    if (!customer) throw new NotFoundException("No account uses that email address");
+    if (customer.status !== CustomerStatus.ACTIVE) {
+      throw new BadRequestException(
+        `The account for ${email} is disabled, so a plan cannot be activated on it. Your ${plan.name} tokens are unchanged.`,
+      );
+    }
+
+    const note = activationNote(email);
+    const voucher = await this.mint(adminUserId, plan, { recipientEmail: email, note }, (tx) =>
+      this.refuseRepeat(tx, adminUserId, plan, email, note),
+    );
+
+    let redeemed: Awaited<ReturnType<VouchersService["redeem"]>>;
+    try {
+      redeemed = await this.vouchers.redeem(customer.id, voucher.code, {
+        restricted: !customer.emailVerifiedAt,
+      });
+    } catch (refusal) {
+      const reason = reasonOf(refusal);
+      const outcome = await this.takeBack(adminUserId, voucher.id);
+
+      if (outcome === "claimed") {
+        this.logger.error(
+          `Reseller ${adminUserId}: activation of plan ${plan.id} on customer ${customer.id} failed after code ${voucher.id} was claimed: ${String(refusal)}`,
+        );
+        throw new InternalServerErrorException(
+          `${plan.name} could not be fully set up for ${email}: ${reason} ` +
+            `The code made for it was used, so one ${plan.name} token was spent and it shows as redeemed in your list. ` +
+            `Do not try again -- ask the operator to check this account.`,
+        );
+      }
+      if (outcome === "left") {
+        throw new InternalServerErrorException(
+          `${plan.name} was not activated for ${email}: ${reason} ` +
+            `The code made for it could not be removed just now. It is in your list as unused -- delete it there to get your token back.`,
+        );
+      }
+
+      // Refused and undone. redeem's wording for the unconfirmed-address
+      // rule is written to the customer ("your email", "this code"); the
+      // reseller is somebody else and never saw a code.
+      if (refusal instanceof ForbiddenException && codeOf(refusal) === "VOUCHER_NOT_ALLOWED") {
+        throw new BadRequestException(
+          `The owner of ${email} has not confirmed that address yet, and until they do ${plan.name} cannot be put on the account. ` +
+            `Ask them to confirm it and try again. Your ${plan.name} tokens are unchanged.`,
+        );
+      }
+      // Anything else redeem refused with keeps its status and its
+      // reason, and gains the two things the reseller needs to know.
+      const status = refusal instanceof HttpException ? refusal.getStatus() : 500;
+      if (status >= 500) {
+        this.logger.error(
+          `Reseller ${adminUserId}: activation of plan ${plan.id} on customer ${customer.id} failed and was undone: ${String(refusal)}`,
+        );
+      }
+      throw new HttpException(
+        `${plan.name} was not activated for ${email}: ${reason} Your ${plan.name} tokens are unchanged.`,
+        status,
+      );
+    }
+
+    // Named fields only. redeem also returns the connection credentials
+    // it provisioned, which belong to the customer and to nobody else.
+    return {
+      activated: true,
+      plan: { id: plan.id, name: plan.name },
+      customerEmail: email,
+      voucherId: voucher.id,
+      code: voucher.code,
+      subscriptionId: redeemed.subscription.id,
+      expiresAt: redeemed.subscription.expireAt,
+    };
+  }
+
+  /** Refuses a second identical activation -- same reseller, same plan,
+   * same customer -- inside `REPEAT_WINDOW_MS` of the first. A form that
+   * submits twice must not spend twice.
+   *
+   * The first one's code is the record: it carries the reseller, the
+   * plan, the address and a note only `activate` writes, and a refused
+   * activation deletes its code, so what is found here either went
+   * through or is still going.
+   *
+   * Run inside the mint transaction and after the spend, which is what
+   * makes it hold for two requests at once and not only for one after
+   * the other. Both spend from the same balance row, so the second waits
+   * on the first's row lock until it commits, and its read here -- a new
+   * statement, under Postgres's default READ COMMITTED -- then sees the
+   * first one's code. Looking before the spend would let both look
+   * before either had written anything. */
+  private async refuseRepeat(
+    tx: Prisma.TransactionClient,
+    adminUserId: string,
+    plan: { id: string; name: string },
+    email: string,
+    note: string,
+  ) {
+    const repeat = await tx.voucher.findFirst({
+      where: {
+        issuedByAdminId: adminUserId,
+        planId: plan.id,
+        recipientEmail: email,
+        note,
+        createdAt: { gte: new Date(Date.now() - REPEAT_WINDOW_MS) },
+      },
+      select: { id: true },
+    });
+    if (repeat) {
+      // "Made", not "done": the first may still be on its way through.
+      throw new ConflictException(
+        `An activation of ${plan.name} for ${email} was already made in the last ${REPEAT_WINDOW_MS / 1000} seconds, ` +
+          `so this one was not carried out and no token was spent. If you meant to add a second one, wait a moment and try again.`,
+      );
+    }
+  }
+
+  /** Undoes the mint after redeem refused, through `revoke`, and says how
+   * that went: `refunded` (the code is gone and the token is back),
+   * `claimed` (redeem had already counted the code, so it stays spent),
+   * or `left` (unused, still in the reseller's list, still theirs to
+   * delete for the refund). Never throws. */
+  private async takeBack(adminUserId: string, voucherId: string): Promise<"refunded" | "claimed" | "left"> {
+    try {
+      await this.revoke(adminUserId, voucherId);
+      return "refunded";
+    } catch (err) {
+      const row = await this.prisma.voucher
+        .findUnique({ where: { id: voucherId }, select: { redeemedCount: true } })
+        .catch(() => null);
+      if (row && row.redeemedCount > 0) return "claimed";
+      this.logger.error(`Reseller ${adminUserId}: code ${voucherId} could not be taken back: ${String(err)}`);
+      return "left";
+    }
   }
 
   // ------------------------------------------------------------ history

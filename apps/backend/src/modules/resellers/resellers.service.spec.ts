@@ -32,6 +32,7 @@ describe("ResellersService activation links", () => {
       { sendMail } as any,
       { get: jest.fn().mockResolvedValue(websiteUrl ? { websiteUrl } : {}) } as any,
       { get: jest.fn().mockReturnValue(undefined) } as any,
+      {} as any,
     );
     return { service, sendMail, findUnique };
   }

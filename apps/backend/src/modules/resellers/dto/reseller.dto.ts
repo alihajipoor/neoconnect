@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from "@nestjs/swagger";
 import { IsEmail, IsInt, IsOptional, IsUUID, Max, Min } from "class-validator";
+import { NormalizedEmail } from "../../../common/decorators/normalized-email.decorator";
 
 export class GenerateVoucherDto {
   @IsUUID()
@@ -11,6 +12,17 @@ export class GenerateVoucherDto {
   @IsOptional()
   @IsEmail()
   recipientEmail?: string;
+}
+
+export class ActivateForCustomerDto {
+  @IsUUID()
+  planId!: string;
+
+  /** The account the plan goes onto. Trimmed and lowercased exactly as
+   * customer sign-in does it, because it is a key to look an account up
+   * by: `Ali@example.com` must find the account `ali@example.com`. */
+  @NormalizedEmail()
+  customerEmail!: string;
 }
 
 export class ResendVoucherDto {
