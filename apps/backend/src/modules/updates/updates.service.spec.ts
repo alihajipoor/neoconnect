@@ -337,4 +337,42 @@ describe("UpdatesService", () => {
       expect(summary.every((entry) => entry.version === null)).toBe(true);
     });
   });
+
+  describe("a feed longer than one page", () => {
+    // GitHub does not put each product's newest release near the top. On
+    // 2026-11-10 thirty agent and desktop releases filled the first page,
+    // every Android release sat behind them, and Android answered 503.
+    const fullPageOfDesktop = Array.from({ length: 100 }, (_, i) => ({
+      ...windowsRelease,
+      tag_name: "desktop-v0.8." + String(i),
+    }));
+    const page = (releases: unknown[]) => ({ ok: true, status: 200, json: () => Promise.resolve(releases) });
+    const byPage = (pages: Record<string, unknown>) => (url: string) => {
+      const n = new URL(String(url)).searchParams.get("page") ?? "1";
+      return Promise.resolve(pages[n] ?? page([]));
+    };
+
+    it("finds the Android release on the second page", async () => {
+      fetchMock.mockImplementation(byPage({ "1": page(fullPageOfDesktop), "2": page([androidRelease]) }));
+      const service = new UpdatesService(configWith({}));
+
+      await expect(settle(service.checkAndroid("0.0.1"))).resolves.toEqual({ status: "update", version: "0.9.25" });
+      expect(releasesCalls().map((call) => new URL(String(call[0])).searchParams.get("page"))).toEqual(["1", "2"]);
+      expect(String(releasesCalls()[0][0])).toContain("per_page=100");
+    });
+
+    it("stops at a short page", async () => {
+      const service = new UpdatesService(configWith({}));
+      await settle(service.installerUrl());
+
+      expect(releasesCalls()).toHaveLength(1);
+    });
+
+    it("does not say there is no Android release when a later page cannot be read", async () => {
+      fetchMock.mockImplementation(byPage({ "1": page(fullPageOfDesktop), "2": failWith(504) }));
+      const service = new UpdatesService(configWith({}));
+
+      await expect(settle(service.checkAndroid("0.0.1"))).resolves.toEqual({ status: "unknown" });
+    });
+  });
 });

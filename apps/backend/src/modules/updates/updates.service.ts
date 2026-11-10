@@ -68,6 +68,11 @@ const FETCH_TIMEOUT_MS = 10_000;
  * emits without adding a second to a request that is going to fail
  * anyway. */
 const FETCH_ATTEMPTS = 3;
+
+/** GitHub's largest page, and how many of them are read: 500 releases,
+ * about ten times what exists in November 2026. */
+const RELEASES_PER_PAGE = 100;
+const RELEASE_PAGES_MAX = 5;
 const RETRY_BACKOFF_MS = 250;
 
 interface GithubAsset {
@@ -306,7 +311,26 @@ export class UpdatesService {
    * answer instead of telling customers there is nothing to download.
    */
   private async fetchReleases(): Promise<GithubRelease[] | null> {
-    const url = `https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=30`;
+    // Every page, not the first one. The feed is not ordered so that each
+    // product's newest release is near the top: on 2026-11-10 the agent's
+    // and the desktop's releases filled the first 30 entries, every Android
+    // release fell off that page, and the Android download and update
+    // check answered 503 until this read them all.
+    const all: GithubRelease[] = [];
+    for (let page = 1; page <= RELEASE_PAGES_MAX; page++) {
+      const batch = await this.fetchReleasePage(page);
+      // One page unread is "we do not know": a product whose releases sit
+      // on it would otherwise look as if it had none.
+      if (batch === null) return null;
+      all.push(...batch);
+      if (batch.length < RELEASES_PER_PAGE) break;
+    }
+    return all;
+  }
+
+  /** One page of the release feed, or null if it could not be read. */
+  private async fetchReleasePage(page: number): Promise<GithubRelease[] | null> {
+    const url = `https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=${RELEASES_PER_PAGE}&page=${page}`;
 
     for (let attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++) {
       try {
