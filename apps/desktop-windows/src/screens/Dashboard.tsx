@@ -53,7 +53,7 @@ import {
   type UplinkWatch,
 } from "../lib/uplink-watch";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
-import { installSeed, orderCandidates, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
+import { installSeed, orderCandidates, ispHintsOf, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import {
   movedLately,
   recordAttempt,
@@ -3791,6 +3791,15 @@ export function Dashboard({
       const replyMs: Record<string, number> = {};
       const reachability = await probeCandidates(dialable, replyMs).catch(() => ({}));
 
+      // Which network the route list's word on other people's experience
+      // is read against: the one the server last placed this device on.
+      // Not after the way out has changed with no reading since
+      // (`noteRoam`) -- the list in hand is then about a network this may
+      // no longer be, and nothing of it orders the pass until a reading
+      // says which one this is.
+      const placed = currentNetwork();
+      const movedSince = netFresh.roamedAt !== null && (placed === null || placed.at < netFresh.roamedAt);
+
       let candidates = orderCandidates(dialable, {
         // The plan in use leads; a credential the server has switched off
         // -- an expired plan's, still listed beside the one bought after it
@@ -3807,10 +3816,14 @@ export function Dashboard({
         network: networkId,
         reachability,
         preferredRouteId: null,
-        // What others on this network got through on. A tie-break only,
-        // and only while this device has no history here -- the first
-        // run, which is when a wrong guess makes people quit.
-        ispTags: ispTagsOf(routes),
+        // What others on this network got through on: a tie-break, for
+        // the routes this device has no results of its own for here --
+        // all of them on a first run, which is when a wrong guess makes
+        // people quit.
+        ispTags: ispTagsOf(routes, placed?.asn ?? null),
+        // And what they saw of each route's server and of its protocol,
+        // which far more of them tried than any one route.
+        ispHints: movedSince ? {} : ispHintsOf(routes, placed?.asn ?? null),
         // Then the quick answers, then this install's own order.
         replyMs,
         seed: installSeed(),

@@ -3,6 +3,7 @@ import { Globe, Repeat, Sparkles } from "lucide-react";
 import { displayedProtocol, displayedRoute, displayedRouteId, heldListLook, showsAutomatic } from "@shared/lib/displayed-route";
 import { credentialOnTunnel, tunnelCredential } from "@shared/lib/tunnel-credential";
 import {
+  ispHintsOf,
   ispTagsOf,
   lastGoodFor,
   rememberLastGood,
@@ -2468,9 +2469,15 @@ export function Dashboard({
       network: networkId,
       reachability,
       preferredRouteId: null,
-      // A tie-break only on a network this phone has no history for --
-      // the first run, which is when people give up. See failover.ts.
-      ispTags: ispTagsOf(routes),
+      // A tie-break, for the routes this phone has no results of its own
+      // for here -- all of them on a first run, which is when people give
+      // up. Read against the network the baseline above was just placed
+      // on: the list was asked for earlier, perhaps from another. See
+      // failover.ts.
+      ispTags: ispTagsOf(routes, currentNetwork()?.asn ?? null),
+      // And what others saw of each route's server and of its protocol,
+      // which far more of them tried than any one route.
+      ispHints: ispHintsOf(routes, currentNetwork()?.asn ?? null),
       // Then the quick answers, then this install's own order.
       replyMs,
       seed: installSeed(),

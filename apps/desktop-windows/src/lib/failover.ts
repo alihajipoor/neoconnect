@@ -1,17 +1,59 @@
 import { failedLately, scoreFor, speedFor, type ConnectHistory } from "./connect-history";
 import { reachabilityKey, reachabilityOf, type ReachabilityMap } from "./reachability";
-import type { IspTag, Protocol, ProtocolUser } from "./types";
+import type { IspHint, IspTag, Protocol, ProtocolUser } from "./types";
 
 export type IspTagCode = IspTag["code"];
 
-/** The route list's tags, in the shape `orderCandidates` takes. */
-export function ispTagsOf(routes: ReadonlyArray<{ id: string; ispTag?: IspTag | null }>): Record<string, IspTagCode> {
+/** What the server says of a route's server and protocol on a network,
+ * per route (`RouteOption.ispHint`), without the network's name. */
+export type IspRouteHint = Pick<IspHint, "server" | "protocol">;
+
+type TaggedRoute = { id: string; ispTag?: IspTag | null; ispHint?: IspHint | null };
+
+/** Whether a route list's word on other people's experience may be read
+ * on the network this device is on.
+ *
+ * The list is asked for when the screen loads and held from then on; the
+ * network is read again before each connect on the phone, and may by
+ * then be another. A list from a server that names the network it
+ * describes (`ispHint.asn`) is not read on a network known to be a
+ * different one. Where either side cannot say -- an older server, or a
+ * device the server could not place -- it is read, as it always was. */
+function describesThisNetwork(routes: ReadonlyArray<TaggedRoute>, asn: number | null | undefined): boolean {
+  if (asn === null || asn === undefined) return true;
+  return routes.every((route) => typeof route.ispHint?.asn !== "number" || route.ispHint.asn === asn);
+}
+
+/** The route list's tags, in the shape `orderCandidates` takes. With
+ * `asn` -- the network this device is on, where it knows -- none from a
+ * list that describes another network. */
+export function ispTagsOf(routes: ReadonlyArray<TaggedRoute>, asn?: number | null): Record<string, IspTagCode> {
   const tags: Record<string, IspTagCode> = {};
+  if (!describesThisNetwork(routes, asn)) return tags;
   for (const route of routes) if (route.ispTag) tags[route.id] = route.ispTag.code;
   return tags;
 }
 
-/** Order to try protocols in when nothing better is known.
+/** The route list's hints, in the shape `orderCandidates` takes: only
+ * the routes there is something to say about, and none from a list that
+ * describes another network than `asn`. Empty from a server that sends
+ * none, and the order is then what it was before they existed. */
+export function ispHintsOf(routes: ReadonlyArray<TaggedRoute>, asn?: number | null): Record<string, IspRouteHint> {
+  const hints: Record<string, IspRouteHint> = {};
+  if (!describesThisNetwork(routes, asn)) return hints;
+  for (const route of routes) {
+    const hint = route.ispHint;
+    if (!hint || typeof hint !== "object") continue;
+    const server = hint.server === "works" || hint.server === "fails" ? hint.server : undefined;
+    const protocol = hint.protocol === "lands" || hint.protocol === "fails" ? hint.protocol : undefined;
+    if (server || protocol) hints[route.id] = { ...(server ? { server } : {}), ...(protocol ? { protocol } : {}) };
+  }
+  return hints;
+}
+
+/** Order to try protocols in when nothing better is known -- neither
+ * from this device nor, for the network it is on, from anyone else
+ * (`rank` in `orderCandidates`).
  *
  * Speed first, evasion last, confirmed as the product decision: the
  * audience is general-purpose rather than only censored networks, so the
@@ -50,7 +92,8 @@ const PROTOCOL_ORDER: Protocol[] = [
   "IKEV2",
 ];
 
-function rank(protocol: Protocol): number {
+/** A protocol's place in the fixed order. */
+function fixedRank(protocol: Protocol): number {
   const i = PROTOCOL_ORDER.indexOf(protocol);
   // Anything unrecognised goes last rather than first: an unknown
   // protocol is one this build cannot connect with anyway.
@@ -68,9 +111,13 @@ function rank(protocol: Protocol): number {
  *    Evidence beats a guess, so it leads.
  * 3. `preferredRouteId` — the plan's default, as set by the operator.
  *
- * Everything else follows in PROTOCOL_ORDER. Among servers nothing above
- * tells apart, a slow answer to the probe goes later, and then each
- * install's own order (`seed`) decides.
+ * Everything else follows by what is known of it, in three layers, each
+ * read only where the one before says nothing: this device's own results
+ * on this network; other people's on the same network, as the server
+ * counts them (`ispTags` for a route, `ispHints` for its server and its
+ * protocol); and PROTOCOL_ORDER. Among servers nothing above tells apart,
+ * a slow answer to the probe goes later, and then each install's own
+ * order (`seed`) decides.
  *
  * That last tie-break used to be the route's id, alphabetically -- the
  * same for everybody, and stable, which is all it was meant to be. But a
@@ -103,9 +150,14 @@ export function orderCandidates(
      * asked. */
     reachability?: ReachabilityMap;
     /** What other people on this network recently saw, per route (the
-     * route list's `ispTag` codes). Consulted only while this device
-     * has no evidence of its own here -- see `fromOthers`. */
+     * route list's `ispTag` codes). Consulted only for a route this
+     * device has no evidence of its own for here -- see `fromOthers`. */
     ispTags?: Record<string, IspTagCode | undefined>;
+    /** What other people on this network -- or, where too few of them,
+     * in its country -- saw of each route's server and of its protocol
+     * (`ispHintsOf`). Coarser than a tag and far more often there. See
+     * `fromOthers` and `rank`. */
+    ispHints?: Record<string, IspRouteHint | undefined>;
     /** The subscription in use: its credentials are dialled ahead of any
      * other subscription's the account still lists. */
     subscriptionId?: string | null;
@@ -133,6 +185,7 @@ export function orderCandidates(
     now,
     reachability,
     ispTags,
+    ispHints,
     pinnedCountryRouteIds,
     replyMs,
     seed,
@@ -296,39 +349,79 @@ export function orderCandidates(
     }
   };
 
-  // Other people's experience, as a tie-break -- and only on a network
-  // this device knows nothing about.
+  // Other people's experience, for the rungs this device has none of its
+  // own for.
   //
-  // ac56993 refused to order by anyone else's data, and on a network the
-  // device has history for, that still holds without exception: filtering
-  // differs between two people on one ISP and from day to day, so this
-  // device's own results are the better guide, and they alone order the
-  // ladder here.
+  // ac56993 refused to order by anyone else's data, and for a rung this
+  // device has tried on this network that still holds without exception:
+  // filtering differs between two people on one ISP and from day to day,
+  // so its own results are the better guide, and for that rung they alone
+  // decide (`byEvidence`, ahead of this; this returns 0 for it).
   //
-  // The case it left open is the one people quit over: a first run, or a
-  // network never seen before, where there is no evidence at all and the
-  // order falls to `PROTOCOL_ORDER` -- one list for the whole world. A
-  // customer on a carrier where that list's first entries are blocked
-  // waits through each of them, decides the app is broken, and leaves.
-  // There, "most people on this network got through on X recently" is
-  // strictly better than a global constant. So it ranks below everything
-  // the device itself knows (a pin, a last-good, the live probe, its own
-  // history) and above the fixed order. The moment the device has any
-  // evidence on this network, this returns 0 for everyone and the order
-  // is exactly what it was before tags existed.
-  const deviceKnowsNetwork =
-    Boolean(lastGoodRouteId && users.some((u) => u.routeId === lastGoodRouteId)) ||
-    users.some((u) => evidence(u) !== null);
+  // What it left open is every rung the device has not tried -- all of
+  // them on a first run or a new network, which is the case people quit
+  // over, and most of them on any network: a pass stops at the first rung
+  // that works, so a device that knows one working rung here knows
+  // nothing of the others it will walk the day that one is cut off. Those
+  // used to fall to `PROTOCOL_ORDER`, one list for the whole world, the
+  // moment the device knew anything at all here. Now each is placed by
+  // the finest thing other people on this network have shown of it:
+  //
+  // - the route itself, where enough of them tried that very route (the
+  //   tag the server list shows);
+  // - else its server, which far more of them tried on one protocol or
+  //   another. Which server carries traffic on a network goes by the
+  //   server's address and the network, not by the protocol: on a filtered
+  //   network in November 2026 two servers of seven carried data, and a
+  //   rung on any of the other five came up and carried nothing, at 25-30
+  //   s each on a phone;
+  // - and its protocol, where the network drops that protocol even on
+  //   servers that work there (`rank` below orders by the same word).
+  //
+  // Shown to fail goes after everything not shown to, whichever of the
+  // three said so: a rung on a server that carries nothing here will not
+  // carry, and neither will a protocol the network drops, on any server.
+  // Among those, a failing protocol on a working server is still the
+  // likelier. Shown to work goes first, the route's own word ahead of its
+  // server's. Order only, as everything here is: every rung is dialled.
+  //
+  // Below everything the device itself knows (a pin, a last-good, the
+  // live probe, its own history and speeds) and above the fixed order.
+  // With nothing from the server -- an older one, or a network it could
+  // not place -- this is 0 for everyone.
   const fromOthers = (u: ProtocolUser): number => {
-    if (deviceKnowsNetwork || !ispTags) return 0;
-    switch (ispTags[u.routeId]) {
-      case "worksOnYourIsp":
-        return -1;
-      case "failingOnYourIsp":
-        return 1;
-      default:
-        return 0;
-    }
+    if (evidence(u) !== null) return 0;
+    const tag = ispTags?.[u.routeId];
+    if (tag === "worksOnYourIsp") return -2;
+    if (tag === "failingOnYourIsp") return 3;
+    const hint = ispHints?.[u.routeId];
+    if (hint?.server === "fails") return 3;
+    if (hint?.protocol === "fails") return hint.server === "works" ? 1 : 2;
+    return hint?.server === "works" ? -1 : 0;
+  };
+
+  // The protocol order for this network, where other people's dials on
+  // it say what it is, and the fixed one where they do not.
+  //
+  // `PROTOCOL_ORDER` is speed first, which is right where nothing is
+  // filtered and wrong where something is: on filtered networks, of dials
+  // on servers that worked there (seven days to 2026-11-10), its first
+  // entry landed once in 14 and its second 161 times in 180. Which
+  // protocols a network lets through is that network's own, and changes;
+  // so it is not written down here. The server counts it, per network,
+  // only on servers that work there -- so a blocked server does not drag
+  // every protocol down -- and says of each protocol one of three things:
+  // it lands, it does not, or too few people tried it to say. Proven to
+  // land first, proven not to last, the unknown between them, and the
+  // fixed order within each: among protocols that all get through, the
+  // fastest is still the one to start with.
+  const rank = (u: ProtocolUser): number => {
+    const fixed = fixedRank(u.protocol);
+    // One this build does not know stays last, whatever is said of it.
+    if (fixed === PROTOCOL_ORDER.length) return 3 * PROTOCOL_ORDER.length;
+    const verdict = ispHints?.[u.routeId]?.protocol;
+    const tier = verdict === "lands" ? 0 : verdict === "fails" ? 2 : 1;
+    return tier * PROTOCOL_ORDER.length + fixed;
   };
 
   // A server that took much longer than the quickest to answer the probe
@@ -354,7 +447,7 @@ export function orderCandidates(
       byEvidence(a, b) ||
       bySpeed(a, b) ||
       fromOthers(a) - fromOthers(b) ||
-      rank(a.protocol) - rank(b.protocol) ||
+      rank(a) - rank(b) ||
       wsLast(a) - wsLast(b) ||
       late(a) - late(b) ||
       shuffled(a.routeId) - shuffled(b.routeId) ||

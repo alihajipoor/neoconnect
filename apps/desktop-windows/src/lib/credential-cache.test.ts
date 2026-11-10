@@ -329,12 +329,16 @@ describe("a cached route list", () => {
       id: "route-1",
       name: "Germany",
       ispTag: { code: "worksOnYourIsp", customers: 6, outOf: 7, windowHours: 24 },
+      // The connect order's hint is the same kind of word about the same
+      // network, and goes the same way.
+      ispHint: { asn: 64500, server: "works", protocol: "lands" },
     } as unknown as RouteOption;
     await saveSnapshot({ subscription: plan, protocolUsers: [credential], routes: [tagged] });
 
     const offline = (await loadSnapshot())!.routes;
     expect(offline).toEqual([{ id: "route-1", name: "Germany" }]);
     expect(offline[0]).not.toHaveProperty("ispTag");
+    expect(offline[0]).not.toHaveProperty("ispHint");
     expect(await cachedRoutesFor(plan)).toEqual([{ id: "route-1", name: "Germany" }]);
   });
 });

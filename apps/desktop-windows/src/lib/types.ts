@@ -220,6 +220,28 @@ export interface RouteOption {
    * counts; the words are the client's, in the customer's language.
    * Absent from an older backend, null when there is nothing to say. */
   ispTag?: IspTag | null;
+  /** What the automatic connect order may read about this route on the
+   * network the list was asked from: how its server has done for other
+   * people there, and whether its protocol lands there -- each counted
+   * over far more people than try any one route. Never shown. Absent from
+   * an older backend, null when the server could not tell the network. */
+  ispHint?: IspHint | null;
+}
+
+/** See `RouteOption.ispHint` and `orderCandidates`. Each verdict is about
+ * at least three people, and absent where too few tried to say. */
+export interface IspHint {
+  /** The network this describes, as the server read it: its autonomous
+   * system number, which `/health/ip` also tells this device about
+   * itself. The list is held across a change of network; the hints are
+   * read only while the device is still on this one. */
+  asn: number;
+  /** Whether other people on that network got traffic through this
+   * route's server, on any protocol. */
+  server?: "works" | "fails";
+  /** Whether this route's protocol gets through there, on servers that
+   * work there. */
+  protocol?: "lands" | "fails";
 }
 
 /** See `RouteOption.ispTag`. `customers` is always at least five: the

@@ -170,7 +170,7 @@ export async function loadSnapshot(): Promise<ConnectionSnapshot | null> {
   }
 }
 
-/** A cached route without its `ispTag`.
+/** A cached route without its `ispTag` and `ispHint`.
  *
  * The tag is the server's word on how the route has done for people on
  * the network the list was fetched from -- worked out from the request's
@@ -180,13 +180,15 @@ export async function loadSnapshot(): Promise<ConnectionSnapshot | null> {
  * network, or working, as if it had been measured there, and the
  * picker's "only what worked on my network" filtered by it; and every
  * load carried the list forward with a fresh time, so a tag could be days
- * old. The picker's own refresh is the only source of tags now. Read off
+ * old. The picker's own refresh is the only source of tags now. The hint
+ * for the connect order is the same kind of word about the same network,
+ * and goes the same way. Read off
  * on the way out of the cache, so every use of a cached list -- the
  * offline start, a failed list's stand-in, the snapshot written from it
  * -- is without them. */
 function withoutNetworkTag(route: RouteOption): RouteOption {
-  if (route === null || typeof route !== "object" || !("ispTag" in route)) return route;
-  const { ispTag: _measuredElsewhere, ...rest } = route;
+  if (route === null || typeof route !== "object" || !("ispTag" in route || "ispHint" in route)) return route;
+  const { ispTag: _measuredElsewhere, ispHint: _countedElsewhere, ...rest } = route;
   return rest;
 }
 
