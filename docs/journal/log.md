@@ -8063,3 +8063,81 @@ is unknown.
   longer returns `is_vpn`/`is_proxy`, which affects every node.
 - One geolocation database places germany-3 in Finland; others say
   Germany.
+
+## 2026-11-10 — desktop 0.9.60 and mobile 0.2.37: Automatic stops walking the whole list
+
+**Why:** a customer on a home line (iPhone) said Automatic never connects.
+His connect reports showed why. On his network two of seven servers carry
+data; a rung on any other comes up and carries nothing, at 25-30 s each,
+and a pass has 49 rungs. His upload on the two good servers sits at about
+0.3 Mbps, right on the data check's line (256 KB in 8 s), so about half
+the time his usual server read "slow", the pass left it, and he cancelled
+minutes later.
+
+**Live:** desktop 0.9.60 and Android 0.2.37 from main `3ff8b983` (Release
+Desktop run 42875569859, Release Android run 42875570286; CI on main
+passed). No iOS build was made: that needs the Mac and the owner's OK,
+and the customer who reported this is on iOS.
+
+**What changed** (`claude/automatic-bounded-search`, merged as `78263b88`):
+- After a rung reads slow on a server that passed the data check on this
+  network in the last 24 h, the pass dials at most 3 more rungs or 40 s,
+  then goes back to the best slow rung and keeps it, with the existing
+  "connected but slow" wording. With no such memory the pass walks on as
+  before, so a held server is not settled on while a clean one waits.
+- Rungs that came up and carried nothing, or did not connect, are ordered
+  last on that network for 6 h, unless they carried traffic there in the
+  last 24 h. Order only, never skipped. The Windows ladder now records
+  such rungs; before, only the phone did.
+- A review found three defects in the first version (settling on a held
+  server, Windows marking rungs dead that were not, one failure burying
+  the usual server). All three were fixed with tests before the merge.
+- Not built: judging "slow" against the network's own best upload. The
+  upload leg reports nothing when it times out, so there is no figure to
+  compare. It needs a change to the check itself.
+
+**Proven on the VM** (test installer of `b150dc31`, results in
+`C:\Users\aliha\Claude\vm\results\auto1`): Automatic landed in one rung
+(6-9 s) with the exit IP matching; with every upload throttled to
+150 kbit/s it landed "slow" after 2-3 further rungs, in 75 s and 87 s,
+where the ladder had 72 rungs; a hand-picked server and a reconnect
+after an engine kill both landed.
+
+**Seen there, not explained:** one of the two throttled landings dropped
+37 s later and the app reconnected elsewhere by itself. The throttle held
+the app's own health reads too. The search's 40 s uses the wall clock,
+which jumps on that guest; a monotonic clock is a later tidy-up. The
+Neoxify-OpenVPN adapter was absent in the guest after the test install.
+
+**Unverified:** a phone, a real held line, a censored network, and the
+failed-last order on a later pass (only that the mark is written).
+
+**Also today, on production:**
+- **Plan edits were slow because of a missing index.** Each revoked
+  credential made Postgres scan all 2.6 million usage rows for the
+  foreign key's SET NULL: 2.7 s per delete, about 45 minutes for the
+  2026-11-07 plan edit. The index was built concurrently (0.13 ms
+  after) and is migration `20261110_usage_records_protocol_user_index`.
+- **Resellers can activate a plan on a customer's account**
+  (`POST /reseller/activate`, a form on the reseller page; main
+  `cf59284b`). It mints one code and redeems it for the customer through
+  the existing redeem path. Proven on production with a temporary token
+  balance and a dormant test account, then undone. No reseller accounts
+  exist yet.
+- **The Iranian relay's control link broke on that deploy.** A backend
+  restart drops every agent's stream, and the relay's agent was naming
+  the panel by a name on a domain that is now reset from inside. It had
+  stayed up only because its stream predated the block. Its agent now
+  uses another name the panel's certificate already covers; only the
+  agent was restarted (the engine's PID did not change), and all seven
+  relay routes passed end to end afterwards. It was offline in the
+  panel for about five minutes. Check it after every backend deploy.
+
+**Measured from both boxes inside:** of the names the apps can use to
+reach the panel, two still answer in under a second; the rest are
+poisoned. A change that goes to the pinned fallback at once when every
+name fails was built (`claude/doors-when-names-fail`) and held back: it
+would not trigger while those two names answer.
+
+**Not done:** the Play upload of 0.2.37 (the owner drags the bundle in);
+the Mac re-sign of the endpoint lists, which still name dead servers.
