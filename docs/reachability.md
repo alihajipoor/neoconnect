@@ -257,14 +257,25 @@ file compiled by both):
   without paying for the doors each time.
 - **Doors work here.** A door that answers is remembered per network for
   fifteen minutes: requests go to the doors first, and the names are
-  asked again in the background every three minutes. A name answering
-  ends it at once, and so does a tunnel.
+  asked again in the background -- the moment that starts, half a minute
+  later, and then every three minutes. A name answering ends it at once,
+  and so does a tunnel.
+  One request failing at every name is not yet a network where the names
+  fail -- a laptop just awake, one slow read on a slow line -- and unlike
+  the relay nothing tells a door what kind of network it is on. So a
+  door's answer starts nothing within a minute of a name answering, and
+  where the names do work the check sent at the start ends it in the
+  time their answer takes.
 - **Never with a tunnel up**, or one being brought up. With a tunnel
   nothing changes.
 - **Writes are never sent twice.** A door that could not be connected
   to, or whose key was not the pinned one, was sent nothing, and the next
-  is asked. Once a write has gone out and no answer came back, it goes to
-  no other door, no name and not to the relay.
+  is asked. That includes a door still being connected to when the
+  request's time ran out -- the third of three is given a moment less
+  than the connect timeout -- which the command tells from a request that
+  went out by whether the server's certificate was ever looked at. Once a
+  write has gone out and no answer came back, it goes to no other door,
+  no name and not to the relay.
 - **By pin alone** (`door_http.rs`, a command of its own beside the
   relay's): the server's address, the door's server name in the hello or
   none, TLS accepted only for a pinned key that also signs the

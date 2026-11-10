@@ -473,17 +473,46 @@ describe("what is remembered per network", () => {
     expect(doors.askDoorsFirst()).toBe(false);
   });
 
-  it("the names are due to be asked again every three minutes while it lasts", async () => {
+  it("the names are due to be asked again as it starts, soon after, and then every three minutes", async () => {
     expect(doors.namesProbeDue()).toBe(false);
-    replies[A.host] = [OK];
+    replies[A.host] = [OK, OK];
     await doors.doorRequest(GET);
-    // They have just failed: not yet.
+    // At once: one request failing at every name is not yet a network
+    // where the names fail -- a laptop just awake, a single slow read.
+    expect(doors.namesProbeDue()).toBe(true);
     expect(doors.namesProbeDue()).toBe(false);
-    now += doors.NAMES_PROBE_MS;
+    // Another answer through a door is not another start.
+    await doors.doorRequest(GET);
+    expect(doors.namesProbeDue()).toBe(false);
+    // Once more half a minute on: a check sent as it started can have
+    // met the same passing trouble the request did.
+    now += doors.NAMES_SOON_MS - 1;
+    expect(doors.namesProbeDue()).toBe(false);
+    now += 1;
+    expect(doors.namesProbeDue()).toBe(true);
+    // And from then every three minutes.
+    now += doors.NAMES_PROBE_MS - 1;
+    expect(doors.namesProbeDue()).toBe(false);
+    now += 1;
     expect(doors.namesProbeDue()).toBe(true);
     expect(doors.namesProbeDue()).toBe(false);
     now += doors.NAMES_PROBE_MS;
     expect(doors.namesProbeDue()).toBe(true);
+  });
+
+  it("is not started by a door's answer within a minute of a name answering", async () => {
+    // Four reads answered by name and a fifth that failed at every one:
+    // a door answers the fifth, and the names are still what works here.
+    doors.noteNameAnswered();
+    now += doors.NAME_ANSWERED_MS - 1;
+    replies[A.host] = [OK, OK];
+    expect((await doors.doorRequest(GET)).kind).toBe("answered");
+    expect(doors.askDoorsFirst()).toBe(false);
+    expect(doors.namesProbeDue()).toBe(false);
+    // A minute with no name answering, and a door's answer starts it.
+    now += 1;
+    expect((await doors.doorRequest(GET)).kind).toBe("answered");
+    expect(doors.askDoorsFirst()).toBe(true);
   });
 
   it("is not started by a 401, 403 or 404, which a server that is not the backend gives to everything", async () => {

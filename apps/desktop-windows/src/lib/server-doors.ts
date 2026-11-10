@@ -54,9 +54,20 @@ import type { ServerDoor } from "./types";
  *
  * A door that answers is remembered per network for `DOOR_MODE_MS`
  * ("doors work here"): requests then go to the doors first, and the names
- * are asked again in the background every `NAMES_PROBE_MS`
- * (`namesProbeDue`). A name answering ends it at once
- * (`noteNameAnswered`), and so does a tunnel.
+ * are asked again in the background: at once, `NAMES_SOON_MS` later, and
+ * then every `NAMES_PROBE_MS` (`namesProbeDue`). A name answering ends it
+ * at once (`noteNameAnswered`), and so does a tunnel.
+ *
+ * One request failing at every name is not a network where the names
+ * fail, and nothing here knows what kind of network it is on: a laptop
+ * just awake fails its first requests in transport, and on a slow line
+ * one heavy read times out everywhere while the rest are answered. So a
+ * door's answer starts nothing within `NAME_ANSWERED_MS` of a name
+ * answering, and when it does start "doors first" the names are asked
+ * that moment, so that it lasts no longer than their answer takes where
+ * they work -- and once more soon after, since a check sent that moment
+ * can meet the same passing trouble the request did. Names first is the
+ * rule for everyone.
  *
  * "Answers" there means what it means for an address by name: the
  * backend's JSON in any status but 401, 403 and 404, which a server whose
@@ -108,13 +119,22 @@ export type DoorOutcome =
 /** At most this many doors for one call. */
 export const DOOR_MAX_TRIES = 3;
 /** All the time one call may take across its doors. The command gives
- * each four seconds to connect, so three that never connect fit. */
+ * each four seconds to connect, so three that never connect fit: the
+ * third is ended by what is left of this, a moment short of its four
+ * seconds, and the command still says it was never connected to
+ * (`unsent` in door_http.rs), so a write goes on from there. */
 export const DOOR_CALL_MS = 12_000;
 /** How long requests go to the doors first after one answered, per
  * network: as long as relay mode lasts (last-resort.ts). */
 export const DOOR_MODE_MS = 15 * 60_000;
-/** While they do, how often the names are asked again in the background. */
+/** While they do, how often the names are asked again in the background,
+ * after the once when it starts and the once `NAMES_SOON_MS` after that. */
 export const NAMES_PROBE_MS = 3 * 60_000;
+export const NAMES_SOON_MS = 30_000;
+/** A door's answer does not start "doors first" within this long of a
+ * name answering: well over the time one request takes to fail at every
+ * name and be answered by a door. */
+export const NAME_ANSWERED_MS = 60_000;
 /** How long the doors are left alone on a network where every one asked
  * has just failed: this the first time, doubling each time they fail
  * again there, up to `DOOR_REST_MAX_MS`. */
@@ -259,12 +279,16 @@ const doorKey = (door: ServerDoor): string => `${door.host}:${door.port}`;
 
 /** Calls in a row, while doors go first, that no door answered. */
 let failures = 0;
-/** When the names were last asked in the background (`namesProbeDue`). */
+/** When the names were last asked in the background (`namesProbeDue`),
+ * and how many times since "doors first" last began. */
 let lastNamesProbe = 0;
+let namesProbes = 0;
 /** Answers by name so far (`noteNameAnswered`). A door's answer to a call
  * made before one does not start "doors first": the names were found
  * working while it was out. */
 let nameAnswers = 0;
+/** When a name last answered in this run, on whatever network. */
+let lastNameAnswer = Number.NEGATIVE_INFINITY;
 /** Door -> when it last failed, until it answers again. */
 const failedAt = new Map<string, number>();
 /** Doors the command refused as malformed, with the pins they had: not
@@ -290,15 +314,17 @@ export function askDoorsFirst(): boolean {
 }
 
 /** Whether the names are due to be asked again in the background, while
- * requests go to the doors first. Answers true once each
- * `NAMES_PROBE_MS` and counts that as the asking: api.ts sends the health
- * check to the names on its own and waits for nothing, and an answer
- * there ends "doors first" (`noteNameAnswered`). */
+ * requests go to the doors first. Answers true once when that starts,
+ * once `NAMES_SOON_MS` later and once each `NAMES_PROBE_MS` after, and
+ * counts that as the asking: api.ts sends the health check to the names
+ * on its own and waits for nothing, and an answer there ends "doors
+ * first" (`noteNameAnswered`). */
 export function namesProbeDue(): boolean {
   if (!askDoorsFirst()) return false;
   const now = clock();
-  if (now - lastNamesProbe < NAMES_PROBE_MS) return false;
+  if (namesProbes > 0 && now - lastNamesProbe < (namesProbes === 1 ? NAMES_SOON_MS : NAMES_PROBE_MS)) return false;
   lastNamesProbe = now;
+  namesProbes += 1;
   return true;
 }
 
@@ -316,7 +342,15 @@ export function endDoorMode(): void {
  * the usual way works, and the doors are not needed. */
 export function noteNameAnswered(): void {
   nameAnswers += 1;
+  lastNameAnswer = clock();
   endDoorMode();
+}
+
+/** Whether a name answered less than `NAME_ANSWERED_MS` ago. A clock
+ * that has gone back says no, and holds nothing up. */
+function nameAnsweredLately(): boolean {
+  const ago = clock() - lastNameAnswer;
+  return ago >= 0 && ago < NAME_ANSWERED_MS;
 }
 
 /** Looks at the tunnel as a connect pass ends. Up: "doors first" is over
@@ -378,8 +412,13 @@ function noteAnswered(door: ServerDoor, key: string, since: number): void {
   put(held.good, key, doorKey(door));
   // Not after a name answered while this call was out: that ended "doors
   // first", and an answer to a call made before must not start it again.
-  if (nameAnswers === since) {
-    if (!modeHolds(key)) lastNamesProbe = clock();
+  // Nor within a minute of one: the names work here, and it was this
+  // request that failed at them, not the network.
+  if (nameAnswers === since && !nameAnsweredLately()) {
+    // Starting: the names are due to be asked again now, not in three
+    // minutes (`namesProbeDue`). They failed one request, which is all
+    // that is known.
+    if (!modeHolds(key)) namesProbes = 0;
     held.mode[key] = clock() + DOOR_MODE_MS;
   }
   save();
@@ -619,7 +658,9 @@ export function resetServerDoorsForTests(options: { now?: () => number; transpor
   state = null;
   failures = 0;
   lastNamesProbe = 0;
+  namesProbes = 0;
   nameAnswers = 0;
+  lastNameAnswer = Number.NEGATIVE_INFINITY;
   failedAt.clear();
   unusable.clear();
   rests.clear();

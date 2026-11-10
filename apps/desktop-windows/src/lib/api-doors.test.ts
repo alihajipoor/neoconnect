@@ -153,6 +153,14 @@ beforeEach(() => {
 const ME = { id: "c1", email: "a@example.com" };
 const UNREACHABLE = unreachable();
 
+/** The names' own health check, sent by itself when a door first answers
+ * on a network (`probeNames` in api.ts): waits until it has gone out and,
+ * with no answer set for it, failed. */
+async function namesAskedAgain(): Promise<void> {
+  await vi.waitFor(() => expect(events[events.length - 1]).toBe("name /health"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("the order: names, then doors, then the relay", () => {
   it("asks the names first, the doors when they have failed, and the relay last", async () => {
     relayReplies = [json(200, ME)];
@@ -170,7 +178,8 @@ describe("the order: names, then doors, then the relay", () => {
     doorReplies[A.host] = [json(200, ME)];
     relayReplies = [json(200, { id: "from the relay" })];
     expect(await apiRequest("/customer/me", { relay: "background" })).toEqual({ ok: true, data: ME });
-    expect(events).toEqual(["name /customer/me", "door 192.0.2.10 /customer/me"]);
+    await namesAskedAgain();
+    expect(events).toEqual(["name /customer/me", "door 192.0.2.10 /customer/me", "name /health"]);
   });
 
   it("never asks a door when a name answers, whatever the answer", async () => {
@@ -209,9 +218,15 @@ describe("the order: names, then doors, then the relay", () => {
     expect((await apiRequest<unknown>("/customer/devices")).ok).toBe(true);
     expect(lr.relayModeActive()).toBe(false);
     expect(doors.askDoorsFirst()).toBe(true);
+    await namesAskedAgain();
     // And a request that opted into the relay goes to the door now.
     expect(await apiRequest("/customer/me", { relay: "background" })).toEqual({ ok: true, data: ME });
-    expect(events).toEqual(["name /customer/devices", "door 192.0.2.10 /customer/devices", "door 192.0.2.10 /customer/me"]);
+    expect(events).toEqual([
+      "name /customer/devices",
+      "door 192.0.2.10 /customer/devices",
+      "name /health",
+      "door 192.0.2.10 /customer/me",
+    ]);
   });
 
   it("carries a public request too", async () => {
@@ -254,7 +269,13 @@ describe("a door that is not what the list says", () => {
     doorReplies[B.host] = [json(200, ME)];
     const trace = newTrace();
     expect(await apiRequest("/customer/me", undefined, trace)).toEqual({ ok: true, data: ME });
-    expect(events).toEqual(["name /customer/me", "door 192.0.2.10 /customer/me", "door 198.51.100.20 /customer/me"]);
+    await namesAskedAgain();
+    expect(events).toEqual([
+      "name /customer/me",
+      "door 192.0.2.10 /customer/me",
+      "door 198.51.100.20 /customer/me",
+      "name /health",
+    ]);
     expect(renderTrace(trace).replace(/@\d+/g, "@t")).toBe(
       "req: a.example=net@t; door: 192.0.2.10:2053=pin@t 198.51.100.20:2096=h200@t",
     );
@@ -349,10 +370,14 @@ describe("a write", () => {
     doorReplies[B.host] = [json(201, { subscription: { id: "s1" } })];
     relayReplies = [json(201, { subscription: { id: "from the relay" } })];
     expect(await redeem()).toEqual({ ok: true, data: { subscription: { id: "s1" } } });
+    await vi.waitFor(() => expect(events.length).toBe(4));
     expect(events).toEqual([
+      // A write asks the names for the health check before it is sent.
       "name /health",
       "door 192.0.2.10 /customer/vouchers/redeem",
       "door 198.51.100.20 /customer/vouchers/redeem",
+      // And a door's first answer here has the names asked again.
+      "name /health",
     ]);
   });
 
@@ -376,6 +401,7 @@ describe("a write", () => {
     doorReplies[A.host] = [json(200, ME), "door: network"];
     await apiRequest("/customer/me");
     expect(doors.askDoorsFirst()).toBe(true);
+    await namesAskedAgain();
     events = [];
     replies["/health"] = [{ status: 200, body: { status: "ok" } }];
     replies["/customer/vouchers/redeem"] = [{ status: 201, body: {} }];
@@ -384,10 +410,51 @@ describe("a write", () => {
   });
 });
 
+describe("a door's first answer on a network", () => {
+  it("has the names asked again at once, and one answering leaves them in front", async () => {
+    // A laptop just awake: the request failed at every name, and the
+    // network was back by the time the door was asked.
+    doorReplies[A.host] = [json(200, ME)];
+    replies["/health"] = [{ status: 200, body: { status: "ok" } }];
+    expect(await apiRequest("/customer/me")).toEqual({ ok: true, data: ME });
+    await vi.waitFor(() =>
+      expect(events).toEqual(["name /customer/me", "door 192.0.2.10 /customer/me", "name /health"]),
+    );
+    await vi.waitFor(() => expect(doors.askDoorsFirst()).toBe(false));
+    events = [];
+    replies["/customer/me"] = [{ status: 200, body: ME }];
+    doorReplies[A.host] = [json(200, { id: "from a door" })];
+    expect(await apiRequest("/customer/me")).toEqual({ ok: true, data: ME });
+    expect(events).toEqual(["name /customer/me"]);
+  });
+
+  it("does not put the doors in front where a name has just answered", async () => {
+    // A slow line: reads answered by name, then one that failed at every
+    // name and was answered by a door.
+    replies["/customer/me"] = [{ status: 200, body: ME }];
+    await apiRequest("/customer/me");
+    const devices = { inUseKnown: true, devices: [] };
+    doorReplies[A.host] = [json(200, devices)];
+    expect(await apiRequest("/customer/devices")).toEqual({ ok: true, data: devices });
+    expect(doors.askDoorsFirst()).toBe(false);
+    events = [];
+    replies["/customer/me"] = [{ status: 200, body: ME }];
+    expect(await apiRequest("/customer/me")).toEqual({ ok: true, data: ME });
+    expect(events).toEqual(["name /customer/me"]);
+    // A minute in which no name answers, and a door's answer does.
+    now += doors.NAME_ANSWERED_MS;
+    doorReplies[A.host] = [json(200, devices)];
+    expect(await apiRequest("/customer/devices")).toEqual({ ok: true, data: devices });
+    expect(doors.askDoorsFirst()).toBe(true);
+    await namesAskedAgain();
+  });
+});
+
 describe("once a door has answered on this network", () => {
   beforeEach(async () => {
     doorReplies[A.host] = [json(200, ME)];
     await apiRequest("/customer/me");
+    await namesAskedAgain();
     events = [];
   });
 
@@ -462,6 +529,7 @@ describe("with a tunnel up", () => {
     doorReplies[A.host] = [json(200, ME), json(200, ME)];
     await apiRequest("/customer/me");
     expect(doors.askDoorsFirst()).toBe(true);
+    await namesAskedAgain();
     tunnelUp = true;
     events = [];
     replies["/customer/me"] = [{ status: 200, body: ME }];

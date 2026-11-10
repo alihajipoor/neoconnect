@@ -29,6 +29,7 @@ import {
   namesProbeDue,
   noteDoorNotBackend,
   noteNameAnswered,
+  type DoorCall,
   type DoorOutcome,
 } from "./server-doors";
 import { clearTokens, getTokens, setTokens } from "./session";
@@ -1433,7 +1434,8 @@ export const RELAY_DISCONNECT = "Disconnect to use the backup route.";
  * Two memories change where it starts. While doors answered on this
  * network minutes ago (`askDoorsFirst`), the doors are asked first and the
  * names only if no door answers; the names are asked again on their own
- * meanwhile (`probeNames`), and an answer there puts them back in front.
+ * meanwhile (`probeNames`) -- the moment that starts (`askDoor`), and
+ * every few minutes -- and an answer there puts them back in front.
  * Otherwise, while relay mode says the ordinary routes were found blocked
  * minutes ago and they are not due to be asked again (`skipNormalRoutes`),
  * the relay is asked first, as before.
@@ -1482,6 +1484,21 @@ async function withLastResort<T>(
  * first". Over the names alone, so it can never come back here. */
 function probeNames(): void {
   void publicDirect<unknown>(HEALTH_PATH, { method: "GET" }).catch(() => undefined);
+}
+
+/** `doorRequest`, and the names asked again at once if its answer has
+ * just put the doors in front (`namesProbeDue`).
+ *
+ * The request that came here failed at every name, and that is all that
+ * is known: the names may work on this network -- it was back by the time
+ * the door was asked, or only this request was too slow for them. Asked
+ * now, they say so in the time one answer takes, and "doors first" ends
+ * (`noteNameAnswered`) before the next requests have gone to servers by
+ * address for minutes on a network where the names answer. */
+async function askDoor(call: DoorCall, trace: EndpointTrace | undefined): Promise<DoorOutcome> {
+  const outcome = await doorRequest(call, trace);
+  if (namesProbeDue()) probeNames();
+  return outcome;
 }
 
 /** Whether `result` is the backend refusing a relay call for the network's
@@ -1623,7 +1640,7 @@ async function doorExchange(path: string, init: RequestInit, trace: EndpointTrac
   if (init.body != null && typeof init.body !== "string") return { kind: "skipped" };
   const method = (init.method ?? "GET").toUpperCase();
   const once = method !== "GET" && method !== "HEAD" && !REPEATABLE_WRITES.has(path);
-  const outcome = await doorRequest(
+  const outcome = await askDoor(
     {
       method,
       path,
@@ -1666,7 +1683,7 @@ const doorsServedBackend = new Set<string>();
  * put behind the others (`noteDoorNotBackend`), and the session stays. */
 async function refusedThroughDoorByBackend(door: string, trace: EndpointTrace | undefined): Promise<boolean> {
   if (doorsServedBackend.has(door)) return true;
-  const health = await doorRequest({ method: "GET", path: HEALTH_PATH, only: door }, trace);
+  const health = await askDoor({ method: "GET", path: HEALTH_PATH, only: door }, trace);
   const proves =
     health.kind === "answered" &&
     relayAnswerIsBackend(health.answer) &&
