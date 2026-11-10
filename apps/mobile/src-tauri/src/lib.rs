@@ -35,6 +35,13 @@ mod health_ip;
 #[path = "../../../desktop-windows/src-tauri/src/relay_http.rs"]
 mod relay_http;
 
+/// Whether the API's names resolve to public addresses on this network
+/// -- the Windows app's file once more. Beside the relay: where no name
+/// does, a request the relay may carry goes to it without waiting out
+/// every name first (`namesFailHere` in the shared names-check.ts).
+#[path = "../../../desktop-windows/src-tauri/src/names_check.rs"]
+mod names_check;
+
 /// The HTTP scope for the hosts a signed endpoint bundle names -- the
 /// Windows app's file again. The scope written at build time knows only
 /// the seed bundle's hosts; this grants a newer bundle's once its
@@ -116,6 +123,9 @@ pub fn run() {
             health_ip::data_check_v4,
             // The relay of last resort; see `mod relay_http` above.
             relay_http::relay_request,
+            // And the look that lets it go first where no name resolves;
+            // see `mod names_check` above.
+            names_check::names_resolve_public,
             // A signed bundle's hosts into the HTTP scope; see
             // `mod bundle_scope` above.
             bundle_scope::grant_bundle_scope

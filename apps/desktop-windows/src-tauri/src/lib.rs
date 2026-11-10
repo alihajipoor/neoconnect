@@ -2,6 +2,7 @@ mod autostart;
 mod bundle_scope;
 mod control_plane_probe;
 mod health_ip;
+mod names_check;
 mod notify;
 mod relay_http;
 mod vpn;
@@ -217,6 +218,10 @@ pub fn run() {
             // and SPKI pin, when no ordinary route answers. See
             // relay_http.rs.
             relay_http::relay_request,
+            // Beside it: whether the API's names resolve to public
+            // addresses on this network, so a request the relay may carry
+            // need not wait out every name first. See names_check.rs.
+            names_check::names_resolve_public,
             // The HTTP scope for the hosts of a signed endpoint bundle,
             // checked here before it is widened. See bundle_scope.rs.
             bundle_scope::grant_bundle_scope,

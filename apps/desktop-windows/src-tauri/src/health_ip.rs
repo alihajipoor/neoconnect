@@ -431,8 +431,9 @@ const MAX_HOSTNAME: usize = 253;
 
 /// Whether `host` is something a resolver should be asked about at all:
 /// letters, digits, dots and hyphens, of a sane length. Nothing else a
-/// server name in a credential can be.
-fn plain_hostname(host: &str) -> bool {
+/// server name in a credential can be -- nor an API address's name, which
+/// is what names_check.rs asks about.
+pub(crate) fn plain_hostname(host: &str) -> bool {
     !host.is_empty()
         && host.len() <= MAX_HOSTNAME
         && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
