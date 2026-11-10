@@ -7947,3 +7947,119 @@ leaker frames while held. **The words fix was not exercised, though.**
 Neither trigger came up: the split-tunnel changes took 18 to 357 ms
 (round five's took 28 s), and no read met a busy pipe. It stays
 unproven until a test can force one of them while held.
+
+## 2026-11-10 — germany-2 blocked, replaced by germany-3
+
+**Status:** germany-3 is live in every plan and carries the Germany relay
+and the hop to the TR/NL/SG/IN exits; germany-2 is retired in the panel.
+No customer bytes on germany-3 yet. Real names and addresses are redacted
+per docs/node-address-hygiene.md.
+
+**Why.** The inside probe moved 256 KB both ways to germany-2 from ir2
+*and* from the sign-in box on every round up to 01:38Z. From 02:08Z both
+boxes got `unreachable`, 0 bytes, on every round after. Its traffic fell
+from 0.5-1.5 GB an hour to 20 MB in the 02:00 hour and 2 MB in the 03:00
+hour. Block watch opened an incident at 02:31Z. The owner deleted the
+server at the provider; its last heartbeat was 03:14Z. Its two names under
+`{direct-mirror-domain}` were deleted from Cloudflare straight away.
+
+**Built: germany-3**, a new box from the same provider at the same size
+(1 vCPU, under 1 GB RAM, 2 GB swap), germany-2's region, its eight
+protocol configs (key sets compared one for one) and its REALITY dest.
+Built by the 11-07 replacement runbook: Xray pinned to 26.3.27 as
+`User=nobody`, the IPv4-only egress shape byte-identical to finland-3's,
+agent v0.2.11, and every check repeated after a reboot. It lacked the
+fleet's no-self-loop guard (added by hand on the others after 11-07); it
+has it now.
+
+The bare box was tested before building. From ir2, 256 KB up and down in
+about 0.35 s. From the sign-in box the upload stops at 64 KB on every
+port, the hold finland-3 also has, while finland-3 still carries real
+users. **The owner decided to build on it anyway.** germany-2 was not held
+from the sign-in box, so the hold goes with the new address range, not
+with the box.
+
+**The hop moved.** germany-2 also carried the NAT hop ir2 uses to reach
+turkey-1, netherlands-1, singapore-2 and india-1. germany-3 took
+germany-2's saved table unchanged, after its addresses were checked
+against the DB. On ir2 the four output rules were repointed live with
+`nft replace rule`, and the same four lines were edited in the persisted
+file (backups first; checked with `nft -c`, never loaded). ir2's Xray was
+not restarted all day.
+
+**Plans.** For the Germany relay, germany-1's four disabled relay routes
+(dead, no users) were deleted to free ir2's existing Germany entry
+inbounds, and four germany-3 relay routes were made on them, so ir2's
+config did not change. Then one PATCH per plan, smallest first (Ultimate
+Max, Pro, Ultimate, Trial, Starter), each swapping germany-2's routes for
+germany-3's, with every node's heartbeat checked after each. Route counts
+are unchanged. The Trial and Starter defaults moved to germany-3's
+matching routes. With the new `usage_records` index (`611e3d22`) a plan
+took 21-37 s; the 11-07 edit took about 45 minutes.
+
+**Retired: germany-2**, in the panel (04:44Z). Its block incident is
+closed as retired. Its four ir2 relay routes are deleted (REMOVE_ROUTE
+acked; their rules and outbounds are gone from ir2's running Xray, whose
+PID did not change), which frees ir2's second set of Germany entry
+inbounds. The node is DISABLED, its eight direct routes are disabled, and
+its agent key and mirror host are cleared. Its usage history and protocol
+configs are kept: no `DELETE /nodes`. No record in any of the four
+Cloudflare zones points at its old address. Its DELETE_USER commands stay
+queued for good, as for earlier dead nodes.
+
+**Proven:**
+- With panel-issued credentials after the plan edit, REALITY, VLESS-TLS,
+  WS, Trojan and Shadowsocks on germany-3 exit on germany-3's address,
+  256 KB both ways, from outside Iran. Shadowsocks' UDP DNS (UoT) answers.
+- From ir2: REALITY and Shadowsocks exit on germany-3, about 0.6 s per
+  256 KB each way. The inside probe has said `moves` on every round since
+  the build.
+- Through ir2, the four germany-3 relay routes exit on germany-3. The 16
+  TR/NL/SG/IN relay routes through the moved hop exit on each exit's own
+  address, 256 KB both ways.
+- Datagrams to the WireGuard, OpenVPN and IKEv2 ports reach germany-3's
+  NIC from outside and from ir2, so no provider firewall is in the way.
+
+**Unverified:**
+- No WireGuard, OpenVPN or IKEv2 tunnel to germany-3 has carried a packet.
+  The VM run was skipped as a heavy job; only datagram arrival is shown.
+- From the sign-in box's network nothing moves on germany-3 (it connects,
+  then 0 bytes), the hold the owner accepted. Both test boxes are
+  datacenters: MCI, Irancell, TCI, home and mobile networks are unknown.
+- The hop and ir2's file edit are not reboot-tested; ir2's persisted file
+  was checked, not loaded.
+- Any IPv6 path.
+
+**New, needs the owner: `{direct-mirror-domain}` is blocked whole from
+Iran.** From ir2 and from the sign-in box every name under it (germany-3's,
+finland-3's, the seed names planned for the next release, and a random
+label never used) resolves to 10.10.34.x, through the system resolver and
+through public resolvers alike, so the answer is rewritten in transit. TLS
+with any name under it is reset (ir2) or answered by an injector (sign-in
+box). Controls pass: other domains resolve, and another SNI to germany-3
+gets 200. This breaks VLESS-TLS, WS and Trojan from Iran on every node
+named under it, IKEv2's endpoint lookup, the direct mirrors and the
+planned seed names. REALITY, Shadowsocks and the relay entries still work.
+It was clean on 10-10 and at germany-2's build on 10-28; when it started
+is unknown.
+
+**Pending:**
+- Real customer bytes on germany-3 (none at 04:39Z, only tests), and the
+  24 h and 48 h readings, per operator.
+- The endpoint lists, re-signed on the Mac: drop germany-2's two mirrors,
+  add germany-3's. Best after the domain decision above.
+- The REALITY dest is rated weak (a CDN-fronted site), as it was on
+  germany-1 and germany-2, both blocked; that does not prove it was the
+  cause. Changing it now costs an Xray restart and new client configs.
+- germany-3 is the single box for its own users, the Germany relay and the
+  TR/NL/SG/IN hop, on 1 vCPU. Watch its load.
+- Installer fixes, found again: Xray as `User=xray` with its certificate
+  directory left unreadable (new), swanctl-load bound to
+  `strongswan-starter`, the WireGuard public key left 600, and no
+  self-loop guard.
+- `check-exit-reputation.py`: germany-3's proxy/VPN flag (the same verdict
+  accepted for the other range) is not in the baseline, which is the
+  owner's call; and the script crashes because ipapi.is's free tier no
+  longer returns `is_vpn`/`is_proxy`, which affects every node.
+- One geolocation database places germany-3 in Finland; others say
+  Germany.
