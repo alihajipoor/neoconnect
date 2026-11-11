@@ -58,7 +58,7 @@ describe("SubscriptionsService.create", () => {
 /** Reusing an unpaid attempt, rather than starting a fresh one on every
  * press of a payment button. */
 describe("SubscriptionsService.createOrReusePending", () => {
-  const PLAN = { id: "plan-1", isActive: true, durationDays: 30, dataCapBytes: 100n };
+  const PLAN = { id: "plan-1", isActive: true, isPurchasable: true, durationDays: 30, dataCapBytes: 100n };
 
   function build(existingPending: { id: string } | null = null) {
     const prisma = {

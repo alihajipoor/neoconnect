@@ -339,11 +339,21 @@ export class SubscriptionsService {
    * The dates and cap are refreshed on reuse: the row was never paid for,
    * so it should reflect the plan as it is now, not as it was when the
    * first abandoned attempt happened.
+   *
+   * Both plan flags are required, as the plan list a customer is shown
+   * requires both (PlansService.listActive). This checked isActive alone,
+   * and the id it is given comes from the caller, so a plan that works
+   * but is not on sale -- the trial, a plan staff hand out -- could be
+   * asked for by id although nobody had offered it. `create` below
+   * deliberately does not ask: the trial, a voucher, a referral reward
+   * and an operator assigning a plan all go through it, and an unlisted
+   * plan is exactly what those are for.
    */
   async createOrReusePending(customerId: string, planId: string) {
     const plan = await this.prisma.subscriptionPlan.findUnique({ where: { id: planId } });
     if (!plan) throw new BadRequestException("Plan not found");
     if (!plan.isActive) throw new BadRequestException("Plan is not active");
+    if (!plan.isPurchasable) throw new BadRequestException("Plan is not available for purchase");
 
     const existing = await this.prisma.subscription.findFirst({
       where: { customerId, planId, status: SubscriptionStatus.PENDING },

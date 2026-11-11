@@ -630,6 +630,19 @@ export class BillingService {
       return { subscriptionId: already.subscriptionId, alreadyRedeemed: true };
     }
 
+    // A new purchase of a plan that is not on sale: the same operator
+    // mistake as a product that maps to no active plan, and the same
+    // answer. createOrReusePending would refuse it anyway; said here so
+    // the customer is told what the inactive case tells them and the log
+    // names the product. Asked after the restore above, not before it: a
+    // plan taken off sale still belongs to whoever already bought it.
+    if (!plan.isPurchasable) {
+      this.logger.error(
+        `App Store product ${verified.productId} maps to a plan that is not on sale; a customer has paid for nothing`,
+      );
+      throw new BadRequestException("That purchase could not be matched to a plan");
+    }
+
     const subscription = await this.subscriptions.createOrReusePending(customerId, plan.id);
 
     let transaction;
