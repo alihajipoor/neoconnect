@@ -52,7 +52,7 @@ for header in "${headers[@]}"; do
 
   # Every variable the block uses must be named in its header, or the
   # tool would send the query with a hole in it.
-  used="$(grep -v '^[[:space:]]*--' "$WORK/body.sql" | grep -oE ":[\"'][a-z_]+[\"']" | tr -d ":\"'" | sort -u | tr '\n' ' ')"
+  used="$(grep -v '^[[:space:]]*--' "$WORK/body.sql" | grep -oE ":[\"'][a-z_]+[\"']" | tr -d ":\"'" | sort -u | tr '\n' ' ' || true)"
   for u in $used; do
     case " $vars " in *" $u "*) ;; *) echo "FAIL $name: uses :$u, which its header does not list"; failed=1 ;; esac
   done

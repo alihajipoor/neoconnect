@@ -13,7 +13,8 @@ RELAY_PROTOS="REALITY TLS TROJAN SS"
 # ---------------------------------------------------------------- part 0
 
 do_add_params() {
-  local c peer dest ver region="${REGION:-$(st region "")}"
+  local c peer dest ver region="${REGION:-}"
+  [[ -n "$region" ]] || region="$(st region "")"
   [[ "$region" =~ ^[a-z]{2}-[a-z-]+$ ]] || dry || die "region must look like de-germany (two letters, a dash, the country)"
   c="$(q name-count "name=$(nn)")" || return 1
   peer="${OPT_PEER:-$(q peer-pick "name=$(nn)" "region=$region")}" || return 1
@@ -283,7 +284,7 @@ EOF
 }
 
 do_add_install() {
-  local st_ i shown=""
+  local st_ shown=""
   if ! dry && [[ "$(rsh new "test -f /etc/neoxify/agent.json && echo enrolled")" == enrolled ]]; then
     say "this box is already enrolled: the installer is not run a second time (that would register a second"
     say "server and abandon the first). Checking what the first run left."
@@ -299,7 +300,7 @@ do_add_install() {
   rsh new "$REMOTE_DIR/install-drive.sh start $REMOTE_DIR/answers.tsv $PANEL_HOST:$PANEL_GRPC_PORT $PANEL_ORIGIN_NAME" || return 1
   dry && { rsh new "$REMOTE_DIR/install-drive.sh status"; return 0; }
   rm -f "$RUN_DIR/answers.tsv"
-  for i in $(seq 1 90); do
+  for _ in $(seq 1 90); do
     sleep 10
     st_="$(rsh new "$REMOTE_DIR/install-drive.sh status")" || continue
     case "$st_" in
@@ -564,7 +565,8 @@ e2e_record() { # <state key> <output>
 }
 
 do_add_e2e_direct() {
-  local p out key="d-$(nn)"
+  local p out key
+  key="d-$(nn)"
   pscript nx-xray-get.sh "$XRAY_VERSION" || return 1
   pscript nx-e2e-temp.sh gen-direct "$key" "$(nn)" | sed 's/^/  /' || return 1
   rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh adu $key" | rpipe new "umask 077; mkdir -p $REMOTE_DIR; cat > $REMOTE_DIR/adu.json; /usr/local/bin/xray api adu -s 127.0.0.1:10085 $REMOTE_DIR/adu.json 2>&1 | tail -1; shred -u $REMOTE_DIR/adu.json" || return 1
@@ -583,7 +585,8 @@ ok_add_e2e_direct() {
 }
 
 do_add_e2e_inside() {
-  local p out key="d-$(nn)"
+  local p out key
+  key="d-$(nn)"
   rpushdir relay relay || return 1
   for p in $NODE_PROTOS; do
     out="$(rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh env $key $p" | rpipe relay "NX_HEALTH=https://$PANEL_ORIGIN_NAME/api $REMOTE_DIR/nx-e2e-run.sh /usr/local/bin/xray '$(nn) $p from inside'")" || true
@@ -604,7 +607,8 @@ ok_add_e2e_inside() {
 }
 
 do_add_temp_off() {
-  local lines tag email key="d-$(nn)"
+  local lines tag email key
+  key="d-$(nn)"
   lines="$(pscript nx-e2e-temp.sh rmu "$key")" || return 1
   dry && rsh new "/usr/local/bin/xray api rmu -s 127.0.0.1:10085 -tag=<tag> <test email>   (once per temporary user)"
   while read -r tag email; do
@@ -760,7 +764,8 @@ ok_add_relay_routes() {
 }
 
 do_add_e2e_relay() {
-  local p out lines tag email key="r-$(nn)" set
+  local p out lines tag email key set
+  key="r-$(nn)"
   set="$(st relay_set none)"
   dry && set="{relay-set}"
   if [[ "$set" == none ]]; then
@@ -915,9 +920,9 @@ ok_add_e2e_issued() {
 
 do_add_monitoring() { say "read-only. Nothing is configured per server: the inside probe reads its list from the database every half hour, and the backend finds each server's API door by itself within 15 minutes of it coming online."; }
 ok_add_monitoring() {
-  local door rows try
+  local door rows
   expect "the server's API door has been found and checked by the backend, and the scheduled inside probe has a reading for it from the relay box"
-  for try in $(seq 1 34); do
+  for _ in $(seq 1 34); do
     door="$(q door "name=$(nn)")" || return 1
     rows="$(q inside-latest "name=$(nn)")" || return 1
     dry && return 0

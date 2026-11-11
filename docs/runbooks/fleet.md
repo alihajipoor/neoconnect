@@ -47,7 +47,8 @@ scripts/fleet/fleet add <name> <ip> --region <r> --dry-run   # every command it 
 | `fleet status [<name>]` | Read-only: heartbeat, agent, API door, plans, relay routes, customers' bytes, inside-probe readings, engine units, certificate days, DNS records. | Nothing: it is a readout. |
 
 Useful flags: `--dry-run`, `--from <step>`, `--only <step>`, `--yes`
-(do not ask before steps on a live host), `--peer <name>`,
+(do not ask before steps on a live host), `--done <step>` (the owner
+did that step), `--peer <name>`,
 `--relay-set <set>`, `--hop auto|yes|no`, `--plans "A,B"`, `--no-relay`,
 `--no-plans`, `--default-to <name>` (retire). `fleet --help` lists them.
 
@@ -57,7 +58,9 @@ Useful flags: `--dry-run`, `--from <step>`, `--only <step>`, `--yes`
 - **ask**: changes a live host other than the new box (the relay box,
   the hop server). Asks first.
 - **owner**: only a person can do it. Says exactly what, then waits for
-  `done`.
+  `done`. A run with no terminal (an AI session) stops there instead;
+  run the same command again with `--done <step>` once it is done. The
+  step's verify still has to pass.
 - **gate**: a decision. Passes, or stops and names the flag that records
   the owner's decision to go on: `--accept-held`, `--accept-blocked-zone`,
   `--accept-weak-dest`.

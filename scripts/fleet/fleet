@@ -35,9 +35,9 @@
 #
 # The human runbook is docs/runbooks/fleet.md.
 #
-# Most of what is set here is read by the files under lib/, which
-# shellcheck does not follow; hence, for the whole file:
-# shellcheck disable=SC2034
+# Most of what is set here is read by the files under lib/, and the
+# linter does not follow them; hence, for the whole file:
+# shellcheck disable=SC2034,SC1090,SC1091
 set -uo pipefail
 
 FLEET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,7 +50,7 @@ OPT_ACCEPT_HELD=0 OPT_ACCEPT_ZONE=0 OPT_ACCEPT_DEST=0 OPT_DEFAULT_TO="" OPT_NAME
 REGION="" DEST="" NAME="" OLD="" NEW_IP=""
 
 usage() {
-  sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-2}"
 }
 
@@ -131,7 +131,6 @@ load_env() {
 nn() { if [[ -n "$NAME" ]]; then echo "$NAME"; else state_get name; fi; }
 st() { state_get "$@"; }
 
-# shellcheck source=lib/remote.sh
 load_checklists() {
   source "$FLEET_DIR/lib/remote.sh"
   source "$FLEET_DIR/lib/checklist-precheck.sh"

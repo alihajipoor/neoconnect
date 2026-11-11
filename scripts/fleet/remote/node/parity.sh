@@ -46,6 +46,19 @@ backup() {
   [ -e "$1" ] && cp -a "$1" "$B/"
 }
 
+# Both certificates have to exist before anything is pointed at them:
+# the hooks below tell the two lineages apart by name.
+p_names() {
+  local n
+  for n in "$L1" "$L2"; do
+    if [ ! -s "/etc/letsencrypt/live/$n/fullchain.pem" ]; then
+      bad names "no certificate on this box for one of the two names"
+      return
+    fi
+  done
+  ok names
+}
+
 api_block() {
   cat <<API
     location /api/ {
@@ -272,6 +285,7 @@ p_modes() {
   done
 }
 
+p_names
 p_nginx
 p_hooks
 p_agent

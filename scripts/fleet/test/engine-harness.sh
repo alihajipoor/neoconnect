@@ -2,15 +2,16 @@
 # A four-step checklist with no host behind it, for engine.test.mjs: the
 # engine's own behaviour (stop on a failed verify, resume, --only,
 # --done, the undo log, masking) run for real, not under --dry-run.
-set -uo pipefail
+#
+# What is set here is read by lib/engine.sh, hence for the whole file:
 # shellcheck disable=SC2034
+set -uo pipefail
 FLEET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../lib/engine.sh
 source "$FLEET_DIR/lib/engine.sh"
 
 OPT_DRY=0 OPT_YES=0 OPT_NEW_RUN=0 OPT_RUN="" OPT_FLAGS=""
 OPT_FROM="${T_FROM:-}" OPT_ONLY="${T_ONLY:-}" OPT_DONE="${T_DONE:-}"
-# shellcheck disable=SC2034
 PANEL_HOST=203.0.113.5 NEW_IP=203.0.113.10 NODE_DNS_ZONE=example.org
 
 do_t_one() {
