@@ -8209,3 +8209,70 @@ boxes are the doors and each must work alone (checked: each answered by
 itself from inside). Every VPN server should double as a door by
 address, with the details riding in the server list so they follow
 server changes; that work is on `claude/server-doors`, not merged.
+
+## 2026-11-10 (night) — desktop 0.9.62, mobile 0.2.39, iOS 1.0.1 (18): every server is a door, and both stores
+
+**Why:** App Store version 1.0 (build 15, submitted 2026-10-26) was
+approved and went live by itself. The owner asked for everything from
+the day to be built for all three platforms and submitted to both
+stores at once. Earlier the same day he ruled out extra door servers:
+the two Iranian boxes are the doors for a shutdown, and every VPN server
+should double as a door by address, following server changes without a
+signing or a release.
+
+**Live:**
+- Backend from main `859ffe83` (dump `pre-node-doors-20261110T222808Z`,
+  migration `20261111_node_doors`), then `489390e7` for the release
+  feed fix below. Every node back within seconds each time.
+- Desktop 0.9.62 and Android 0.2.39 from main `4c27a160` (Release
+  Desktop run 42921534106, Release Android run 42921534081).
+- iOS 1.0.1 (18) = mobile 0.2.39, built on the Mac from `4c27a160`
+  with the existing xcframework (the engine has not changed since build
+  16), uploaded, processed VALID, export compliance false, in TestFlight
+  group "Neoxify". App Store version 1.0.1 created with it and submitted:
+  WAITING_FOR_REVIEW. The next build number is 19.
+- Google Play: 2039 (0.2.39) sent for review on the production track
+  (0.2.36 is what Play serves).
+
+**Server doors** (`claude/server-doors`, merged as `859ffe83`):
+- The backend learns each node's door by itself every 15 minutes: it
+  connects by address to the node's TLS ports, requires a public-CA
+  certificate naming a host recorded for that node, checks the API
+  answers through it, and stores the port and the key's pin. A door is
+  handed out with the credentials only while verified within the hour.
+  Seven of seven servers had one within a minute of the first round.
+- The apps ask a door only after every name has failed, the server last
+  connected through first, at most three doors, before the last-resort
+  relay; never with a tunnel up; a write is never sent twice.
+- A review found two defects before the merge, both fixed: a door never
+  connected to was counted as having taken a write, and doors could go
+  first on a network where the names answer.
+- **Proven on the VM** (`C:\Users\aliha\Claude\vm\results\doors1`): with
+  every API name dead in the guest, 43 of 43 requests were answered
+  through a door at about 0.6 s once doors went first, a token renewal
+  among them; 34 s after the names came back the app was using them.
+- **Seen there:** on a network where every name is dead before the
+  connect, the tunnel lands as "Connected, not confirmed" (the exit
+  address cannot be read by name). Older than doors; not fixed.
+- **Unverified:** a filtered network, a phone, a failing door and the
+  hand-over to the next one, a certificate renewal (the pin changes with
+  it; a device holding an older list loses that door until it refetches).
+
+**Broken and fixed during the release: the Android download.** The
+backend read only the first 30 entries of the GitHub release feed, and
+the feed does not keep each product's newest release near the top. The
+day's desktop releases pushed every Android release past entry 30, so
+after the next backend restart the Android download link and update
+check answered 503 for about 15 minutes. `489390e7` reads every page.
+
+**How the iOS release was done from the Windows PC:** over SSH to the
+Mac. The keychain is not usable from an SSH session, so the build ran
+as a one-off LaunchAgent in the logged-in session; upload by altool and
+the App Store steps through the App Store Connect API key that lives on
+the Mac. The owner waived the TestFlight purchase test for this
+submission: the purchase code is as in approved build 15 apart from the
+wording of its errors.
+
+**Not done:** the Mac re-sign of the endpoint lists; the door region
+gate for foreign-registered networks (task filed); why some Windows
+installs stay on old versions.
