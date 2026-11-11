@@ -232,8 +232,8 @@ download URL precisely because they collided.
 Current: desktop `0.9.63`, mobile `0.2.40`, agent `v0.2.12` — each
 matching its latest released tag.
 
-**The production backend tracks `main`** as of 2026-11-11 (`7c4d3520`,
-with migrations through `20261111_node_doors` applied; per-device credentials and device
+**The production backend tracks `main`** as of 2026-11-11 (`8b2ca7b4`,
+with migrations through `20261112_usage_hourly` applied; per-device credentials and device
 slots are live. `CONCURRENCY_CUT=enforce` is set in the panel host's
 `infra/.env` (the owner turned the device-limit backstop on on
 2026-10-07; the code default is `shadow`) -- see `docs/device-slots.md`). It is deployed over SSH to the

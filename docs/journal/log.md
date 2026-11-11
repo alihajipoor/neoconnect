@@ -9187,3 +9187,80 @@ The shortened unsigned-installer line ("We plan to get a signing
 certificate.", drops "before the public launch", en+fa, one sentence
 each) is on `claude/website-download-line`, not merged, not live. The
 owner asked to see it before it goes up.
+
+## 2026-11-11 (night, last) — database trimmed, deploy 3, off-server copy scheduled, a restore proven
+
+**Status:** done; VACUUM/REINDEX not done (see below)
+**Touches:** production database, production backend (`8b2ca7b4`), `modules/data-retention`, `docs/usage-retention.md`, `infra/scripts/pull-offbox-backup.ps1` (`bad18278`), `CLAUDE.md`
+
+**The rule (owner-approved).** Raw `usage_records` are kept 35 days,
+or longer if a reader needs more (daily history, idle sweep, profile
+traffic, block-watch baseline and any open incident). Older rows are
+rolled up per node per UTC hour into `usage_hourly` (migration
+`20261112_usage_hourly`) in the same transaction that deletes them, so
+a second run cannot count twice. `agent_commands` that are ACKED or
+FAILED and older than 7 days go; QUEUED and SENT are never touched.
+Nightly BullMQ job `data-retention` at 01:15 UTC, but **it is off**:
+the running backend does not have `DATA_RETENTION=on` (checked
+23:43Z). Tonight's trim was a run by hand. How-to, turning it on, and
+undo in `docs/usage-retention.md`.
+
+**Deploy 3.** `4858aa29` -> `8b2ca7b4` after dump
+`pre-trim-20261111T2317Z.sql.gz` (158 MB, gzip -t ok). Migration
+applied, 8/8 nodes ONLINE, ir2 back, API 200, no backend errors in 3
+min. discord-bot is now log-capped (3 x 10m).
+
+**First run, 23:32-23:34Z.** Cutoff 2026-10-07 23:00Z. 1,505,784 usage
+rows (france-1, germany-1, ir1, singapore-1, turkey-1) became 12,944
+hourly rows; per-node byte sums before equal `usage_hourly` after, and
+all-time totals for all 16 nodes are unchanged. 233,669 finished
+commands deleted; the 8,342 QUEUED rows are untouched. Customers'
+activity, block watch, ISP recommendations and /nodes read the same.
+Nodes ONLINE and API 200 throughout.
+
+**Stopped at VACUUM.** `VACUUM (ANALYZE) usage_records` failed at once:
+"could not resize shared memory segment". The postgres container's
+/dev/shm is 64 MB and a parallel vacuum wants more. Nothing else ran.
+So the table is still 1538 MB on disk and REINDEX was not done; it
+would hit the same limit (2 parallel workers) and could leave an
+invalid index. Next time use `VACUUM (ANALYZE, PARALLEL 0)` and
+`SET max_parallel_maintenance_workers = 0` before each
+`REINDEX CONCURRENTLY`. Disk is 52% used, 18 GB free.
+`docs/usage-retention.md` says about 8,300 pending rows are older than
+7 days; it is 21 (all 8,342 QUEUED are kept). Wording only.
+
+**Off-server copy.** Merged `bad18278`. Scheduled task "Neoxify
+off-server backup" on the Windows PC: daily 21:00 Pacific, after the
+host's 03:00 UTC nightly and its 03:40 prune; catches up when missed;
+not elevated, no stored password, no window. Its test run pulled the
+11-11 `database.dump`, sha256 equal to the host's. It runs only while
+the PC is on and the owner is logged on.
+
+A copy of the panel host's `infra/.env` now also exists off the box,
+outside the repo and outside any synced folder. It holds the
+credential encryption key; without that key no dump restores the
+credential blobs. The owner should also keep that key in his password
+manager. The copy is a snapshot: re-copy after any server secret change.
+
+Still only on the box: gateway and Let's Encrypt private keys, the
+relay TLS and standby keys, live nginx configs, inside-probe config,
+cron and keys, root's outbound ssh key, `neoxify-relay-fw.service`,
+Redis data.
+
+**Restore test.** On the panel host, a throwaway `postgres:16-alpine`
+(production's image), 1 CPU, 1 GB, no network, data in a temp dir.
+The 11-11 03:00 `database.dump` (sha256 equal to the PC's copy)
+restored with `pg_restore -j 1 --no-owner --no-privileges
+--exit-on-error` in 80 s, exit 0, 1.2 GB. All 45 tables present (prod
+has 46: `usage_hourly` came later). Counts plausible against prod:
+customers 111/117, subscriptions 103/109, nodes 14/16, protocol_users
+5,535/6,433; usage and commands larger, as expected. Every
+protocol_users credential blob is non-null; mail and payment secret
+columns present. Container, data and temp files removed; disk back to
+52%.
+
+**Unverified.** That the restored credential blobs decrypt with the
+saved key (not tried: it would mean putting the key on a throwaway).
+A full application start on the restored copy. A restore from the
+PC's copy on another machine. Space reclaimed by the trim (needs the
+VACUUM above). The nightly retention job: off, never run on schedule.
