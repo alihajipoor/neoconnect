@@ -8815,8 +8815,13 @@ host holds 50 MB of ours; nothing to do there.
 - Panel host: the build cache pruned in three steps, three unused
   images removed, the old log follower stopped. 87% to 64% used, 13 GB
   free. The five containers kept their start times and process ids,
-  health answered 200, all servers ONLINE. At the end of the day, after
-  the rest below: 36% used, 23 GB free.
+  health answered 200, all servers ONLINE.
+- Panel host, later, with the owner's yes: 69 of the 78 dumps deleted
+  (about 9 GB; keep the newest of each of the last 7 days and of each
+  earlier week), which took it from 64% to 36% used, 23 GB free. Its own
+  journal is capped too. Retention is automatic from now on:
+  `infra/scripts/prune-db-backups.sh` runs daily on the host
+  (`docs/backup-restore.md`).
 - Servers, as a stopgap: an rsyslog rule, daily rotation with a 100 MB
   limit, 30 kept, logrotate run hourly; only rsyslog restarted, the
   engines' process ids compared before and after. netherlands-1, uk-1,
@@ -8943,17 +8948,10 @@ on sale (merged, not deployed); the fleet tool merged after its first
 read-only run.
 
 **Open.**
-- The dumps. 69 of the 78 were proposed for deletion (keep the newest
-  of each of the last 7 days and of each earlier week; the list is on
-  the panel host next to the dumps), waiting for the owner's yes. A
-  later commit on main adds `infra/scripts/prune-db-backups.sh`, and
-  `docs/backup-restore.md` now says it is installed on the panel host
-  as a daily job with a similar keep rule. This entry did not check the
-  host. If that job is in place, it, not a hand deletion, decides the
-  old dumps at its first run.
 - The backend deploy that carries the purchase check and the region
   check.
-- A deploy that prunes the build cache, or builds somewhere else.
+- A deploy that prunes the build cache, or builds somewhere else. The
+  daily dump retention has not had its first scheduled run yet.
 - `usage_records` (1.5 GB, never trimmed), and `agent_commands` still
   queued for disabled servers (757 new rows a day).
 - The backups sit on the disk they protect.
