@@ -442,7 +442,7 @@ return array(
     // -----------------------------------------------------------------
 
     'announce.trial.pill' => ':days days free',
-    'announce.trial.headline' => 'Your first :days days are free, with :data',
+    'announce.trial.headline' => 'A :days-day free trial with :data',
     'announce.trial.short' => 'No card needed. Create an account in the app and start right away.',
 
     'announce.launch.pill' => 'Out now',

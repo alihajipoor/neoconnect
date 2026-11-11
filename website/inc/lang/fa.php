@@ -388,7 +388,7 @@ return array(
     // -----------------------------------------------------------------
 
     'announce.trial.pill' => ':days روز رایگان',
-    'announce.trial.headline' => ':days روز اول با :data حجم رایگان است',
+    'announce.trial.headline' => 'دوره رایگان :days روزه با :data حجم',
     'announce.trial.short' => 'کارت بانکی لازم نیست. در برنامه حساب بسازید و همان موقع شروع کنید.',
 
     'announce.launch.pill' => 'منتشر شد',
