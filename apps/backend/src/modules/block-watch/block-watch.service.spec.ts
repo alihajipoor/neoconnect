@@ -57,6 +57,8 @@ interface World {
   subscriptions: Row[];
   /** usage: [nodeId, subscriptionId, reportedAt ms, bytesUp] */
   usage: [string, string, number, number][];
+  /** usage_hourly: [nodeId, subscriptionId, hourStart ms, bytesUp] */
+  hourly?: [string, string, number, number][];
   incidents: Row[];
   alerts: Row[];
 }
@@ -97,17 +99,18 @@ function latestDials(world: World, sql: { values: unknown[] }): Row[] {
 function fakePrisma(world: World) {
   let seq = 0;
   const withNode = (i: Row) => ({ ...i, node: { ...world.nodes.find((n) => n.id === i.nodeId) } });
-  const usageGroups = ({ where, having }: Row) => {
+  const groups = (rows: [string, string, number, number][], field: string, { where, having }: Row) => {
     const sums = new Map<string, number>();
-    for (const [nodeId, subscriptionId, at, up] of world.usage) {
-      if (!matches({ nodeId, subscriptionId, reportedAt: new Date(at) }, where)) continue;
+    for (const [nodeId, subscriptionId, at, up] of rows) {
+      if (!matches({ nodeId, subscriptionId, [field]: new Date(at) }, where)) continue;
       const key = `${nodeId}|${subscriptionId}`;
       sums.set(key, (sums.get(key) ?? 0) + up);
     }
     return [...sums]
-      .filter(([, up]) => up >= having.bytesUp._sum.gte)
-      .map(([key]) => ({ nodeId: key.split("|")[0], subscriptionId: key.split("|")[1] }));
+      .filter(([, up]) => !having || up >= having.bytesUp._sum.gte)
+      .map(([key, up]) => ({ nodeId: key.split("|")[0], subscriptionId: key.split("|")[1], _sum: { bytesUp: BigInt(up) } }));
   };
+  const usageGroups = (args: Row) => groups(world.usage, "reportedAt", args);
   return {
     node: {
       findMany: jest.fn(async ({ where }: Row) => world.nodes.filter((n) => matches(n, where))),
@@ -197,6 +200,7 @@ function fakePrisma(world: World) {
       findMany: jest.fn(async ({ where }: Row) => world.alerts.filter((a) => matches(a, where)).map(withNode)),
     },
     usageRecord: { groupBy: jest.fn(async (args: Row) => usageGroups(args)) },
+    usageHourly: { groupBy: jest.fn(async (args: Row) => groups(world.hourly ?? [], "hourStart", args)) },
   };
 }
 
@@ -746,6 +750,35 @@ describe("BlockWatchService", () => {
 
     // Five days on, most of the last week is the block itself.
     await service.runCycle(new Date(T0 + 5 * DAY));
+    const traffic = world.incidents[0].evidenceJson.families.find((f: Row) => f.family === "traffic");
+    expect(traffic).toMatchObject({ firing: true });
+    expect(traffic.summary).toContain("usually 10 at this time of day before this began");
+    expect(world.incidents[0].status).toBe("OPEN");
+  });
+});
+
+describe("BlockWatchService past the days of usage detail kept", () => {
+  it("still compares an incident open for weeks with the days before it began, from the rolled-up hours", async () => {
+    const usage: World["usage"] = [];
+    for (let day = 1; day <= 14; day += 1) {
+      for (let s = 0; s < 10; s += 1) usage.push(["n1", `sub${s}`, T0 - day * DAY - 30 * MIN, 50_000]);
+    }
+    const { service, world } = build("record", { usage });
+    // The block: from T0 on, one person gets through a day.
+    for (let day = 0; day <= 40; day += 1) world.usage.push(["n1", "sub0", T0 + day * DAY - 30 * MIN, 50_000]);
+    await service.runCycle(new Date(T0));
+    expect(world.incidents[0].firedFamilies).toEqual(["traffic"]);
+
+    // 40 days on, the retention has rolled the days before the block up
+    // by the hour and deleted their detailed rows.
+    const later = T0 + 40 * DAY;
+    const cutoff = later - 35 * DAY;
+    world.hourly = world.usage
+      .filter(([, , at]) => at < cutoff)
+      .map(([n, sub, at, up]) => [n, sub, Math.floor(at / HOUR) * HOUR, up] as [string, string, number, number]);
+    world.usage = world.usage.filter(([, , at]) => at >= cutoff);
+
+    await service.runCycle(new Date(later));
     const traffic = world.incidents[0].evidenceJson.families.find((f: Row) => f.family === "traffic");
     expect(traffic).toMatchObject({ firing: true });
     expect(traffic.summary).toContain("usually 10 at this time of day before this began");

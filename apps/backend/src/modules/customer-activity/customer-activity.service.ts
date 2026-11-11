@@ -4,6 +4,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { AsnLookupService } from "../network-identity/asn-lookup.service";
 import { CustomerAuthService } from "../customer-auth/customer-auth.service";
 import { RETENTION_DAYS } from "../client-attempts/client-attempts.service";
+import { lastUpstreamAt } from "../data-retention/usage-reads";
 
 /** "Connected now" means a usage record ending inside this window: the
  * nodes report traffic about every 30 seconds while it flows, so ten
@@ -416,22 +417,15 @@ export class CustomerActivityService {
       .sort((a, b) => b.lastTrafficAt - a.lastTrafficAt || a.email.localeCompare(b.email));
   }
 
-  /** The newest usage report across these subscriptions, one indexed
-   * lookup each. */
+  /** The newest usage report across these subscriptions, indexed lookups
+   * each. Sent by the device, as in liveRows: the server's handshake
+   * attempts to a WireGuard peer that has gone are not "seen". Reaches
+   * the rolled-up hours too, so a customer idle for longer than the days
+   * of detail kept still has a last-seen (data-retention/usage-reads). */
   private async lastTrafficAt(subscriptionIds: string[]): Promise<Date | null> {
     if (subscriptionIds.length === 0) return null;
-    const newest = await Promise.all(
-      subscriptionIds.map((subscriptionId) =>
-        this.prisma.usageRecord.findFirst({
-          // Sent by the device, as in liveRows: the server's handshake
-          // attempts to a WireGuard peer that has gone are not "seen".
-          where: { subscriptionId, bytesUp: { gt: 0 } },
-          orderBy: { reportedAt: "desc" },
-          select: { reportedAt: true },
-        }),
-      ),
-    );
-    const times = newest.filter((r): r is { reportedAt: Date } => !!r).map((r) => r.reportedAt.getTime());
+    const newest = await Promise.all(subscriptionIds.map((id) => lastUpstreamAt(this.prisma, id)));
+    const times = newest.filter((d): d is Date => !!d).map((d) => d.getTime());
     return times.length ? new Date(Math.max(...times)) : null;
   }
 

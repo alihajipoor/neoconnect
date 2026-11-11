@@ -33,6 +33,7 @@ function build() {
       groupBy: jest.fn().mockResolvedValue([]),
       findFirst: jest.fn().mockResolvedValue(null),
     },
+    usageHourly: { aggregate: jest.fn().mockResolvedValue({ _max: { lastUpAt: null } }) },
     protocolUser: {
       findMany: jest.fn().mockResolvedValue([
         { id: "pu-1", protocol: "XRAY_VLESS_REALITY" },
@@ -210,6 +211,22 @@ describe("CustomerActivityService.activity", () => {
 
     expect(now.connected).toBeNull();
     expect(now.lastSeenAt).toBe(new Date(NOW - 90 * MIN).toISOString());
+  });
+
+  it("still has a last seen, from the rolled-up hours, once the detailed rows are gone", async () => {
+    const { service, prisma } = build();
+    const rolledUp = new Date(NOW - 40 * 86_400_000);
+    prisma.usageHourly.aggregate.mockImplementation(({ where }: any) =>
+      Promise.resolve({ _max: { lastUpAt: where.subscriptionId === "sub-1" ? rolledUp : null } }),
+    );
+
+    const { now } = await service.activity("cust-1", {}, NOW);
+
+    expect(now.lastSeenAt).toBe(rolledUp.toISOString());
+    // lastUpAt, never lastReportedAt: a download-only hour is not "seen".
+    expect(prisma.usageHourly.aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { subscriptionId: "sub-1", lastUpAt: { not: null } } }),
+    );
   });
 
   it("lists devices, revoked ones too, each with the newest app version its platform reported", async () => {

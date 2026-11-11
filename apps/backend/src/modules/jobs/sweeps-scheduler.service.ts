@@ -45,6 +45,11 @@ const RELAY_UNVERIFIED_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // and nothing else it reads changes faster. Runs whatever BLOCK_WATCH
 // says, and does nothing when it is off.
 const BLOCK_WATCH_INTERVAL_MS = 30 * 60 * 1000;
+// The database retention (docs/usage-retention.md), once a night at
+// 01:15 UTC: late night in the watched country, and clear of the 03:00
+// pg_dump (which holds a lock on every table for its whole run) and the
+// 03:40 dump pruning. Runs whatever DATA_RETENTION says; off by default.
+export const DATA_RETENTION_PATTERN = "15 1 * * *";
 
 /** Registers the two repeatable sweep jobs on startup. Adding a
  * repeatable job with the same jobId+repeat config is idempotent in
@@ -106,6 +111,11 @@ export class SweepsSchedulerService implements OnModuleInit {
       "block-watch",
       {},
       { repeat: { every: BLOCK_WATCH_INTERVAL_MS }, jobId: "block-watch-sweep" },
+    );
+    await this.queue.add(
+      "data-retention",
+      {},
+      { repeat: { pattern: DATA_RETENTION_PATTERN, tz: "UTC" }, jobId: "data-retention-sweep" },
     );
     // Each node's door to the panel API (modules/node-doors). The cadence
     // is the door's own: what is handed out is measured in these rounds.

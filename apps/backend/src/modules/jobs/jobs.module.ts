@@ -14,6 +14,7 @@ import { ReferralsModule } from "../referrals/referrals.module";
 import { ProtocolUsersModule } from "../protocol-users/protocol-users.module";
 import { RelayAuthModule } from "../relay-auth/relay-auth.module";
 import { NodeDoorsModule } from "../node-doors/node-doors.module";
+import { DataRetentionModule } from "../data-retention/data-retention.module";
 import { SweepsProcessor } from "./sweeps.processor";
 import { SweepsSchedulerService } from "./sweeps-scheduler.service";
 import { AnnouncementsProcessor } from "./announcements.processor";
@@ -61,6 +62,9 @@ const announcementsQueue = BullModule.registerQueue({ name: ANNOUNCEMENTS_QUEUE 
     // For the round that learns each node's door. No cycle: it pulls in
     // Prisma only.
     NodeDoorsModule,
+    // For the nightly database retention. No cycle: it pulls in Prisma
+    // and config only.
+    DataRetentionModule,
   ],
   providers: [SweepsProcessor, SweepsSchedulerService, AnnouncementsProcessor],
   exports: [announcementsQueue],

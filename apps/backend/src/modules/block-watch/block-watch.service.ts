@@ -43,6 +43,7 @@ import {
   type IncidentView,
   type StoredEvidence,
 } from "./block-watch.messages";
+import { upstreamGroups } from "../data-retention/usage-reads";
 
 export { parseBlockWatchMode, type BlockWatchMode } from "./block-watch.mode";
 
@@ -771,15 +772,15 @@ export class BlockWatchService {
     const customerOf = new Map(subscriptions.map((s) => [s.id, s.customerId]));
 
     for (const { start, end, nodeIds } of windows.values()) {
-      const groups = await this.prisma.usageRecord.groupBy({
-        by: ["nodeId", "subscriptionId"],
-        where: {
-          nodeId: { in: nodeIds },
-          subscriptionId: { in: [...customerOf.keys()] },
-          reportedAt: { gte: new Date(start), lt: new Date(end) },
-        },
-        _sum: { bytesUp: true },
-        having: { bytesUp: { _sum: { gte: tuning.upstreamActiveBytes } } },
+      // Past the days of detail kept (an incident open that long), the
+      // rolled-up hours count as well (data-retention/usage-reads).
+      const groups = await upstreamGroups(this.prisma, {
+        nodeIds,
+        subscriptionIds: [...customerOf.keys()],
+        start,
+        end,
+        now,
+        atLeast: tuning.upstreamActiveBytes,
       });
       for (const group of groups) {
         const customer = customerOf.get(group.subscriptionId);
@@ -833,14 +834,13 @@ export class BlockWatchService {
     const byNode = new Map<string, Map<number, number>>();
     for (const [day, nodeIds] of byOffset) {
       const end = now - day * DAY;
-      const groups = await this.prisma.usageRecord.groupBy({
-        by: ["nodeId", "subscriptionId"],
-        where: {
-          nodeId: { in: nodeIds },
-          reportedAt: { gte: new Date(end - tuning.trafficWindow), lt: new Date(end) },
-        },
-        _sum: { bytesUp: true },
-        having: { bytesUp: { _sum: { gte: tuning.upstreamActiveBytes } } },
+      // Past the days of detail kept, as above.
+      const groups = await upstreamGroups(this.prisma, {
+        nodeIds,
+        start: end - tuning.trafficWindow,
+        end,
+        now,
+        atLeast: tuning.upstreamActiveBytes,
       });
       for (const group of groups) {
         const counts = byNode.get(group.nodeId) ?? new Map<number, number>();

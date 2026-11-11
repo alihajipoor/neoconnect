@@ -53,6 +53,7 @@ describe("CustomersService", () => {
     referralReward: { deleteMany: jest.Mock };
     referralCredit: { deleteMany: jest.Mock };
     usageRecord: { deleteMany: jest.Mock };
+    usageHourly: { deleteMany: jest.Mock };
     customerSession: { updateMany: jest.Mock };
     customerIdentity: { deleteMany: jest.Mock };
     $transaction: jest.Mock;
@@ -90,6 +91,7 @@ describe("CustomersService", () => {
       referralReward: { deleteMany: jest.fn() },
       referralCredit: { deleteMany: jest.fn() },
       usageRecord: { deleteMany: jest.fn() },
+      usageHourly: { deleteMany: jest.fn() },
       customerSession: { updateMany: jest.fn() },
       customerIdentity: { deleteMany: jest.fn() },
       // The real $transaction takes an array of prepared operations; the
@@ -357,6 +359,14 @@ describe("CustomersService", () => {
       expect(prisma.protocolUser.deleteMany).toHaveBeenCalled();
       expect(prisma.subscription.deleteMany).toHaveBeenCalled();
       expect(prisma.$transaction).toHaveBeenCalled();
+    });
+
+    it("takes the customer's rolled-up usage hours with it (docs/usage-retention.md)", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await service.remove("customer-1");
+
+      expect(prisma.usageHourly.deleteMany).toHaveBeenCalledWith({ where: { subscription: { customerId: "customer-1" } } });
     });
 
     it("tells the node to drop each credential before deleting it", async () => {

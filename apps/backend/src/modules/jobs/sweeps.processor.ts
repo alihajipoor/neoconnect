@@ -11,6 +11,7 @@ import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { RelayAuthService } from "../relay-auth/relay-auth.service";
 import { BlockWatchService } from "../block-watch/block-watch.service";
 import { NodeDoorsService } from "../node-doors/node-doors.service";
+import { DataRetentionService } from "../data-retention/data-retention.service";
 import { SWEEPS_QUEUE, STALE_PENDING_AFTER_MS } from "./jobs.constants";
 
 @Processor(SWEEPS_QUEUE)
@@ -28,6 +29,7 @@ export class SweepsProcessor extends WorkerHost {
     private readonly relayAuthService: RelayAuthService,
     private readonly blockWatchService: BlockWatchService,
     private readonly nodeDoorsService: NodeDoorsService,
+    private readonly dataRetentionService: DataRetentionService,
   ) {
     super();
   }
@@ -127,6 +129,13 @@ export class SweepsProcessor extends WorkerHost {
             `block watch: ${flagged.map((r) => `${r.nodeName}=${r.verdict ?? "outage"}[${r.firing.join("+")}]`).join(", ")}`,
           );
         }
+        break;
+      }
+      case "data-retention": {
+        // Rolls old usage up by the hour and deletes finished commands
+        // (docs/usage-retention.md). Off unless DATA_RETENTION says
+        // otherwise; logs its own summary and swallows its own failures.
+        await this.dataRetentionService.runNightly();
         break;
       }
       case "node-doors": {

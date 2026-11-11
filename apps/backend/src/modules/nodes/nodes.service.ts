@@ -116,6 +116,8 @@ export class NodesService {
     await this.prisma.$transaction([
       this.prisma.agentCommand.deleteMany({ where: { nodeId: id } }),
       this.prisma.usageRecord.deleteMany({ where: { nodeId: id } }),
+      // Its rolled-up hours (they cascade too; named here like the rest).
+      this.prisma.usageHourly.deleteMany({ where: { nodeId: id } }),
       this.prisma.enrollmentToken.deleteMany({ where: { nodeId: id } }),
       this.prisma.node.delete({ where: { id } }),
     ]);

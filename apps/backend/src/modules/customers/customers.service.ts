@@ -372,6 +372,9 @@ export class CustomersService {
         // UsageRecord model), but they belong to this customer's
         // subscriptions, so they go here.
         this.prisma.usageRecord.deleteMany({ where: { subscription: { customerId: id } } }),
+        // And their rolled-up hours, older than the days of detail kept
+        // (they cascade with the subscription too).
+        this.prisma.usageHourly.deleteMany({ where: { subscription: { customerId: id } } }),
         // Before the transactions they reference.
         this.prisma.invoice.deleteMany({ where: { customerId: id } }),
         this.prisma.paymentTransaction.deleteMany({ where: { customerId: id } }),
