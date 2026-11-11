@@ -9073,6 +9073,16 @@ now get Trial: 50 GB, 30 days, 2 devices, instead of Starter's no cap,
 30 days, 1 device. Existing accounts are unchanged. No sign-up had
 happened by the time of writing, so the first real one is **unverified**.
 
+**Trial shrunk at 22:38 UTC, on the owner's word** ("I want to make the
+trial plan 10 GB , 7 Days, 1 Device"). `PATCH /plans/:id` as SUPERADMIN
+took Trial from 50 GB, 30 days, 2 devices to 10 GB (10737418240 bytes),
+7 days, 1 device; routes, price, name and flags unchanged (read back by
+GET and from the database). Cap and expiry are copied onto a subscription
+when it is created, so the 9 existing active Trial subscriptions keep
+their own caps and end dates; the device limit is read live from the
+plan, so they are all held to 1 device from now on (3 had more than one
+device signed in, none had two in use at that moment).
+
 **The two inactive plans the owner asked about.** Internal test has 0
 subscribers and is where new servers are tried first (the canary rule).
 Ultimate Max has 1 active subscriber, so the panel will not delete it
