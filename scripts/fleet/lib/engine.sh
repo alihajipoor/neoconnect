@@ -332,7 +332,7 @@ list_steps() {
 # open_run <command> <subject>. Resumes the newest unfinished run of the
 # same command and subject unless --new-run is given.
 open_run() {
-  local cmd="$1" subject="$2" base d
+  local cmd="$1" subject="$2" base d n
   if dry; then
     RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fleet-dry.XXXXXX")"
     # shellcheck disable=SC2064
@@ -353,7 +353,17 @@ open_run() {
       done
     fi
     if [[ -z "$RUN_DIR" ]]; then
-      RUN_DIR="$base/$cmd-$subject-$(date -u +%Y%m%dT%H%M%SZ)"
+      # Never a directory that is already there. The name is good to
+      # the second, and a run started in the same second as one that
+      # just finished was handed that run's directory: every step
+      # already "done", and the new run complete without doing anything.
+      d="$base/$cmd-$subject-$(date -u +%Y%m%dT%H%M%SZ)"
+      RUN_DIR="$d"
+      n=2
+      while [[ -e "$RUN_DIR" ]]; do
+        RUN_DIR="$d-$n"
+        n=$((n + 1))
+      done
       mkdir -p "$RUN_DIR"
       echo "New run: $RUN_DIR"
     else

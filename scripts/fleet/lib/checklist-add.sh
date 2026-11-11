@@ -582,7 +582,7 @@ do_add_dest() {
   fi
   # The throwaway keys cross from the box to the panel host through a
   # pipe on this PC, never onto its screen or disk.
-  out="$(rsh new "$REMOTE_DIR/reality-trial.sh params $NEW_IP" | rpipe panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-pipe.sh $REMOTE_DIR/xray 'REALITY through a trial inbound, before the build'")" || true
+  out="$(rsh_to new "$REMOTE_DIR/reality-trial.sh params $NEW_IP" panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-pipe.sh $REMOTE_DIR/xray 'REALITY through a trial inbound, before the build'")" || true
   if ! dry && ! grep -q '^E2E-PASS' <<<"$out"; then
     rsh new "$REMOTE_DIR/reality-trial.sh log 8" | sed 's/^/    trial inbound: /' || true
   fi
@@ -642,7 +642,7 @@ ok_add_dump_node() {
 
 do_add_token() {
   panel_mint || return 1
-  rsh panel "cat $TOKEN_FILE" | rpipe new "umask 077; mkdir -p $REMOTE_DIR; cat > $REMOTE_DIR/admin-token; chmod 600 $REMOTE_DIR/admin-token; test -s $REMOTE_DIR/admin-token && echo token-on-box" || return 1
+  rsh_to panel "cat $TOKEN_FILE" new "umask 077; mkdir -p $REMOTE_DIR; cat > $REMOTE_DIR/admin-token; chmod 600 $REMOTE_DIR/admin-token; test -s $REMOTE_DIR/admin-token && echo token-on-box" || return 1
   dry || state_set token_at "$(date +%s)"
   say "the installer creates the server in the panel itself with this token. It lives 15 minutes and is"
   say "never refreshed, so the installer starts now and must finish inside that."
@@ -1046,7 +1046,7 @@ do_add_e2e_direct() {
     state_set direct_temp_before "$(squash "$before")"
   fi
   pscript nx-e2e-temp.sh gen-direct "$key" "$(nn)" | sed 's/^/  /' || return 1
-  rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh adu $key" | rpipe new "umask 077; mkdir -p $REMOTE_DIR; cat > $REMOTE_DIR/adu.json; /usr/local/bin/xray api adu -s 127.0.0.1:10085 $REMOTE_DIR/adu.json 2>&1 | tail -1; shred -u $REMOTE_DIR/adu.json" || return 1
+  rsh_to panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh adu $key" new "umask 077; mkdir -p $REMOTE_DIR; cat > $REMOTE_DIR/adu.json; /usr/local/bin/xray api adu -s 127.0.0.1:10085 $REMOTE_DIR/adu.json 2>&1 | tail -1; shred -u $REMOTE_DIR/adu.json" || return 1
   undo "the temporary users live only in the new server's running Xray; add.temp-off removes them (or: xray api rmu per user, or any Xray restart)"
   for p in $NODE_PROTOS; do
     out="$(rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh env $key $p | $PANEL_ENV$REMOTE_DIR/nx-e2e-run.sh $REMOTE_DIR/xray '$(nn) $p from outside'")" || true
@@ -1066,7 +1066,7 @@ do_add_e2e_inside() {
   key="d-$(nn)"
   rpushdir relay relay || return 1
   for p in $NODE_PROTOS; do
-    out="$(rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh env $key $p" | rpipe relay "NX_HEALTH=https://$PANEL_ORIGIN_NAME/api $REMOTE_DIR/nx-e2e-run.sh /usr/local/bin/xray '$(nn) $p from inside'")" || true
+    out="$(rsh_to panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh env $key $p" relay "NX_HEALTH=https://$PANEL_ORIGIN_NAME/api $REMOTE_DIR/nx-e2e-run.sh /usr/local/bin/xray '$(nn) $p from inside'")" || true
     dry || e2e_record "e2e_inside_$p" "$out"
   done
   say "a temporary client beside the relay box's own Xray, which is not touched; nothing was sent to the sign-in box"
@@ -1356,7 +1356,7 @@ do_add_e2e_relay() {
     no_strays relay "$(squash "$before")" || return 1
     state_set relay_temp_before "$(squash "$before")"
   fi
-  rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh adu $key" | rpipe relay "$REMOTE_DIR/relay.sh adu" || return 1
+  rsh_to panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh adu $key" relay "$REMOTE_DIR/relay.sh adu" || return 1
   undo "the temporary users live only in the relay's running Xray; this step removes them and counts them out before it ends (by hand: relay.sh rmu <tag> <email>, the pairs from nx-e2e-temp.sh rmu $key on the panel host)"
   for p in $RELAY_PROTOS; do
     out="$(rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh env $key $p | $PANEL_ENV$REMOTE_DIR/nx-e2e-run.sh $REMOTE_DIR/xray 'relay to $(nn) $p'")" || true

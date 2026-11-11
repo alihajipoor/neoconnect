@@ -71,6 +71,20 @@ rpipe() {
   ssh -i "$(role_key "$role")" "${SSH_BASE[@]}" $(role_ssh_opts "$role") "root@$(role_addr "$role")" "$cmd"
 }
 
+# rsh_to <role> <command> <role> <command>: what the first host prints is
+# what the second one reads, through a pipe on this PC and nowhere else.
+# Under --dry-run the two are said one after the other. Left as a pipe
+# there, each side printed its own line when it happened to start, and
+# the order of a dry run's output changed from one run to the next.
+rsh_to() {
+  if dry; then
+    rsh "$1" "$2"
+    rpipe "$3" "$4"
+    return 0
+  fi
+  rsh "$1" "$2" | rpipe "$3" "$4"
+}
+
 # lrun <command...>: something run on this PC that reaches out by itself
 # (the repository's own maintenance scripts).
 lrun() {

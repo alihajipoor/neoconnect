@@ -8677,6 +8677,25 @@ OpenSSL 4.0.
   connections for every query.
 - It leaves an empty scratch directory on the panel host.
 
+**After the merge (15:30Z):** the first CI run on main failed in the
+tool's own tests, with the same code that had passed on the branch
+twenty minutes earlier. Two things in the tool depended on timing, and
+neither had to do with a server:
+- A run's directory is named to the second. A run started in the same
+  second as one that had just finished was handed that run's directory,
+  every step in it marked done. The engine's tests run their passes a
+  tenth of a second apart and met it. A new run now never takes a
+  directory that is already there.
+- Under `--dry-run`, the two ends of a pipe between two hosts each
+  printed their line when they happened to start, so the order of a dry
+  run's output changed from run to run. They are said one after the
+  other now.
+
+Both are fixed with a test that meets the case every time (a clock that
+stands still), not one time in three. The other three jobs of that run
+passed: the agent, the backend with the tool's queries against the
+migrated schema, the desktop client.
+
 ## 2026-11-11 (evening) — the signed endpoint lists, re-signed and published (offline v8, server v101)
 
 The re-sign that earlier entries list as "not done" is done. Both lists
