@@ -14,7 +14,8 @@
  *  which listed the nodes, every one of them live and carrying paying
  *  customers -- since changed: France retired, the UK added, Finland and
  *  Singapore moved to replacement servers, the Netherlands and India
- *  added (2026-11-06), and India and Singapore retired (2026-11-11).
+ *  added (2026-11-06), India and Singapore retired (2026-11-11), and
+ *  France back and Sweden added on new servers (2026-11-11).
  *
  *  Rules for editing:
  *    - Add a country here ONLY when a node is actually enrolled and
@@ -55,6 +56,12 @@ return array(
         ),
 
         array(
+            'code' => 'fr',
+            'country' => array('en' => 'France', 'fa' => 'فرانسه'),
+            'city' => null,
+        ),
+
+        array(
             'code' => 'gb',
             'country' => array('en' => 'United Kingdom', 'fa' => 'بریتانیا'),
             'city' => null,
@@ -63,6 +70,12 @@ return array(
         array(
             'code' => 'nl',
             'country' => array('en' => 'Netherlands', 'fa' => 'هلند'),
+            'city' => null,
+        ),
+
+        array(
+            'code' => 'se',
+            'country' => array('en' => 'Sweden', 'fa' => 'سوئد'),
             'city' => null,
         ),
 
