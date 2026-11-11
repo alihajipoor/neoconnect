@@ -9112,3 +9112,26 @@ carries build 18 and is still WAITING_FOR_REVIEW from its 2026-11-10
 submission; nothing on the store side changed. Next build number 20.
 **Unverified:** nothing has run on an iPhone (connect, flags), no
 sandbox purchase on build 19.
+
+## 2026-11-11 (night) — retired servers' routes and protocol configs deleted
+
+Owner's yes: "delete the retired servers routes and configs". Covers only
+the 8 DISABLED nodes (ir1, germany-1, germany-2, finland-2, france-1,
+singapore-1, singapore-2, india-1).
+
+Checked first: 61 routes (8 on each of the seven exits, 5 relay routes
+on ir1 exiting on france-1), all disabled, in no plan, no plan's default,
+no trial route, no credentials; 69 protocol configs (8 each, 13 on ir1),
+no credentials, no route of a live server using one. No live-server route
+(ir2 included) exits on a retired server, so nothing was left on ir2.
+
+Deleted through the admin API, routes then configs, one at a time: 61 of
+61 routes and 69 of 69 configs, none refused. The nodes stay DISABLED
+and their usage history stays (row count per retired node identical
+before and after). All 8 live nodes ONLINE afterwards; no backend errors.
+The relay deletes queued 5 DELETE_USER for france-1 and 5 REMOVE_ROUTE
+for ir1; both are switched off, so those stay QUEUED.
+
+Undo file (the deleted rows, restores configs then routes):
+`/root/retired-cleanup-undo-20261111.sql.gz` on the panel host, mode
+600, outside `db-backups`. Holds key material; remove it after a month.
