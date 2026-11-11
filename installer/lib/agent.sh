@@ -231,6 +231,62 @@ fetch_agent_binary() {
   fi
 }
 
+# Automatic package upgrades off, before anything is installed.
+#
+# Two reasons, both met on real builds. On a freshly booted VPS apt-daily
+# takes the dpkg lock within the first minutes, and an install that waits
+# on it runs past the fifteen minutes its admin token lives. And an
+# unattended upgrade later restarts nginx, OpenVPN or strongSwan in the
+# middle of the night, under whoever is connected. Every node in the
+# fleet has these masked; this used to be done by hand before running the
+# installer.
+#
+# The cost is real and deliberate: security updates on a node are a
+# manual job from here on. Masked, not disabled, so nothing re-enables
+# them behind our back. Safe to repeat; a unit that does not exist on a
+# minimal image is simply skipped.
+mask_auto_upgrades() {
+  local unit waited=0
+  for unit in apt-daily-upgrade.timer apt-daily.timer unattended-upgrades.service; do
+    systemctl mask --now "$unit" >/dev/null 2>&1 || true
+  done
+  # Whatever was already running has to let go of the lock first.
+  while pgrep -x unattended-upgr >/dev/null 2>&1 || pgrep -x apt-get >/dev/null 2>&1 ||
+    pgrep -x dpkg >/dev/null 2>&1; do
+    if [[ "$waited" -ge 300 ]]; then
+      echo "  WARNING: a package operation is still running after five minutes; carrying on." >&2
+      break
+    fi
+    if [[ "$waited" -eq 0 ]]; then
+      echo "  Waiting for a running package upgrade to finish..."
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+  systemctl reset-failed >/dev/null 2>&1 || true
+  echo "Automatic package upgrades are masked on this node: security updates are manual from now on."
+}
+
+# Room in the connection-tracking table.
+#
+# A small VPS starts with a limit sized from its RAM -- 7,680 entries on
+# a 1 GB box -- and a node NATs every WireGuard, OpenVPN and IKEv2 flow
+# of every customer through that table. When it fills, the kernel drops
+# new connections and logs one line nobody reads. 65,536 is what the
+# fleet runs. Only ever raised: a bigger box keeps its bigger default.
+# The module is loaded at boot by name, or the sysctl has nothing to set.
+raise_conntrack_max() {
+  local want=65536 have
+  modprobe nf_conntrack >/dev/null 2>&1 || true
+  have="$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo 0)"
+  if [[ "$have" -ge "$want" ]]; then
+    return 0
+  fi
+  echo nf_conntrack > /etc/modules-load.d/neoxify-conntrack.conf
+  echo "net.netfilter.nf_conntrack_max=$want" > /etc/sysctl.d/99-neoxify-conntrack.conf
+  sysctl -q -p /etc/sysctl.d/99-neoxify-conntrack.conf 2>/dev/null || true
+}
+
 action_install_agent() {
   require_root
 
@@ -264,7 +320,9 @@ action_install_agent() {
   fi
 
   detect_os
+  mask_auto_upgrades
   install_base_deps
+  raise_conntrack_max
   fetch_agent_binary
   install_agentd_unit
 
@@ -1941,13 +1999,212 @@ xray_test_config() {
   return "$refused"
 }
 
+# The Xray build every node runs. Pinned, because "whatever is newest
+# today" is not something a fleet can be: this used to pipe upstream's
+# install script from its main branch, and from late October 2026 that
+# script installed a newer Xray than any live node ran and set it up to
+# run as a new `xray` user. Every node built after that came up with a
+# dead Xray and was repaired by hand.
+#
+# Change it here and in the operator's fleet.env (XRAY_VERSION) together.
+XRAY_PINNED_VERSION="${NEOXIFY_XRAY_VERSION:-v26.3.27}"
+
+# The binary, at the pinned version.
+#
+# A node that already has an Xray keeps the one it has. Menu option 5
+# runs install_xray on nodes that are serving customers, and it used to
+# upgrade Xray to the newest release, and restart it, as a side effect of
+# "reconfigure". Moving a live node to another version is a decision, so
+# it takes NEOXIFY_XRAY_REINSTALL=1 to make it.
+install_xray_binary() {
+  local have=""
+  if [[ -x "$XRAY_BIN" ]]; then
+    have="$("$XRAY_BIN" version 2>/dev/null | awk 'NR==1 {print $2}')"
+  fi
+  if [[ -n "$have" && "v${have#v}" == "$XRAY_PINNED_VERSION" ]]; then
+    echo "  Xray $XRAY_PINNED_VERSION is already installed."
+    return 0
+  fi
+  if [[ -n "$have" && "${NEOXIFY_XRAY_REINSTALL:-0}" != "1" ]]; then
+    echo "  This node runs Xray v${have#v}; the fleet's pinned build is $XRAY_PINNED_VERSION."
+    echo "  Leaving the binary alone. Set NEOXIFY_XRAY_REINSTALL=1 to replace it (that restarts Xray)."
+    return 0
+  fi
+
+  # To a file, not `bash -c "$(curl ...)"`: a download that fails halfway
+  # then runs nothing instead of half a script.
+  local script
+  script="$(mktemp)" || return 1
+  if ! curl -fsSL -o "$script" https://github.com/XTLS/Xray-install/raw/main/install-release.sh; then
+    echo "ERROR: could not download the Xray install script." >&2
+    rm -f "$script"
+    return 1
+  fi
+  if ! bash "$script" install --version "$XRAY_PINNED_VERSION"; then
+    echo "ERROR: the Xray install script failed." >&2
+    rm -f "$script"
+    return 1
+  fi
+  rm -f "$script"
+
+  have="$("$XRAY_BIN" version 2>/dev/null | awk 'NR==1 {print $2}')"
+  if [[ "v${have#v}" != "$XRAY_PINNED_VERSION" ]]; then
+    echo "ERROR: asked for Xray $XRAY_PINNED_VERSION and got v${have:-nothing}." >&2
+    return 1
+  fi
+}
+
+# The unit Xray runs under: User=nobody, with the two capabilities it
+# needs and no more.
+#
+# Ours, written from installer/assets/xray.service, rather than whatever
+# upstream's script left. Everything else here is built around nobody:
+# the certificate copy is owned by nobody, the log directory is owned by
+# nobody, the firewall rules that keep Xray off IPv6 and off this node's
+# own address match on nobody's uid. Upstream's unit now names an `xray`
+# user, who can read none of it -- and an unreadable certificate key
+# fails the whole config, so every protocol on the node is down.
+#
+# Idempotent: a unit that already matches is not rewritten and nothing is
+# reloaded. Xray is not restarted here; install_xray restarts it once, at
+# the end, after the config has been tested.
+install_xray_unit() {
+  local unit=/etc/systemd/system/xray.service asset="$SCRIPT_DIR/assets/xray.service"
+  if [[ ! -f "$asset" ]]; then
+    echo "ERROR: $asset is missing from the installer." >&2
+    return 1
+  fi
+  if ! cmp -s "$asset" "$unit"; then
+    if [[ -f "$unit" ]]; then
+      cp -a "$unit" "$unit.before-neoxify"
+    fi
+    install -m 644 -o root -g root "$asset" "$unit"
+    systemctl daemon-reload
+    echo "  Xray's unit set to run as nobody (the previous one is kept as $unit.before-neoxify)."
+  fi
+  systemctl enable xray >/dev/null 2>&1 || true
+}
+
+# Upstream's `xray` account, once it owns nothing and runs nothing. Called
+# after the restart: until then the Xray upstream's script started may
+# still be running under it.
+remove_unused_xray_account() {
+  id xray >/dev/null 2>&1 || return 0
+  [[ "$(systemctl show xray -p User --value 2>/dev/null)" == "nobody" ]] || return 0
+  if pgrep -u xray >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ -z "$(find /usr/local/etc/xray /usr/local/share/xray /var/log/xray -user xray -print -quit 2>/dev/null)" ]]; then
+    userdel xray >/dev/null 2>&1 || true
+  fi
+}
+
+# Who may read what under Xray's directories.
+#
+# Upstream's script hands the config tree to root:xray at 750, and that
+# takes the certificate directory with it: the copy inside is owned by
+# nobody and correct, and nobody can no longer reach it. Found on the
+# 2026-11-10 build, after the unit had already been fixed.
+#
+# The config is 640 root:nogroup rather than the 644 a plain write
+# leaves: it holds the REALITY private key and the Shadowsocks server
+# key, and nobody (group nogroup) is the one process that needs it.
+# Safe to run any number of times.
+xray_fix_modes() {
+  local d=/usr/local/etc/xray
+  if [[ -d "$d" ]]; then
+    chown root:root "$d"
+    chmod 755 "$d"
+  fi
+  if [[ -f "$d/config.json" ]]; then
+    chown root:nogroup "$d/config.json"
+    chmod 640 "$d/config.json"
+  fi
+  if [[ -d "$d/certs" ]]; then
+    chown root:root "$d/certs"
+    chmod 755 "$d/certs"
+    if [[ -f "$d/certs/fullchain.pem" ]]; then
+      chown nobody:nogroup "$d/certs/fullchain.pem"
+      chmod 644 "$d/certs/fullchain.pem"
+    fi
+    if [[ -f "$d/certs/privkey.pem" ]]; then
+      chown nobody:nogroup "$d/certs/privkey.pem"
+      chmod 400 "$d/certs/privkey.pem"
+    fi
+  fi
+  if [[ -d /usr/local/share/xray ]]; then
+    chown -R root:root /usr/local/share/xray
+    chmod 755 /usr/local/share/xray
+    find /usr/local/share/xray -type f -exec chmod 644 {} +
+  fi
+  if [[ -d /var/log/xray ]]; then
+    chown nobody:nogroup /var/log/xray
+    chmod 750 /var/log/xray
+    find /var/log/xray -type f -exec chown nobody:nogroup {} + -exec chmod 600 {} +
+  fi
+}
+
+# Xray may not open connections to this node's own public address.
+#
+# A client reconnect bug once had a customer's tunnel dial the server it
+# was already inside: the node connected to itself 22,437 times before
+# anyone looked, each loop a new connection carrying the last one. The
+# fix on the client shipped; this is the node refusing to take part, for
+# the next bug of that shape. Matched on nobody's uid, so only Xray is
+# affected: root still reaches the node's own ports (health checks, the
+# installer's own probes), and Xray still reaches everything else.
+#
+# Not on a relay: its Xray never has a reason to dial itself either, but
+# its firewall is nftables with a NAT hop of its own in the output path,
+# and that box is changed one rule at a time by a person.
+#
+# Idempotent: an older copy of the rules is removed first, so the address
+# can change. Persisted the way install_ikev2 and install_openvpn persist
+# theirs. installer/maintenance/no-self-loop.sh does the same on a node
+# that is already live.
+SELF_LOOP_GUARD_COMMENT="neoxify-no-self-loop"
+
+install_self_loop_guard() {
+  local ip="$1" relay="${2:-${node_is_relay:-n}}" rule
+  if [[ "$relay" == "y" ]]; then
+    return 0
+  fi
+  if [[ ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo "  WARNING: no public IPv4 address known for this node; the self-connect guard was not installed." >&2
+    return 0
+  fi
+  while read -r rule; do
+    [[ -n "$rule" ]] || continue
+    # shellcheck disable=SC2086
+    iptables ${rule/-A /-D } 2>/dev/null || true
+  done < <(iptables -S OUTPUT 2>/dev/null | grep -- "$SELF_LOOP_GUARD_COMMENT" || true)
+  iptables -I OUTPUT 1 -d "$ip/32" -p tcp -m owner --uid-owner nobody -m conntrack --ctstate NEW \
+    -m comment --comment "$SELF_LOOP_GUARD_COMMENT" -j REJECT --reject-with tcp-reset
+  iptables -I OUTPUT 2 -d "$ip/32" -p udp -m owner --uid-owner nobody -m conntrack --ctstate NEW \
+    -m comment --comment "$SELF_LOOP_GUARD_COMMENT" -j REJECT --reject-with icmp-port-unreachable
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent >/dev/null 2>&1 || true
+  netfilter-persistent save >/dev/null 2>&1 || true
+  echo "  Xray is barred from connecting to this node's own address."
+}
+
+# The address the self-connect guard protects: the one given at install,
+# or on a re-run the one this node accepts connections on.
+node_public_ipv4() {
+  if [[ -n "${node_ip:-}" ]]; then
+    echo "$node_ip"
+    return 0
+  fi
+  ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1
+}
+
 # Installs xray-core, generates a REALITY keypair, and writes a config
 # with an empty client list -- users are hot-added/removed entirely
 # through the agent's HandlerService calls (see
 # agent/internal/protocols/xray), never by editing this file again.
 install_xray() {
   echo "Installing Xray-core..."
-  bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+  install_xray_binary || return 1
+  install_xray_unit || return 1
 
   # Menu option 5 runs this against nodes that are already serving
   # customers, which makes rotating the REALITY identity actively
@@ -2622,6 +2879,19 @@ for rule in old.get("routing", {}).get("rules", []):
 PY
   fi
 
+  # Before the test and the restart, because both the config just written
+  # and the certificate copy have to be readable by the user Xray runs as.
+  # `xray run -test` below runs as root and passes on files nobody cannot
+  # open, which is exactly how a node came up "installed" with every
+  # protocol down.
+  xray_fix_modes
+  if [[ -n "${tls_key:-}" && -f "$tls_key" ]] && command -v runuser >/dev/null 2>&1 &&
+    ! runuser -u nobody -- test -r "$tls_key"; then
+    echo "ERROR: Xray runs as nobody, and nobody cannot read $tls_key." >&2
+    echo "       Check the modes of /usr/local/etc/xray and /usr/local/etc/xray/certs." >&2
+    return 1
+  fi
+
   # Tested before the restart, and the previous config put back if it
   # fails. A config Xray refuses is every protocol on the node down at
   # once, and a re-run of this function is exactly when one gets written.
@@ -2642,6 +2912,9 @@ PY
   else
     systemctl restart xray
   fi
+
+  install_self_loop_guard "$(node_public_ipv4)" "${is_relay:-n}"
+  remove_unused_xray_account
 
   local config_id params
   if [[ "$reality_is_new" == "y" ]]; then
@@ -2938,7 +3211,11 @@ install_wireguard() {
   else
     ( umask 077 && wg genkey > /etc/wireguard/server_private.key )
   fi
-  ( umask 077 && wg pubkey < /etc/wireguard/server_private.key > /etc/wireguard/server_public.key )
+  # The private key under a tight umask; the PUBLIC key readable. It is
+  # what every customer's config already carries, and leaving it 600 only
+  # made each new node differ from the fleet in a file-mode audit.
+  wg pubkey < /etc/wireguard/server_private.key > /etc/wireguard/server_public.key
+  chmod 644 /etc/wireguard/server_public.key
   local private_key public_key
   private_key="$(cat /etc/wireguard/server_private.key)"
   public_key="$(cat /etc/wireguard/server_public.key)"
@@ -3713,6 +3990,26 @@ CONF
   systemctl enable --now strongswan >/dev/null 2>&1 || \
     systemctl enable --now strongswan-starter >/dev/null 2>&1 || true
 
+  # Which unit the daemon actually is on this box. Ubuntu 24.04 runs it
+  # as strongswan-starter; Ubuntu 26.04 (charon-systemd) as
+  # strongswan.service, and has no strongswan-starter at all. The loader
+  # below was written for the first and named it outright, so on 26.04 it
+  # required a unit that does not exist: it never ran at boot, and the
+  # daemon came back listening and accepting nobody. Fixed by hand on
+  # every 26.04 build until now.
+  local ike_unit="" ike_candidate
+  for ike_candidate in strongswan strongswan-starter; do
+    if [[ "$(systemctl show -p LoadState --value "$ike_candidate.service" 2>/dev/null)" == "loaded" ]]; then
+      # The unit's own id, in case one name is an alias of the other.
+      ike_unit="$(systemctl show -p Id --value "$ike_candidate.service" 2>/dev/null)"
+      break
+    fi
+  done
+  if [[ -z "$ike_unit" ]]; then
+    echo "  WARNING: no strongSwan unit is loaded; binding the config loader to strongswan-starter.service." >&2
+    ike_unit="strongswan-starter.service"
+  fi
+
   # Load the swanctl config at every boot, not only this one.
   #
   # Ubuntu 24.04 ships strongswan-starter, which reads the legacy
@@ -3725,14 +4022,14 @@ CONF
   cat > /etc/systemd/system/neoxify-swanctl-load.service <<UNIT
 [Unit]
 Description=Load Neoxify swanctl connections and credentials
-After=strongswan-starter.service
-Requires=strongswan-starter.service
+After=$ike_unit
+Requires=$ike_unit
 # PartOf, so restarting the daemon by hand reloads this too. Without it
-# the unit only runs at boot, and "systemctl restart strongswan-starter"
+# the unit only runs at boot, and "systemctl restart ${ike_unit%.service}"
 # during maintenance leaves the daemon up with no connections, no pool
 # and no EAP secrets -- every client then authenticates against nothing.
 # Cost an hour on france-1 before it was noticed.
-PartOf=strongswan-starter.service
+PartOf=$ike_unit
 
 [Service]
 Type=oneshot
