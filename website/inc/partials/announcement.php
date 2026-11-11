@@ -11,7 +11,7 @@
  *
  * The message follows the same free-trial switch as the rest of the site.
  * With the trial off it falls back to a plain "we're live" line, so this can
- * never advertise a free month the panel is not actually granting.
+ * never advertise a free trial the panel is not actually granting.
  *
  * Dismissal is stored against announcement_version, so bumping that string in
  * config re-shows a changed message without nagging people about an old one.
@@ -25,7 +25,7 @@ if (!nx_cfg('announcement_enabled', false)) {
 
 $nx_trial = nx_free_trial_enabled();
 $nx_variant = $nx_trial ? 'trial' : 'launch';
-$nx_days = (int) nx_cfg('free_trial_days', 30);
+$nx_days = (int) nx_cfg('free_trial_days', 7);
 $nx_glyph = $nx_trial ? 'ticket' : 'download';
 
 // Deliberately NOT keyed by locale. It used to be, and the result was that
@@ -37,7 +37,7 @@ $nx_key = 'nx-announce-' . nx_cfg('announcement_version', '1');
 <div class="announce" data-announce data-announce-key="<?php echo nx_esc($nx_key); ?>">
   <span class="tag tag--ok"><?php echo nx_icon($nx_glyph); ?><?php echo nx_e('announce.' . $nx_variant . '.pill', array('days' => nx_num($nx_days))); ?></span>
   <p class="announce__text">
-    <b><?php echo nx_e('announce.' . $nx_variant . '.headline'); ?></b>
+    <b><?php echo nx_e('announce.' . $nx_variant . '.headline', array('days' => nx_num($nx_days), 'data' => nx_format_data(nx_cfg('free_trial_gb', 10)))); ?></b>
     <span><?php echo nx_e('announce.' . $nx_variant . '.short'); ?></span>
   </p>
   <?php /* Only the script can remember a dismissal, so without it there is

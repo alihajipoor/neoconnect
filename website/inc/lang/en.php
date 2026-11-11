@@ -284,7 +284,7 @@ return array(
     // the higher price buys.
     'home.pricing.relay_only' => 'Backup routes only, not the standard servers',
     'home.pricing.relay_premium' => 'Made for times when connections abroad are cut off',
-    'home.pricing.trial' => 'New accounts get a :days-day free trial. No card needed.',
+    'home.pricing.trial' => 'New accounts get a :days-day free trial with :data. No card needed.',
     'home.pricing.note' => 'Prices are in US dollars.',
 
     // -----------------------------------------------------------------
@@ -438,11 +438,11 @@ return array(
     //
     // Two versions. The trial one only ever renders when the free trial is
     // switched on in config; otherwise the launch one runs, so the popup can
-    // never promise a free month that isn't being granted.
+    // never promise a free trial that isn't being granted.
     // -----------------------------------------------------------------
 
     'announce.trial.pill' => ':days days free',
-    'announce.trial.headline' => 'Your first month is free',
+    'announce.trial.headline' => 'A :days-day free trial with :data',
     'announce.trial.short' => 'No card needed. Create an account in the app and start right away.',
 
     'announce.launch.pill' => 'Out now',
@@ -617,8 +617,8 @@ return array(
     'home.trust.logs.title' => 'We don\'t claim "no logs"',
     'home.trust.logs.body' => 'Our servers keep connection logs, so we can\'t truthfully say they don\'t. The privacy page explains what is recorded and why.',
 
-    'home.trust.beta.title' => 'It\'s in beta, and the installer isn\'t signed',
-    'home.trust.beta.body' => 'People use it every day, but it\'s still early and changes often. Windows shows a warning when you run the installer, because it isn\'t code-signed yet.',
+    'home.trust.beta.title' => 'The Windows installer isn\'t signed yet',
+    'home.trust.beta.body' => 'Windows shows a warning when you run the installer, because it isn\'t code-signed yet.',
 
     'home.trust.honest.title' => 'No way to connect works forever',
     'home.trust.honest.body' => 'No one can promise that a particular way to connect will keep working on a network that blocks VPNs. That\'s why the app has several and switches between them by itself.',
