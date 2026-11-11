@@ -8593,3 +8593,86 @@ Netherlands, and move data both ways.
   caused by this work; worth watching.
 - germany-3 now carries the relay traffic of three exits. If it is
   blocked or down, twelve relay routes stop with it.
+
+## 2026-11-11 (evening) — the fleet tool, merged after its first read-only run
+
+**Status:** merged. Its reading side is proven on the real fleet;
+nothing that writes has run. `scripts/fleet/fleet` is the 67-step hand
+procedure for adding, retiring and replacing a server, as a checklist:
+every step has a command and a verify, a run can stop anywhere and be
+picked up again, and each change is logged with the line that undoes
+it. The runbook is `docs/runbooks/fleet.md`. With it came the
+installer's fixes for Ubuntu 26.10 and for what a provider's image
+brings along (`docs/installer-os-support.md`).
+
+**Asked before the merge: does it change anything on a live server by
+itself?** No. Nothing on any server fetches or runs anything from this
+repository on its own. The panel host has two scheduled jobs of ours
+(the nightly backup and the inside probe), and both run files that only
+change when a person pulls. The servers have no timer or scheduled job
+of ours at all, and the relay box only its quota reset. The one
+workflow a push to main starts is CI. The installer changes reach the
+next box somebody builds; the tool does something only when somebody
+runs it.
+
+**What ran, all of it read-only (14:20-15:10Z):**
+- `fleet status` for all eight servers, the relay box included, and the
+  one server that until today only took the other machine's key.
+- `fleet precheck` against a server that is already built: key access
+  to all four hosts, then it stopped before starting anything, as it
+  should.
+- `fleet add` and `fleet retire` under `--dry-run` for an existing
+  server: 48 and 22 steps, in the expected order, no address printed,
+  no host contacted.
+- The pieces that only read, one by one against live servers and
+  through the tool's own code: the retire guards, the build verify, the
+  parity and fleet-form checks, the four maintenance scripts run dry,
+  the image report, the dest audit with its control case, the view from
+  outside, the hop and plan parsers, the user counts.
+- No engine was restarted, nothing was written to the database or to
+  DNS, and every file put on a server was in memory and removed. The
+  Xray process on each server touched, the relay's included, is the one
+  it was before.
+
+**What it found.** Four places where a healthy server was read wrongly.
+All four are fixed, each with a test built from what the servers
+printed (`scripts/fleet/test/real-output.test.mjs`):
+- A relay route rule counted twice: Xray's API prints one rule as two
+  lines that both carry its tag, so 28 rules read as 56.
+- The two firewall rules that keep Xray off IPv6 "missing" on every
+  server that has them. They were looked for by user name, and
+  ip6tables prints, and saves, the user as a number. The verify step of
+  a build could not have passed on any server.
+- The API mirror sites called drift on every server: compared byte for
+  byte with a rendering that had two header lines in another order, and
+  no room for the comment a person wrote above each site.
+- The time service picked wrongly about four times in ten: a command
+  piped into `grep -q` under pipefail fails with the match found. The
+  same shape was taken out of five other verdicts.
+
+**Read right the first time:** the user counts; the relay's hop rules,
+live and in its file; the hop server's table, edited by hand the same
+afternoon, with a second masquerade rule the tool would not have
+written; the guards (the server that carries the hop was refused, once
+for the hop and once for a plan default that sits on it; a server that
+carries neither was allowed); the plan arithmetic on the real plans;
+the image report on an interface that is not `eth0`; the dest audit on
+OpenSSL 4.0.
+
+**Not proven, and not to be read as proven:**
+- Any step that writes. No add, retire or replace has run. No key,
+  package, certificate, installer run, firewall rule, DNS record,
+  route, plan edit or hop change was made by the tool. Its first real
+  add or retire is still to be done, with the owner watching.
+- The installer on a fresh Ubuntu 26.10 box, and the image repairs.
+  Only the report ran.
+- The checks that need a box built by the tool. The verify step's
+  image line fails on every server built before it, because none has
+  the installer copy that line asks.
+- A user count of zero as the real Xray prints it. No inbound on the
+  fleet is empty; both ways it can be printed are handled.
+
+**Open:**
+- `fleet status` takes close to four minutes for eight servers: two
+  connections for every query.
+- It leaves an empty scratch directory on the panel host.
