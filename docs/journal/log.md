@@ -9266,3 +9266,12 @@ saved key (not tried: it would mean putting the key on a throwaway).
 A full application start on the restored copy. A restore from the
 PC's copy on another machine. Space reclaimed by the trim (needs the
 VACUUM above). The nightly retention job: off, never run on schedule.
+
+**Finished, 23:49-23:55Z.** With `SET max_parallel_maintenance_workers = 0`:
+VACUUM (ANALYZE, PARALLEL 0) on both tables, then REINDEX CONCURRENTLY of all
+six indexes, each valid, no `_ccnew`/`_ccold` left. usage_records 1538 -> 864 MB
+(indexes 907 -> 233 MB), agent_commands 119 -> 97 MB. Builder prune freed
+5.0 GB. Disk 52% -> 37% (17.6 -> 23.1 GB free). `DATA_RETENTION=on` since
+23:52:56Z (backend recreated, 8/8 nodes ONLINE, ir2 back, API 200); next run
+2026-11-12 01:15Z, dry run now finds 0 to do. Unverified: the first scheduled
+run itself, and `shm_size: 256m`, which applies only when Postgres is next recreated.

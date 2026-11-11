@@ -28,6 +28,8 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     logging: *logs-medium
+    # Docker's default 64 MB /dev/shm makes parallel VACUUM/REINDEX fail (docs/usage-retention.md).
+    shm_size: 256m
     environment:
       POSTGRES_USER: neoxify
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}

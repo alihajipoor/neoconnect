@@ -110,8 +110,10 @@ It prints JSON: `usage.cutoff` and `usage.setBy` (the reader that set
 the cutoff), the rows and hours per node, and the finished commands that
 would go by status. It also prints `keptPendingOlderThanCutoff`: the
 QUEUED and SENT rows older than 7 days, which stay. Compare these with
-the numbers the owner was shown: about 1.5 million usage rows, about
-234,000 commands, and about 8,300 pending rows kept.
+the numbers the owner was shown: about 1.5 million usage rows and about
+234,000 commands. The first run (2026-11-11) showed
+`keptPendingOlderThanCutoff` 21, not about 8,300: all 8,342 pending
+rows were kept, and only 21 of them are older than 7 days.
 
 ### 3. Real run
 
@@ -135,6 +137,16 @@ was deleted during the run. Stop and look before anything else runs.
 
 ### 4. Plain VACUUM
 
+**On the production host, parallel maintenance workers must be off**
+for this step and for every REINDEX in step 5. The Postgres container's
+`/dev/shm` is 64 MB, and a parallel VACUUM or index build fails at once
+with "could not resize shared memory segment ... No space left on
+device" (2026-11-11). Start every session with
+`SET max_parallel_maintenance_workers = 0;` (session only; no server
+setting changes, no restart). `infra/docker-compose.prod.yml` now gives
+Postgres `shm_size: 256m`, but that applies only once the Postgres
+container is next recreated; keep the setting either way.
+
 This takes no exclusive lock. Run it once the delete is done. It does
 not make `usage_records` itself smaller on disk: the deleted rows are
 the oldest, at the front of the file, so their space is marked free and
@@ -144,8 +156,9 @@ reason for `VACUUM FULL`.
 
 ```sh
 docker exec -i neoxify-postgres-1 sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
-VACUUM (ANALYZE) usage_records;
-VACUUM (ANALYZE) agent_commands;
+SET max_parallel_maintenance_workers = 0;
+VACUUM (ANALYZE, PARALLEL 0) usage_records;
+VACUUM (ANALYZE, PARALLEL 0) agent_commands;
 SQL
 ```
 
@@ -156,6 +169,7 @@ the next. None of them blocks reads or writes.
 
 ```sh
 docker exec -i neoxify-postgres-1 sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SET max_parallel_maintenance_workers = 0;
 REINDEX INDEX CONCURRENTLY "usage_records_subscriptionId_reportedAt_idx";
 SQL
 ```
@@ -204,6 +218,10 @@ only (`lastUsedAt`), since its traffic rows are rolled up. Only stale
 devices are affected, and the 30-day idle sweep removes those anyway.
 
 ### 7. Turn the nightly run on
+
+**On production, `DATA_RETENTION=on` is set since 2026-11-11 23:52Z**
+(the backend was recreated to read it; first scheduled run
+2026-11-12 01:15 UTC).
 
 The nightly job runs at 01:15 UTC. It is **off until `DATA_RETENTION` is
 set**:
