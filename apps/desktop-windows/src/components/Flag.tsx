@@ -44,6 +44,14 @@ const FLAGS: Record<string, React.ReactNode> = {
       <rect x="1.1" width="0.72" height="3" fill="#002f6c" />
     </>
   ),
+  // The same cross, gold on blue, and a little finer as the flag has it.
+  se: (
+    <>
+      <rect width="4" height="3" fill="#006aa7" />
+      <rect y="1.2" width="4" height="0.6" fill="#fecc00" />
+      <rect x="1.2" width="0.6" height="3" fill="#fecc00" />
+    </>
+  ),
   // Red over white, with the crescent. The stars are dots at this size --
   // five of them, which is what the eye counts.
   sg: (

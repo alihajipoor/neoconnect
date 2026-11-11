@@ -78,7 +78,7 @@ describe("naming the place", () => {
   });
 
   it("names every country the app draws a flag for, in both languages", () => {
-    for (const code of ["ir", "de", "fr", "fi", "tr", "nl", "sg", "ae", "us", "gb", "in"]) {
+    for (const code of ["ir", "de", "fr", "fi", "se", "tr", "nl", "sg", "ae", "us", "gb", "in"]) {
       expect(countryName(`${code}-x`, "en")).not.toBe(`${code}-x`);
       expect(countryName(`${code}-x`, "fa")).toMatch(/[؀-ۿ]/);
     }

@@ -21,7 +21,7 @@ import {
  * past recognition, and the ribbon never covers a light (design-system.md
  * 5.1 and 5.2). */
 
-const LISTED = ["gb", "de", "fi", "tr", "ir", "sg", "in", "nl"];
+const LISTED = ["gb", "fr", "de", "fi", "se", "tr", "ir", "sg", "in", "nl"];
 
 describe("boxFor", () => {
   it("is the generated listed box for the countries listed today", () => {

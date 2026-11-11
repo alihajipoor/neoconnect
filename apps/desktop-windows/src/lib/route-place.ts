@@ -30,6 +30,7 @@ const COUNTRY_NAMES: Record<string, Record<Language, string>> = {
   de: { en: "Germany", fa: "آلمان" },
   fr: { en: "France", fa: "فرانسه" },
   fi: { en: "Finland", fa: "فنلاند" },
+  se: { en: "Sweden", fa: "سوئد" },
   tr: { en: "Turkey", fa: "ترکیه" },
   nl: { en: "Netherlands", fa: "هلند" },
   sg: { en: "Singapore", fa: "سنگاپور" },

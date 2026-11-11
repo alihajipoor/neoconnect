@@ -20,7 +20,7 @@
       "city": "Paris",
       "x": 100.643,
       "y": 15.594,
-      "listed": false
+      "listed": true
     },
     "de": {
       "city": "Frankfurt",
@@ -32,6 +32,12 @@
       "city": "Helsinki",
       "x": 110.546,
       "y": 8.862,
+      "listed": true
+    },
+    "se": {
+      "city": "Stockholm",
+      "x": 107.565,
+      "y": 9.351,
       "listed": true
     },
     "tr": {

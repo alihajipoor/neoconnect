@@ -260,7 +260,7 @@ describe("mapLights", () => {
   });
 
   it("moves at most the budgeted number of lights, the connected one first", () => {
-    const anchors = ["gb", "fr", "de", "fi", "tr", "ir", "sg", "in", "nl", "ae", "us"];
+    const anchors = ["gb", "fr", "de", "fi", "se", "tr", "ir", "sg", "in", "nl", "ae", "us"];
     const extra = ["aa", "bb"];
     const routes = [...anchors, ...extra].map((cc) => route(cc, `${cc}-x`, "WIREGUARD", { ispTag: works }));
     const s = mapLights({
@@ -273,7 +273,7 @@ describe("mapLights", () => {
       shown: routes[0],
       drawable: () => true,
     });
-    expect(s.lights.filter((l) => l.look === "live")).toHaveLength(13);
+    expect(s.lights.filter((l) => l.look === "live")).toHaveLength(anchors.length + extra.length);
     expect(s.lights.filter((l) => l.anim)).toHaveLength(LAMP_MAX_ANIM);
     expect(light(s, "gb")).toMatchObject({ exit: true, anim: true });
   });
