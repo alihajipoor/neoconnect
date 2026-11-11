@@ -13,8 +13,11 @@
 #   rget      hands back fixture files (the relay's live hop rules, the
 #             relay's nftables file, a hop server's table)
 #   rput      keeps what would have been sent, under put-<name>
-#   rsh, rscript, pscript   succeed and are written to `calls`; a plain
-#             `true` sent to an exit answers as T_SSH says (ok or fail)
+#   rsh, rscript, pscript, rpipe   succeed and are written to `calls`; a
+#             plain `true` sent to an exit answers as T_SSH says (ok or
+#             fail); the new box's dest audit, trial inbound and image
+#             check answer as T_AUDIT, T_TRIAL_START, T_TRIAL,
+#             T_TRIAL_STATUS, T_ENROLLED and T_IMAGE say
 #   q         answers from T_* variables
 # lib/tool.mjs is the real one.
 #
@@ -36,7 +39,9 @@ CALLS="$RUN_DIR/calls"
 
 OPT_DRY=0 OPT_YES=1 OPT_FROM="" OPT_ONLY="" OPT_DONE="" OPT_WAIVE="" OPT_PLANS="" OPT_DEFAULT_TO=""
 OPT_HOP="${T_HOP:-auto}" OPT_NO_RELAY="${T_NO_RELAY:-0}" OPT_NO_PLANS="${T_NO_PLANS:-0}"
-OPT_ACCEPT_HELD=0 OPT_ACCEPT_ZONE=0 OPT_ACCEPT_DEST=0 OPT_RELAY_SET=""
+OPT_ACCEPT_HELD=0 OPT_ACCEPT_ZONE=0 OPT_ACCEPT_DEST="${T_ACCEPT_DEST:-0}" OPT_RELAY_SET=""
+# --dest, as given on this pass (empty: not given).
+DEST="${T_DEST:-}"
 # T_OLD may be set and empty: a plain `add` has no old server.
 NAME="${T_NAME:-germany-4}" OLD="${T_OLD-germany-3}" NEW_IP="${T_NEW_IP:-198.51.100.60}"
 RELAY_HOST=198.51.100.20 RELAY_NODE_NAME=relay-1 SIGNIN_HOST=198.51.100.30 PANEL_HOST=203.0.113.5
@@ -56,10 +61,36 @@ rsh() {
     [[ "${T_SSH:-ok}" == ok ]]
     return
   fi
+  # What the new box answers, for add.dest and add.image.
+  case "$2" in
+    *reality-dest-audit.sh*) echo "${T_AUDIT:-OK    www.example.org             AS64500 EXAMPLE in ZZ}" ;;
+    *"agent.json && echo enrolled"*) echo "${T_ENROLLED:-}" ;;
+    *"provider-image.sh"*) printf '%s\n' "${T_IMAGE:-ok      ufw: not active, none of its chains loaded}" ;;
+  esac
   return 0
 }
 rscript() {
   echo "rscript $*" >>"$CALLS"
+  case "$*" in
+    *"reality-trial.sh start"*) echo "${T_TRIAL_START:-TRIAL-UP}" ;;
+    *"reality-trial.sh status"*) printf '%s\n' "${T_TRIAL_STATUS:-down}" ;;
+  esac
+  return 0
+}
+# What is piped in is swallowed, as the far side would; the trial dial
+# answers as T_TRIAL says.
+rpipe() {
+  cat >/dev/null
+  echo "rpipe $1 $2" >>"$CALLS"
+  case "$2" in
+    *nx-e2e-pipe.sh*)
+      if [[ "${T_TRIAL:-pass}" == pass ]]; then
+        printf '%s\n' "trial | EXIT-MATCH | down 200 262144B 0.5s | up 200 262144B 0.5s" "E2E-PASS trial"
+      else
+        printf '%s\n' "trial | EXIT-NONE | down 000 0B 10.0s | up 000 0B 10.0s" "E2E-FAIL trial"
+      fi
+      ;;
+  esac
   return 0
 }
 pscript() {

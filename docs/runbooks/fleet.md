@@ -41,7 +41,7 @@ scripts/fleet/fleet add <name> <ip> --region <r> --dry-run   # every command it 
 | Command | What it does | What a pass proves |
 |---|---|---|
 | `fleet precheck <ip>` | Tests an **empty** box from both boxes inside the watched country: 256 KB up and down on three ports. Reputation and reverse-DNS readout. | That data moves to that address from inside, per box and port: `PASS` or `HELD`. Not a TCP connect: a held range lets the connection open and stalls the upload. |
-| `fleet add <name> <ip> --region <r>` | Empty Ubuntu box to a server in the plans: keys, OS, DNS, certificates, installer, fleet form, reboot test, inside probe, test tunnels, relay routes, plans, provisioning, monitoring. | Before any customer has it: every Xray protocol exits on the new server's own address with 256 KB both ways, from outside and from inside; after the plan edit, the same with credentials the panel issued. |
+| `fleet add <name> <ip> --region <r>` | Empty Ubuntu box to a server in the plans: keys, OS, what the provider's image brought along, DNS, certificates, the disguise site, installer, fleet form, reboot test, inside probe, test tunnels, relay routes, plans, provisioning, monitoring. | Before anything is built on it: REALITY completes through the disguise site from outside. Before any customer has it: every Xray protocol exits on the new server's own address with 256 KB both ways, from outside and from inside; after the plan edit, the same with credentials the panel issued. |
 | `fleet retire <name>` | Names at once if the box is already gone. Then plans first, relay routes, block incident, agent, server row, key, DNS, relay hop entry, alerts, leftovers. Ends by saying the VPS can be deleted. | That nothing points at the server any more: no plan, no credential, no route, no name, no hop rule, no file on the panel host. Its row and usage history are kept. |
 | `fleet replace <old> <ip>` | First of all: if the old box is already gone, its DNS names are deleted. Then `precheck`, `add` under the next free name, the relay hop moved if the old server carried it, each plan switched from old to new in one edit, then `retire`. | Both of the above, and that relay routes to the exits behind the hop still exit where they should after it moved. |
 | `fleet status [<name>]` | Read-only: heartbeat, agent, API door, plans, relay routes, customers' bytes, inside-probe readings, engine units, certificate days, DNS records. | Nothing: it is a readout. |
@@ -72,6 +72,48 @@ unverified for that server.
 - **gate**: a decision. Passes, or stops and names the flag that records
   the owner's decision to go on: `--accept-held`, `--accept-blocked-zone`,
   `--accept-weak-dest`.
+
+### Two steps of `add` that exist because of one build
+
+Two servers were built by hand in November 2026 on Ubuntu 26.10, on a
+provider image the installer had never seen. What each of them met is
+now a step. `docs/installer-os-support.md` has the detail; neither step
+has run against a real box yet.
+
+**`add.image`** (after `add.mask-upgrades`, before `add.packages`).
+That image arrived with ufw active on DROP policies, a hostname taken
+from the dashboard label and put back by cloud-init at every boot, a
+swap file of the provider's size, and a firmware timer that fails on a
+virtual machine. The step runs the installer's own check on the box
+(`installer/maintenance/provider-image.sh --apply`), which repairs only
+what it finds, and passes when no `REPAIR` line is left. It comes
+before the packages because `iptables-persistent` removes ufw and
+leaves its DROP policies loaded. `add.inventory` prints the same lines
+read-only first, with the interface's name and whether the box has a
+global IPv6 address. `add.verify` and `add.reboot` ask again: the
+hostname only shows whether it holds after a reboot.
+
+**`add.dest`** (after `add.certs`, before the database dump, the token
+and the installer). One of those servers was built on a disguise site
+that refuses X25519. REALITY carried nothing, and the first test tunnel
+found it with the site already written into the server's Xray config,
+the panel's REALITY config and the server row. The step:
+
+1. runs the installer's dest audit on the box. `BAD` stops the run
+   (no flag gets past it), `WEAK` stops it unless `--accept-weak-dest`;
+2. starts a throwaway Xray on the box with one REALITY inbound on 443
+   and keys made for the minute, and dials it from the panel host with
+   the same client the later proofs use. It has to exit on the box's
+   own address with 256 KB both ways;
+3. stops the throwaway inbound and shreds its files (it also ends by
+   itself after ten minutes).
+
+When it fails, nothing has been built on the site: run the same command
+again with `--dest <another site>:443`. A `--dest` on a later pass is
+taken only while the installer has not run.
+
+What it does not show: that the site is reachable, or unblocked, from
+where the customers are. The trial is dialled from the panel host.
 
 ## What stays manual, and why
 
@@ -145,6 +187,10 @@ whoever reads a failed step.
 - The agent is stopped before a server is set DISABLED, and its key is cleared after: otherwise its next sign-in flips it back.
 - A dead server's DNS names go at once. A released address goes to a stranger, who can get a certificate for any name still pointing at it.
 - The installer is answered one prompt at a time. Fed a prepared stream, answers land on the wrong prompts.
+- A disguise site can speak TLS 1.3 and HTTP/2 with a valid certificate and still refuse X25519, and then REALITY carries nothing. The audit proves X25519 by a handshake of its own, and `add.dest` dials REALITY for real before the installer runs.
+- `--accept-weak-dest` answers the installer's question about a weak disguise. Its question about a site REALITY cannot use is worded differently and is never answered for it.
+- A provider's image is not always bare: ufw on DROP, a brand word in the hostname that cloud-init restores at boot, the provider's own swap file. Removing ufw leaves its chains loaded, and saving the firewall rules then keeps them for good.
+- The interface is not always `eth0`, and a box may have no IPv6 at all. Rules are written for the interface the default route names, and IPv6 is closed for Xray either way.
 - The installer's admin token lives 15 minutes and is not refreshed: packages and certificates are done before it starts.
 - The panel will not issue a credential on a route outside the subscription's plan, so tunnels are proven before the plan edit with temporary users in the server's running Xray.
 - One certificate per name: two of our names on one certificate are published together in the public logs.
@@ -197,6 +243,15 @@ node --test scripts/fleet/test/*.test.mjs
 - what the riskiest steps decide once the hosts have answered, with the hosts replaced by stand-ins and fixture files (`steps.test.mjs`): the three hop steps run once and run again after stopping halfway, when a server counts as gone, the panel-issued proof with a protocol missing;
 - plan-list arithmetic, DNS record matching and the hop edits, as pure functions, with a hop move that stopped halfway and is run again;
 - the jq programs that run on the panel host (skipped where `jq` is missing; CI has it);
-- the bare-box sink and probe against each other on loopback.
+- the bare-box sink and probe against each other on loopback;
+- `add.dest` and `add.image` with the box's answers replaced by stand-ins: a `BAD` site never reaches the trial, a failed trial fails the step and is still stopped, `--accept-weak-dest` is no way past `BAD`;
+- the installer's image repairs against stand-ins for `iptables` and `ufw` (`image.test.mjs`): ufw's chains go policies first, an active ufw is not torn down by a save, `/etc/hosts` and `/etc/fstab` rewritten on fixtures, Ubuntu 26.10 accepted, and no interface name written anywhere in the installer, this tool or the agent.
+
+The dest audit has a control case of its own, with no network: two TLS
+servers on loopback, one that refuses X25519.
+
+```bash
+bash installer/maintenance/reality-dest-audit.sh --self-test-local
+```
 
 None of that is a server. See *Status* at the top.

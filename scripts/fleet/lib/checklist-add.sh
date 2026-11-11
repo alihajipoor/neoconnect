@@ -358,6 +358,10 @@ do_add_inventory() {
   local dest out
   dest="$(need dest)" || return 1
   rscript new node/prep.sh inventory "${dest%:*}" "$PANEL_ORIGIN_NAME" "$PANEL_HOST" "$PANEL_GRPC_PORT" || return 1
+  # What the provider's image brought along, one line each, read-only:
+  # ufw, a brand word in the hostname, the swap file, the firmware timer,
+  # the interface's name, IPv6. REPAIR lines are what add.image changes.
+  rsh new "bash /root/neoxify-installer/maintenance/provider-image.sh | sed 's/^/image  /'" || true
   out="$(rsh new "$REMOTE_DIR/prep.sh ports")" || return 1
   dry && return 0
   if ! state_has ss_port; then
@@ -368,7 +372,7 @@ do_add_inventory() {
   say "random free ports chosen for Shadowsocks, WireGuard and OpenVPN"
 }
 ok_add_inventory() {
-  expect "Ubuntu or Debian, fast name lookups, clock in sync, the panel's control port and API reachable; three free ports chosen"
+  expect "Ubuntu or Debian, fast name lookups, clock in sync, the panel's control port and API reachable; what the image brought along is listed (ufw, hostname, swap, firmware timer, interface name, IPv6); three free ports chosen"
   dry || [[ "$(st ss_port "")" =~ ^[0-9]+$ && "$(st wg_port "")" =~ ^[0-9]+$ && "$(st ovpn_port "")" =~ ^[0-9]+$ ]]
 }
 
@@ -381,6 +385,33 @@ ok_add_mask_upgrades() {
   n="$(rsh new "for u in apt-daily-upgrade.timer apt-daily.timer unattended-upgrades.service; do systemctl is-enabled \$u 2>&1 | head -1; done | grep -c masked")" || true
   expect "all three units report masked (security updates are manual on this server from now on: tell the owner)"
   dry || [[ "$n" == 3 ]]
+}
+
+# What a provider's image brings along that a server must not keep. The
+# checks and the repairs are the installer's own (installer/lib/image.sh)
+# and each repairs only what it finds. It runs here, before the packages,
+# because of ufw: iptables-persistent removes that package and leaves its
+# DROP policies standing, and from then on the certificate challenge on
+# port 80 and every engine port are closed.
+do_add_image() {
+  rsh new "bash /root/neoxify-installer/maintenance/provider-image.sh --apply | sed 's/^/  /'" || true
+  undo "on the new box: what it changed is copied beside it as /root/*.before-neoxify-* (ufw's rules and config, /etc/hosts, the old hostname, /etc/fstab), each named in the lines above; ufw back: apt-get install ufw, allow every engine port, ufw enable; the hostname pin: rm /etc/cloud/cloud.cfg.d/99-neoxify-hostname.cfg; the timer: systemctl unmask fwupd-refresh.timer"
+}
+ok_add_image() {
+  local out
+  out="$(rsh new "bash /root/neoxify-installer/maintenance/provider-image.sh")" || true
+  expect "no REPAIR line left: no ufw and none of its chains, a hostname and /etc/hosts without a brand word and pinned against cloud-init, the fleet's swap on a small box, no firmware timer on a virtual machine. Whether the hostname holds is only known after the reboot: add.reboot checks it again"
+  dry && return 0
+  sed 's/^/  /' <<<"$out"
+  grep -q '^ok ' <<<"$out" || { say "the image check did not run on the box (is the installer there? --only add.installer-push)"; return 1; }
+  if grep -q '^REPAIR ' <<<"$out"; then
+    say "something the image brought along is still there: the REPAIR lines above"
+    return 1
+  fi
+  if grep -q '^LOOK ' <<<"$out"; then
+    say "a LOOK line is a person's to judge and nothing here changes it. Closed ports would show in add.certs and add.verify."
+  fi
+  return 0
 }
 
 do_add_packages() {
@@ -469,6 +500,140 @@ ok_add_installer_push() {
   dry || { [[ "$(head -1 <<<"$out")" == 0 ]] && grep -q syntax-ok <<<"$out"; }
 }
 
+# ------------------------------------------- the disguise site, before the build
+
+# A server was once built on a site that refuses X25519. REALITY needs
+# X25519, so it carried nothing, and that was found by the first test
+# tunnel -- with the site already in the server's Xray config, in the
+# panel's REALITY config and in the server row, all three then changed by
+# hand. So the site is settled HERE, before the database dump, the token
+# and the installer: first the installer's own audit, run on the box
+# (where the handshake will be forwarded from), then the thing itself, a
+# REALITY handshake from the panel host through a throwaway inbound on
+# the box. A site that fails costs nothing but another --dest.
+
+# dest_update: take a --dest given on a later pass. Only while nothing is
+# built on the old one.
+dest_update() {
+  local have enrolled
+  dry && return 0
+  have="$(st dest "")"
+  [[ -n "${DEST:-}" && "$DEST" != "$have" ]] || return 0
+  [[ "$DEST" =~ ^[a-z0-9.-]+:[0-9]+$ ]] || { say "--dest must look like host:443"; return 1; }
+  enrolled="$(rsh new "test -f /etc/neoxify/agent.json && echo enrolled")" || true
+  if state_has node_id || [[ "$enrolled" == enrolled ]]; then
+    say "REFUSED: --dest names another disguise site, and this server is already built on ${have%:*}."
+    say "Changing it now means the server's Xray config, the panel's REALITY config and the server row,"
+    say "by hand, and restarting Xray. It is not something this step does."
+    return 1
+  fi
+  state_set dest "$DEST"
+  say "the disguise site for this run is now ${DEST%:*} (--dest); it was ${have%:*}"
+}
+
+do_add_dest() {
+  local dest host out line verdict
+  dest_update || return 1
+  dest="$(need dest)" || return 1
+  host="${dest%:*}"
+  dry || { state_set dest_audit none; state_set dest_proof none; }
+
+  out="$(rsh new "bash /root/neoxify-installer/maintenance/reality-dest-audit.sh $host 2>&1 | tail -4")" || true
+  if ! dry; then
+    line="$(grep -E '^(OK|WEAK|BAD) ' <<<"$out" | tail -1)"
+    verdict="${line%% *}"
+    say "audit on the box: ${line:-no verdict (the audit did not run: is the installer on the box?)}"
+    state_set dest_audit "${verdict:-none}"
+    case "$verdict" in
+      OK) ;;
+      WEAK)
+        if [[ "$OPT_ACCEPT_DEST" != 1 ]]; then
+          say "not dialled: a weak disguise is the owner's decision first (see below)"
+          return 0
+        fi
+        ;;
+      *)
+        say "REALITY cannot work through $host from this box. Nothing has been built on it."
+        say "Run the same command again with --dest <another site>:443: a real site hosted in the server's own"
+        say "country, on its own addresses, not behind a CDN. This step audits and dials the new one."
+        return 1
+        ;;
+    esac
+  fi
+
+  out="$(rscript new node/reality-trial.sh start "$host" "${dest##*:}" "$XRAY_VERSION")" || true
+  if ! dry; then
+    if grep -q '^TRIAL-ENROLLED' <<<"$out"; then
+      say "this box is already a server, so its own Xray holds the port: no trial inbound. REALITY on it is"
+      say "proven by add.e2e-direct."
+      state_set dest_proof enrolled
+      return 0
+    fi
+    if ! grep -q '^TRIAL-UP' <<<"$out"; then
+      sed 's/^/  /' <<<"$out"
+      say "the trial inbound did not start, so nothing was dialled"
+      return 1
+    fi
+  fi
+  if ! pscript nx-xray-get.sh "$XRAY_VERSION" >/dev/null; then
+    rsh new "$REMOTE_DIR/reality-trial.sh stop" || true
+    say "no Xray client on the panel host to dial with"
+    return 1
+  fi
+  # The throwaway keys cross from the box to the panel host through a
+  # pipe on this PC, never onto its screen or disk.
+  out="$(rsh new "$REMOTE_DIR/reality-trial.sh params $NEW_IP" | rpipe panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-pipe.sh $REMOTE_DIR/xray 'REALITY through a trial inbound, before the build'")" || true
+  if ! dry && ! grep -q '^E2E-PASS' <<<"$out"; then
+    rsh new "$REMOTE_DIR/reality-trial.sh log 8" | sed 's/^/    trial inbound: /' || true
+  fi
+  rsh new "$REMOTE_DIR/reality-trial.sh stop" || { say "the trial inbound could not be stopped (it ends by itself after ten minutes)"; return 1; }
+  dry && return 0
+  grep -E ' \| EXIT-' <<<"$out" | sed 's/^/  /'
+  if grep -q '^E2E-PASS' <<<"$out"; then
+    state_set dest_proof pass
+  else
+    state_set dest_proof fail
+  fi
+}
+ok_add_dest() {
+  local left dest
+  expect "the disguise site passes the installer's audit on the box (OK; WEAK only with --accept-weak-dest; BAD never: it refuses X25519, or has no TLS 1.3, HTTP/2 or certificate of its own), and a real REALITY handshake through a throwaway inbound on the box, dialled from the panel host, leaves by the box's own address with 256 KB both ways. The throwaway inbound is gone again. Nothing is built on the site before this passes"
+  left="$(rscript new node/reality-trial.sh status)" || true
+  dry && return 0
+  dest="$(st dest "")"
+  if [[ "$(head -1 <<<"$left")" != down ]] || grep -q files-left <<<"$left"; then
+    say "the trial inbound, or its files, are still on the box: run this step again (it clears them first)"
+    return 1
+  fi
+  case "$(st dest_audit none)" in
+    OK) ;;
+    WEAK)
+      if [[ "$OPT_ACCEPT_DEST" != 1 ]]; then
+        say "${dest%:*} would carry REALITY, but it is a weak disguise (the audit line above says why): its"
+        say "address is in a published range or it is fronted, which is one table lookup for a filter."
+        say "Pass --dest <a better site>:443, or record the owner's decision with --accept-weak-dest."
+        return 1
+      fi
+      say "continuing on a weak disguise: --accept-weak-dest"
+      ;;
+    *)
+      say "the audit did not pass ${dest%:*}"
+      return 1
+      ;;
+  esac
+  case "$(st dest_proof none)" in
+    pass) return 0 ;;
+    enrolled) return 0 ;;
+    *)
+      say "REALITY did NOT complete from outside through ${dest%:*} (the EXIT line above). Nothing has been built"
+      say "on it. EXIT-NONE with the audit OK: first check that TCP 443 reaches this box from outside (a provider"
+      say "firewall, add.firewall), then the trial inbound's own lines above. Otherwise the site itself is the"
+      say "cause: run the same command again with --dest <another site>:443."
+      return 1
+      ;;
+  esac
+}
+
 do_add_dump_node() { panel_dump "pre-$(nn)-node"; }
 ok_add_dump_node() {
   expect "a database dump from the last few minutes, checked with gzip -t"
@@ -503,6 +668,7 @@ Install Xray .*\\[Y/n\\]	Y
 Listen port for VLESS\\+REALITY	443
 Camouflage destination	$(need dest)
 Use it anyway\\? \\[y/N\\]	$weak
+Build on it although REALITY will not work	@STOP
 Set them up\\? \\[Y/n\\]	Y
 Domain for the certificate	$(need l1)
 Port for VLESS over TLS	2053
@@ -1418,13 +1584,17 @@ ok_add_cleanup() {
 register_add_steps() {
   step add.zone-inside gate "Names under the node zone are not rewritten from inside"
   step add.second-key auto "Second operator key on the box (authorized_keys backed up, sshd untouched)"
-  step add.inventory auto "OS inventory: release, resolver speed, clock, panel reachable; three free ports chosen"
+  # The installer goes over first: the image checks and the audit of the
+  # disguise site are its own, and both run before anything is built.
+  step add.installer-push auto "Committed installer copied to the box"
+  step add.inventory auto "OS inventory: release, resolver speed, clock, panel reachable, what the image brought along; three free ports chosen"
   step add.mask-upgrades auto "Automatic upgrades masked, dpkg lock free"
-  step add.packages auto "Base packages, swap on a small box, sshd jail that sees sshd-session"
+  step add.image auto "Provider image: ufw, brand hostname, swap file, firmware timer. Checked, repaired only if found"
+  step add.packages auto "Base packages, sshd jail that sees sshd-session"
   step add.firewall owner "Provider firewall opened for the server's ports (only where there is one)"
   step add.dns auto "Two fresh random names in the node zone, DNS-only"
   step add.certs auto "One certificate per name, by webroot, the first RSA"
-  step add.installer-push auto "Committed installer copied to the box"
+  step add.dest gate "Disguise site audited on the box and REALITY completed through it from outside, before anything is built on it"
   step add.dump-node auto "Database dump before the server is created"
   step add.token auto "15-minute admin token handed to the box, never shown"
   step add.install auto "Installer run, one prompt at a time, same protocol set as its peers"

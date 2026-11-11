@@ -1,6 +1,7 @@
 #!/bin/bash
 # nx-xray-get.sh <version> [output path]   (default /dev/shm/nxf/xray)
-# Runs on the panel host. The Xray binary the test clients use: the
+# Runs on the panel host, and on a box being built (for its trial
+# REALITY inbound). The Xray binary the test clients use: the
 # fleet's pinned version, downloaded from the project's own release page
 # and checked against the SHA2-256 in that release's .dgst file. Kept in
 # RAM. Does nothing when the right version is already there.

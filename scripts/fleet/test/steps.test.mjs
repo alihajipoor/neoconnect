@@ -457,3 +457,168 @@ describe("add.postfix and add.parity on a server that already has customers", ()
     assert.equal(ask({ T_HAVE: "376" }), "yes");
   });
 });
+
+// A server was built on a site that refuses X25519. REALITY carried
+// nothing, and the first test tunnel found it with the site already in
+// the server's config, the panel's REALITY config and the server row.
+// add.dest settles the site before the dump, the token and the installer.
+describe("add.dest: the disguise site, before anything is built on it", () => {
+  const site = { dest: "www.example.org:443" };
+  const inOrder = (text, lines) => {
+    let at = -1;
+    for (const l of lines) {
+      const i = text.indexOf(l, at + 1);
+      assert.ok(i > at, `'${l}' is missing, or out of order:\n${text}`);
+      at = i;
+    }
+  };
+
+  it("audit OK and REALITY completed from outside: passes, and the trial inbound is stopped", () => {
+    state(site);
+    const r = run("do_add_dest");
+    assert.equal(r.code, 0, r.out);
+    assert.equal(stateOf("dest_audit"), "OK");
+    assert.equal(stateOf("dest_proof"), "pass");
+    inOrder(calls(), [
+      "reality-dest-audit.sh www.example.org",
+      "rscript new node/reality-trial.sh start www.example.org 443 v0.0.0",
+      "pscript nx-xray-get.sh v0.0.0",
+      "reality-trial.sh params 198.51.100.60",
+      "nx-e2e-pipe.sh",
+      "reality-trial.sh stop",
+    ]);
+    assert.match(r.out, /EXIT-MATCH/);
+    assert.equal(run("ok_add_dest").code, 0);
+  });
+
+  it("a site the audit calls BAD (it refuses X25519): stops before any trial, and says how to go on", () => {
+    state(site);
+    const r = run("do_add_dest", { T_AUDIT: "BAD   www.example.org            refuses a TLS 1.3 handshake that offers X25519 alone" });
+    assert.equal(r.code, 1);
+    assert.equal(stateOf("dest_audit"), "BAD");
+    assert.doesNotMatch(calls(), /reality-trial\.sh start|nx-e2e-pipe/);
+    assert.match(r.out, /refuses a TLS 1\.3 handshake that offers X25519 alone/);
+    assert.match(r.out, /Nothing has been built on it/);
+    assert.match(r.out, /--dest <another site>:443/);
+    assert.equal(run("ok_add_dest").code, 1);
+  });
+
+  it("no verdict at all (the audit did not run) is not a pass", () => {
+    state(site);
+    const r = run("do_add_dest", { T_AUDIT: "bash: reality-dest-audit.sh: No such file or directory" });
+    assert.equal(r.code, 1);
+    assert.equal(stateOf("dest_audit"), "none");
+    assert.doesNotMatch(calls(), /reality-trial\.sh start/);
+  });
+
+  it("the audit passes but REALITY does not complete from outside: fails, and the trial inbound is still stopped", () => {
+    state(site);
+    const r = run("do_add_dest", { T_TRIAL: "fail" });
+    assert.equal(r.code, 0, "the step records, its verify decides");
+    assert.equal(stateOf("dest_proof"), "fail");
+    inOrder(calls(), ["nx-e2e-pipe.sh", "reality-trial.sh log", "reality-trial.sh stop"]);
+    const v = run("ok_add_dest");
+    assert.equal(v.code, 1);
+    assert.match(v.out, /REALITY did NOT complete from outside/);
+    assert.match(v.out, /Nothing has been built/);
+  });
+
+  it("a weak disguise is the owner's decision first: not dialled without --accept-weak-dest, dialled with it", () => {
+    const weak = { T_AUDIT: "WEAK  www.example.org            is announced by AS64500 (EXAMPLE-CDN), whose ranges are published" };
+    state(site);
+    const r = run("do_add_dest", weak);
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(calls(), /reality-trial\.sh start/);
+    const v = run("ok_add_dest", weak);
+    assert.equal(v.code, 1);
+    assert.match(v.out, /--accept-weak-dest/);
+
+    rmSync(join(dir, "calls"), { force: true });
+    const yes = { ...weak, T_ACCEPT_DEST: "1" };
+    assert.equal(run("do_add_dest", yes).code, 0);
+    assert.match(calls(), /reality-trial\.sh start/);
+    assert.equal(stateOf("dest_proof"), "pass");
+    assert.equal(run("ok_add_dest", yes).code, 0);
+  });
+
+  it("--accept-weak-dest is not a way past a site REALITY cannot use", () => {
+    state(site);
+    const env = { T_AUDIT: "BAD   www.example.org            negotiated TLSv1.2, and REALITY requires TLS 1.3", T_ACCEPT_DEST: "1" };
+    assert.equal(run("do_add_dest", env).code, 1);
+    assert.equal(run("ok_add_dest", env).code, 1);
+  });
+
+  it("the trial inbound did not start (port taken): nothing is dialled", () => {
+    state(site);
+    const r = run("do_add_dest", { T_TRIAL_START: "FAIL port 443 is already taken on this box, so no trial inbound can listen there" });
+    assert.equal(r.code, 1);
+    assert.match(r.out, /port 443 is already taken/);
+    assert.doesNotMatch(calls(), /nx-e2e-pipe/);
+  });
+
+  it("a box that is already a server gets no trial inbound, and its tunnels are the proof", () => {
+    state(site);
+    const r = run("do_add_dest", { T_TRIAL_START: "TRIAL-ENROLLED" });
+    assert.equal(r.code, 0, r.out);
+    assert.equal(stateOf("dest_proof"), "enrolled");
+    assert.doesNotMatch(calls(), /nx-e2e-pipe|reality-trial\.sh stop/);
+    assert.match(r.out, /add\.e2e-direct/);
+    assert.equal(run("ok_add_dest").code, 0);
+  });
+
+  it("the verify fails while the trial inbound or its files are still on the box", () => {
+    state({ ...site, dest_audit: "OK", dest_proof: "pass" });
+    assert.equal(run("ok_add_dest").code, 0);
+    assert.equal(run("ok_add_dest", { T_TRIAL_STATUS: "up" }).code, 1);
+    assert.equal(run("ok_add_dest", { T_TRIAL_STATUS: "down\nfiles-left" }).code, 1);
+  });
+
+  it("--dest on a later pass replaces the site, but only while nothing is built on the old one", () => {
+    state(site);
+    const r = run("do_add_dest", { T_DEST: "www.example.net:443", T_AUDIT: "OK    www.example.net            AS64500 EXAMPLE in ZZ" });
+    assert.equal(r.code, 0, r.out);
+    assert.equal(stateOf("dest"), "www.example.net:443");
+    assert.match(calls(), /reality-dest-audit\.sh www\.example\.net/);
+    assert.match(calls(), /reality-trial\.sh start www\.example\.net 443/);
+
+    for (const built of [{ state: { ...site, node_id: "00000000-0000-4000-8000-000000000001" }, env: {} }, { state: site, env: { T_ENROLLED: "enrolled" } }]) {
+      rmSync(join(dir, "calls"), { force: true });
+      state(built.state);
+      const no = run("do_add_dest", { T_DEST: "www.example.net:443", ...built.env });
+      assert.equal(no.code, 1);
+      assert.match(no.out, /already built on www\.example\.org/);
+      assert.equal(stateOf("dest"), "www.example.org:443");
+      assert.doesNotMatch(calls(), /reality-dest-audit|reality-trial/);
+    }
+  });
+});
+
+describe("add.image: what the provider's image brought along", () => {
+  const clean = "ok      ufw: not active, none of its chains loaded\nok      hostname: generic, and pinned against cloud-init\nok      swap: 2048 MB /swapfile, in /etc/fstab";
+
+  it("the repair is the installer's own, asked for once with --apply", () => {
+    assert.equal(run("do_add_image").code, 0);
+    assert.match(calls(), /rsh new bash \/root\/neoxify-installer\/maintenance\/provider-image\.sh --apply/);
+  });
+  it("passes when no REPAIR line is left", () => {
+    assert.equal(run("ok_add_image", { T_IMAGE: clean }).code, 0);
+    assert.doesNotMatch(calls(), /--apply/, "the verify only looks");
+  });
+  it("fails while one stands, whichever it is", () => {
+    for (const left of ["REPAIR  hostname: a brand word in /etc/hosts", "REPAIR  ufw: not running, but its chains are still loaded", "REPAIR  fwupd: fwupd-refresh.timer is enabled on a virtual machine"]) {
+      const r = run("ok_add_image", { T_IMAGE: `${clean}\n${left}` });
+      assert.equal(r.code, 1, left);
+      assert.match(r.out, /still there/);
+    }
+  });
+  it("a LOOK line is said out loud and left to a person", () => {
+    const r = run("ok_add_image", { T_IMAGE: `${clean}\nLOOK    firewall: policy INPUT DROP, and it is not ufw's. Left as it is` });
+    assert.equal(r.code, 0);
+    assert.match(r.out, /a person's to judge/);
+  });
+  it("fails when the check never ran on the box", () => {
+    const r = run("ok_add_image", { T_IMAGE: "bash: /root/neoxify-installer/maintenance/provider-image.sh: No such file or directory" });
+    assert.equal(r.code, 1);
+    assert.match(r.out, /did not run/);
+  });
+});

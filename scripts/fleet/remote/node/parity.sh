@@ -18,7 +18,8 @@
 #   openvpn   ccd-exclusive: a client with no ccd file is refused, which
 #             is what makes revoking a credential take effect
 #   ipv6      Xray (uid nobody) may not leave over IPv6: the fleet is
-#             IPv4-only on purpose and this box has a global IPv6
+#             IPv4-only on purpose. Closed whether or not the box has a
+#             global IPv6 today, on whatever its interface is called
 #   modes     nothing public left owner-only by a tight umask
 set -uo pipefail
 MODE=${1:?apply or check}
@@ -241,9 +242,19 @@ p_openvpn() {
 
 p_ipv6() {
   local IF
+  if [ ! -d /proc/sys/net/ipv6 ]; then
+    ok "ipv6 (this kernel has no IPv6 at all)"
+    return
+  fi
   IF=$(ip -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+  # A box with no IPv6 today gets the same two rules, on the interface
+  # its IPv4 leaves by. The provider can turn IPv6 on for it later, and
+  # nothing here is run again when that happens. This used to say "ok,
+  # no IPv6 route" and add nothing, and the rules were then put in by
+  # hand on both boxes built that way.
+  [ -n "$IF" ] || IF=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
   if [ -z "$IF" ]; then
-    ok "ipv6 (no IPv6 route on this box)"
+    bad ipv6 "no default route to name the interface from"
     return
   fi
   if ip6tables -C OUTPUT -o "$IF" -m owner --uid-owner nobody -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null &&
@@ -262,7 +273,11 @@ p_ipv6() {
   ip6tables -C OUTPUT -o "$IF" -m owner --uid-owner nobody -j REJECT 2>/dev/null ||
     ip6tables -A OUTPUT -o "$IF" -m owner --uid-owner nobody -j REJECT
   netfilter-persistent save >/dev/null 2>&1
-  echo "applied ipv6 (forwarding stays $(cat /proc/sys/net/ipv6/conf/all/forwarding))"
+  if ip6tables -C OUTPUT -o "$IF" -m owner --uid-owner nobody -j REJECT 2>/dev/null && grep -q -- '--uid-owner nobody' /etc/iptables/rules.v6 2>/dev/null; then
+    echo "applied ipv6 on $IF (forwarding stays $(cat /proc/sys/net/ipv6/conf/all/forwarding))"
+  else
+    bad ipv6 "the two rules did not go in, or were not saved"
+  fi
 }
 
 p_modes() {

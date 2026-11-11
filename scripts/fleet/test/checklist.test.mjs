@@ -174,6 +174,34 @@ describe("fleet --dry-run", { concurrency: true, timeout: 900_000 }, () => {
     assert.doesNotMatch(audit, /--apply/, "a maintenance script is given --apply");
   });
 
+  it("the disguise site is audited, dialled through a trial inbound, and the inbound stopped, in that order", async () => {
+    const dest = stepBlock((await dryRun("add")).out, "add.dest");
+    inOrder(dest, "maintenance/reality-dest-audit.sh", "reality-trial.sh start");
+    inOrder(dest, "reality-trial.sh start", "reality-trial.sh params <new>");
+    inOrder(dest, "reality-trial.sh params <new>", "nx-e2e-pipe.sh");
+    inOrder(dest, "nx-e2e-pipe.sh", "reality-trial.sh stop");
+    assert.match(dest, /\(piped\) ssh <panel> \$ .*nx-e2e-pipe\.sh/, "the trial's keys reach the panel host through a pipe");
+    assert.match(dest.split("VERIFY:")[1], /reality-trial\.sh status/, "the verify looks for a trial inbound left behind");
+    assert.doesNotMatch(dest, /systemctl|install\.sh/, "the trial is a process of its own: no service is touched and nothing is installed");
+  });
+
+  it("the image is looked at in the inventory and repaired once, before the packages", async () => {
+    const { out } = await dryRun("add");
+    const inventory = stepBlock(out, "add.inventory");
+    assert.match(inventory, /maintenance\/provider-image\.sh/);
+    assert.doesNotMatch(inventory, /--apply/, "the inventory changes nothing");
+    const image = stepBlock(out, "add.image");
+    assert.match(image.split("VERIFY:")[0], /provider-image\.sh --apply/);
+    assert.doesNotMatch(image.split("VERIFY:")[1], /--apply/, "the verify only looks");
+    assert.doesNotMatch(stepBlock(out, "add.packages"), /swapfile|hostname/, "swap and the hostname have one owner, the installer");
+  });
+
+  it("the installer is answered 'stop' on a dest REALITY cannot use, whatever the flags", async () => {
+    const answers = stepBlock((await dryRun("add")).out, "add.install");
+    assert.match(answers, /Use it anyway.*->\s+@STOP/, "without --accept-weak-dest a weak disguise stops too");
+    assert.match(answers, /Build on it although REALITY will not work\s+->\s+@STOP/);
+  });
+
   it("the step list `fleet steps` prints is the one that runs", async () => {
     for (const name of Object.keys(RUNS)) {
       const listed = await new Promise((resolve) =>
@@ -240,6 +268,35 @@ describe("the checklist's own rules", () => {
     }
     assert.ok(a.indexOf("add.dump-node") < a.indexOf("add.install"), "a database dump comes before the server is created");
     assert.ok(a.indexOf("add.token") + 1 === a.indexOf("add.install"), "the installer starts right after the 15-minute token");
+  });
+
+  it("nothing is built on a disguise site before REALITY has completed through it", () => {
+    const a = EXPECTED.add;
+    const at = (id) => {
+      assert.ok(a.includes(id), `add has no step ${id}`);
+      return a.indexOf(id);
+    };
+    // What is built on the site: the server's Xray config and the panel's
+    // rows, both written by the installer. The dump and the token only
+    // exist for the installer, so the site is settled before them too.
+    for (const later of ["add.dump-node", "add.token", "add.install"]) {
+      assert.ok(at("add.dest") < at(later), `add.dest must come before ${later}`);
+    }
+    assert.ok(at("add.installer-push") < at("add.dest"), "the audit is the installer's own, so the installer is on the box first");
+    assert.ok(at("add.packages") < at("add.dest"), "the audit and the trial need dig, jq and curl");
+    assert.ok(at("add.firewall") < at("add.dest"), "the trial is dialled from outside on 443");
+  });
+
+  it("what the image brought along is repaired before anything is installed on top of it", () => {
+    const a = EXPECTED.add;
+    const at = (id) => a.indexOf(id);
+    assert.ok(at("add.installer-push") >= 0 && at("add.installer-push") < at("add.inventory"), "the image check is the installer's own");
+    assert.ok(at("add.mask-upgrades") < at("add.image"), "apt must be quiet before a package is removed");
+    // iptables-persistent removes ufw and leaves its DROP policies; the
+    // certificate challenge on port 80 would then be closed.
+    assert.ok(at("add.image") >= 0 && at("add.image") < at("add.packages"));
+    assert.ok(at("add.image") < at("add.certs"));
+    assert.ok(at("add.image") < at("add.reboot"), "the hostname pin is only proven by a reboot");
   });
 
   it("retire takes customers off first and deletes the VPS last", () => {

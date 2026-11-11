@@ -64,7 +64,7 @@ describe("nothing address-like or ours is committed with the tool", () => {
     // The four network addresses are the private ranges themselves
     // (loopback, RFC 1918, link-local), as verify.sh names them when it
     // checks that Xray blocks them. No server of anybody's is there.
-    const ok = /^(127\.0\.0\.1|0\.0\.0\.0|1\.1\.1\.1|8\.8\.8\.8|10\.\d+\.\d+\.\d+|203\.0\.113\.\d+|198\.51\.100\.\d+|192\.0\.2\.\d+|127\.0\.0\.0|172\.16\.0\.0|192\.168\.0\.0|169\.254\.0\.0)$/;
+    const ok = /^(127\.0\.0\.1|127\.0\.1\.1|0\.0\.0\.0|1\.1\.1\.1|8\.8\.8\.8|10\.\d+\.\d+\.\d+|203\.0\.113\.\d+|198\.51\.100\.\d+|192\.0\.2\.\d+|127\.0\.0\.0|172\.16\.0\.0|192\.168\.0\.0|169\.254\.0\.0)$/;
     for (const f of files) {
       const text = readFileSync(join(ROOT, f), "utf8");
       for (const m of text.matchAll(/(?<![\d.])(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?![\d.])/g)) {
@@ -103,6 +103,32 @@ describe("jq programs", { skip: JQ ? false : "jq is not installed here (CI has i
     assert.deepEqual(o.streamSettings.realitySettings, { serverName: "www.example.org", fingerprint: "chrome", publicKey: "PUBKEY", shortId: "abcd" });
     assert.equal(o.settings.vnext[0].users[0].flow, "xtls-rprx-vision");
     assert.equal(e.config.inbounds.length, 1);
+  });
+  // add.dest dials a throwaway REALITY inbound on the bare box before
+  // anything is built on a disguise site. The box sends {c, u} (what
+  // reality-trial.sh writes, with its address filled in by `params`) and
+  // nx-e2e-pipe.sh builds the client from it. That has to be the same
+  // client a panel-issued credential gets, or the trial proves another
+  // handshake than the one customers will make.
+  it("the trial dial before the build makes the same REALITY client as a panel-issued credential", () => {
+    const trial = readFileSync(join(ROOT, "remote", "node", "reality-trial.sh"), "utf8");
+    const pipe = readFileSync(join(ROOT, "remote", "panel", "nx-e2e-pipe.sh"), "utf8");
+    // The two jq programs, lifted out of the scripts as they are written there.
+    const mk = /jq -n --arg host "\$DEST" --arg pub "\$PUB" --arg sid "\$SID" --arg u "\$U" --argjson port "\$PORT" '([\s\S]*?)' >"\$D\/params\.json"/.exec(trial);
+    const fill = /jq --arg ip "\$IP" '([^']*)' "\$D\/params\.json"/.exec(trial);
+    const build = /^jq '([^']*)'"\$\(cat "\$HERE\/nx-e2e-client\.jq"\)"/m.exec(pipe);
+    assert.ok(mk && fill && build, "could not find the jq programs in reality-trial.sh and nx-e2e-pipe.sh");
+    const j = (args, input) => {
+      const r = spawnSync("jq", args, { encoding: "utf8", input });
+      assert.equal(r.status, 0, r.stderr);
+      return r.stdout;
+    };
+    const params = j(["-n", "--arg", "host", "www.example.org", "--arg", "pub", "PUBKEY", "--arg", "sid", "abcd", "--arg", "u", "U", "--argjson", "port", "443", mk[1]]);
+    const filled = j(["--arg", "ip", "203.0.113.10", fill[1]], params);
+    const e = JSON.parse(j([build[1] + readFileSync(client, "utf8")], filled));
+    const issued = run(cfg({ protocol: "XRAY_VLESS_REALITY", port: 443, sni: "www.example.org" }), { uuid: "U", flow: "xtls-rprx-vision" });
+    assert.deepEqual(e, issued);
+    assert.equal(e.nxExpectIp, "203.0.113.10", "the trial must exit on the box's own address");
   });
   it("builds a WebSocket client with the path and http/1.1", () => {
     const o = run(cfg({ transport: "WS" }), { uuid: "U" }).config.outbounds[0];

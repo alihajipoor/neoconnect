@@ -4,7 +4,12 @@
 #   inventory <reality dest host> <panel name> <panel address> <grpc port>
 #   mask-upgrades
 #   packages
-#   ports                 three free random ports: SS=.. WG=.. OVPN=..
+#       (ufw, the hostname, swap and the rest of what a provider's image
+#       brings along are the installer's own: installer/lib/image.sh,
+#       run by the add.image step before this one. With ufw still active
+#       here, iptables-persistent would remove the package and leave its
+#       DROP policies standing.)
+#   ports                three free random ports: SS=.. WG=.. OVPN=..
 #   certs <name1> <name2> one certificate per name, by webroot
 #
 # Each verb is safe to run twice.
@@ -25,7 +30,6 @@ case "$verb" in
     . /etc/os-release
     echo "os: $PRETTY_NAME, kernel $(uname -r), $(uname -m), $(nproc) cpu, $(free -m | awk '/^Mem:/{print $2}') MB, swap $(free -m | awk '/^Swap:/{print $2}') MB, disk $(df -h / | awk 'NR==2{print $4}') free"
     case "$ID" in ubuntu | debian) ;; *) echo "FAIL not Ubuntu or Debian"; bad=1 ;; esac
-    echo "default interface: $(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1); global IPv6: $(ip -6 addr show scope global | grep -c inet6)"
     echo "/tmp: $(findmnt -no FSTYPE /tmp 2>/dev/null || echo on-root)"
     # A provider resolver that refused queries once stalled REALITY for
     # five seconds per connection, and the installer copies the first
@@ -76,20 +80,13 @@ case "$verb" in
     apt-get install -y -qq curl wget jq ca-certificates gnupg iproute2 bind9-dnsutils tmux nginx certbot \
       wireguard wireguard-tools openvpn strongswan strongswan-swanctl libcharon-extra-plugins \
       iptables iptables-persistent fail2ban psmisc >>/root/nx-apt.log 2>&1 || { tail -5 /root/nx-apt.log; echo "FAIL apt install"; exit 1; }
-    # Swap only on a small box: every 1 GB server in the fleet has 2 GB.
-    if [ "$(free -m | awk '/^Mem:/{print $2}')" -le 1100 ] && [ "$(swapon --noheadings | wc -l)" = 0 ]; then
-      fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
-      grep -q '^/swapfile ' /etc/fstab || echo "/swapfile none swap sw 0 0" >>/etc/fstab
-      echo "swap: 2G added"
-    fi
     # OpenSSH 10 logs failed logins from a second process, sshd-session.
     # A jail that matches sshd alone missed 13 of 22 failures.
     printf '[sshd]\nenabled = true\nbackend = systemd\njournalmatch = _SYSTEMD_UNIT=ssh.service + _COMM=sshd + _COMM=sshd-session\nmaxretry = 5\nfindtime = 10m\nbantime = 1h\n' >/etc/fail2ban/jail.d/neoxify-sshd.local
     fail2ban-client -t >/dev/null 2>&1 && systemctl restart fail2ban
     sleep 2
     echo "fail2ban sshd jail: $(fail2ban-client get sshd journalmatch 2>&1 | tr '\n' ' ')"
-    for p in nginx certbot openvpn strongswan fail2ban; do printf '%s %s\n' "$p" "$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null)"; done
-    echo "hostname (left as it is unless it carries a brand word): $(hostname | grep -qiE 'neox|vpn|proxy|node' && echo HAS-BRAND-WORD || echo generic)"
+    for p in nginx certbot openvpn strongswan fail2ban openssl; do printf '%s %s\n' "$p" "$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null)"; done
     ;;
 
   ports)

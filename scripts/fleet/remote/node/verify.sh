@@ -104,11 +104,51 @@ else
   pass "no certificate renews by standalone"
 fi
 
-IF6=$(ip -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
-if [ -n "$IF6" ]; then
-  ip6tables -S OUTPUT 2>/dev/null | grep -q -- '--uid-owner nobody' && pass "ipv6 rejected for xray" || nope "ipv6 open for xray"
+# Closed for Xray whether or not the box has a global IPv6 today: the
+# provider can turn it on later, and nothing is run again when it does.
+if [ -d /proc/sys/net/ipv6 ]; then
+  [ "$(ip6tables -S OUTPUT 2>/dev/null | grep -c -- '--uid-owner nobody')" -ge 2 ] && pass "ipv6 rejected for xray (global IPv6 addresses now: $(ip -6 addr show scope global 2>/dev/null | grep -c inet6))" || nope "ipv6 open for xray"
+  [ "$(cat /proc/sys/net/ipv6/conf/all/forwarding)" = 0 ] && pass "ipv6 forwarding off" || nope "ipv6 forwarding on"
+else
+  pass "no IPv6 in this kernel"
 fi
-[ "$(cat /proc/sys/net/ipv6/conf/all/forwarding)" = 0 ] && pass "ipv6 forwarding off" || nope "ipv6 forwarding on"
+
+# What a provider's image can bring along. The installer's own check
+# (installer/lib/image.sh) is asked, so there is one definition of each:
+# ufw and its chains, a hostname or /etc/hosts carrying a brand word,
+# swap on a small box, a firmware timer on a virtual machine, a default
+# route. It is asked here, and again after the reboot, because that is
+# where two of them came back on the first build: cloud-init rewrote
+# /etc/hosts with the provider's label, and rules saved with ufw's chains
+# in them would have been loaded again.
+PI=/root/neoxify-installer/maintenance/provider-image.sh
+if [ -f "$PI" ]; then
+  while read -r st rest; do
+    case "$st" in
+      ok) pass "image $rest" ;;
+      REPAIR | LOOK) nope "image $rest" ;;
+    esac
+  done < <(bash "$PI" 2>&1)
+else
+  nope "image checks: no installer copy with maintenance/provider-image.sh on this box"
+fi
+if grep -qsE '^:ufw6?-|^:(INPUT|FORWARD) (DROP|REJECT)' /etc/iptables/rules.v4 /etc/iptables/rules.v6; then
+  nope "the saved firewall rules hold ufw chains or a closed policy: the next boot loads them"
+else
+  pass "saved firewall rules: no ufw chain, no closed policy"
+fi
+# Nothing may assume an interface name. Every NAT rule has to name the
+# interface the default route really leaves by, or the tunnels connect
+# and carry nothing.
+DEF=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+NATIF=$(iptables -t nat -S POSTROUTING 2>/dev/null | sed -n 's/.* -o \([^ ]*\) .*-j MASQUERADE.*/\1/p' | sort -u | tr '\n' ' ')
+if [ -z "$NATIF" ]; then
+  nope "no MASQUERADE rule: WireGuard, OpenVPN and IKEv2 would connect and carry nothing"
+elif [ "$NATIF" = "$DEF " ]; then
+  pass "NAT leaves by the interface the default route uses ($DEF)"
+else
+  nope "NAT rules name '${NATIF% }', and the default route leaves by '$DEF'"
+fi
 [ "$(iptables -S OUTPUT 2>/dev/null | grep -c neoxify-no-self-loop)" = 2 ] && pass "self-connect guard (2 rules)" || nope "self-connect guard missing"
 [ "$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo 0)" -ge 65536 ] && pass "conntrack limit" || nope "conntrack limit under 65536"
 [ "$(swapon --noheadings | wc -l)" -ge 1 ] || [ "$(free -m | awk '/^Mem:/{print $2}')" -gt 1100 ] && pass "memory or swap" || nope "small box without swap"

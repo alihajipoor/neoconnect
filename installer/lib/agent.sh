@@ -321,6 +321,10 @@ action_install_agent() {
 
   detect_os
   mask_auto_upgrades
+  # Before any package: see installer/lib/image.sh for what a provider's
+  # image can bring along, and why ufw has to go before
+  # iptables-persistent is installed.
+  prepare_provider_image
   install_base_deps
   raise_conntrack_max
   fetch_agent_binary
@@ -837,7 +841,10 @@ ensure_fallback_site() {
   if grep -qs "127.0.0.53" /etc/resolv.conf; then
     mirror_resolver="127.0.0.53"
   else
-    mirror_resolver="$(awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf 2>/dev/null)"
+    # The first IPv4 one. A provider's resolv.conf can list IPv6
+    # resolvers on a box that has no IPv6 address at all, and nginx takes
+    # a bare IPv6 address here as a syntax error.
+    mirror_resolver="$(awk '/^nameserver/ && $2 ~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ {print $2; exit}' /etc/resolv.conf 2>/dev/null)"
     [[ -z "$mirror_resolver" ]] && mirror_resolver="1.1.1.1"
   fi
 
@@ -1747,6 +1754,75 @@ reality_chain_bytes() {
   printf '%s\n' "$total"
 }
 
+# The key-exchange group a handshake settled on, as s_client names it, or
+# nothing when this build of openssl does not say.
+#
+# Three spellings, because the line has changed and this probe once read
+# only the first of them:
+#   OpenSSL 3.0 (Ubuntu 24.04)   Server Temp Key: X25519, 253 bits
+#                                Server Temp Key: ECDH, prime256v1, 256 bits
+#   OpenSSL 3.5.8, as captured   Peer Temp Key: X25519, 253 bits
+#   OpenSSL 4.0 (Ubuntu 26.10)   Negotiated TLS1.3 group: <name>
+# The last is as reported from the 26.10 builds, where "Server Temp Key"
+# was not printed at all; it was not captured here. OpenSSL 3.5.8 prints
+# it too, after a handshake that failed, as "<NULL>" -- which is not a
+# group.
+reality_negotiated_group() {
+  local out="$1" line="" group=""
+  line="$(grep -m1 -E '^[[:space:]]*Negotiated TLS1\.3 group:' <<<"$out" || true)"
+  group="${line#*: }"
+  group="${group//[[:space:]]/}"
+  if [[ -n "$group" && "$group" != "<NULL>" ]]; then
+    printf '%s\n' "$group"
+    return 0
+  fi
+  line="$(grep -m1 -E '^[[:space:]]*(Server|Peer) Temp Key:' <<<"$out" || true)"
+  [[ -n "$line" ]] || return 0
+  # "X25519, 253 bits" names the group first; "ECDH, prime256v1, 256
+  # bits" names the family first and the curve second.
+  group="$(awk -F': *' '{n = split($2, f, / *, */); if (f[1] == "ECDH" && n >= 2) print f[2]; else print f[1]}' <<<"$line")"
+  group="${group//[[:space:]]/}"
+  [[ -n "$group" ]] && printf '%s\n' "$group"
+  return 0
+}
+
+# Does this host finish a TLS 1.3 handshake when X25519 is the only
+# key-exchange group on offer?
+#
+# REALITY's server answers the customer with its own key share, which is
+# X25519, and it only does so after reading the dest's ServerHello and
+# finding an X25519 share (or the X25519+ML-KEM hybrid) in it. Any other
+# answer -- another curve, or a HelloRetryRequest asking for one -- and
+# it stops impersonating and passes the connection through to the real
+# site. The customer's client then meets the site's real certificate and
+# refuses it: "received real certificate". Nothing is logged on the node,
+# the dest looks reachable, and REALITY carries no traffic.
+# https://github.com/XTLS/REALITY/blob/main/tls.go
+#
+# That is what happened on a node built in November 2026. Its dest spoke
+# TLS 1.3 and h2 with a valid certificate for its own name and passed
+# this probe, because X25519 was a note rather than a failure, and the
+# note was read from the "Server Temp Key" line, which the OpenSSL 4 on
+# that box does not print. The site negotiated secp256r1 and nothing
+# else.
+#
+# So the question is put to the dest directly, and the answer is whether
+# the handshake completed -- a fact every openssl reports the same way --
+# and not what any one release happens to print about it. Three attempts,
+# because a refusal comes back at once and a lost packet should not
+# condemn a good dest.
+reality_x25519_only() {
+  local ip="$1" port="$2" host="$3" out=""
+  for _ in 1 2 3; do
+    out="$(timeout 10 openssl s_client -connect "${ip}:${port}" -servername "$host" \
+      -tls1_3 -groups X25519 -alpn h2 </dev/null 2>/dev/null | tr -d '\0' || true)"
+    if [[ "$out" =~ New,[[:space:]]*TLSv1\.3 ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Checks a candidate the way REALITY will actually use it.
 #
 # REALITY hands any connection that fails authentication straight to this
@@ -1765,6 +1841,12 @@ reality_chain_bytes() {
 #   * TLS 1.3, ALPN h2, X25519 -- the handshake REALITY forwards has to
 #     look like the one the inbound advertises. This is what the probe
 #     already did, and all it did.
+#   * X25519, proven by a handshake that offers nothing else. This was
+#     advisory, read off one line of s_client's output, and it passed a
+#     site that refuses X25519 outright: REALITY came up, the first test
+#     client got "received real certificate", and the dest had to be
+#     changed on a node that was already built (2026-11, see
+#     reality_x25519_only).
 #   * The certificate must be valid AND carry the name we intend to
 #     claim. "Verify return code: 0" says the chain is trusted and
 #     nothing about whose name is on it, so a host answering with
@@ -1784,8 +1866,9 @@ reality_chain_bytes() {
 # will work but it is a poor disguise" want different handling and the
 # caller cannot tell them apart from a message:
 #   0  usable; any advisory notes are printed
-#   1  will not work at all -- unreachable, no TLS 1.3, no h2, wrong or
-#      broken certificate, chain too large for REALITY to relay
+#   1  will not work at all -- unreachable, no TLS 1.3, no h2, no X25519
+#      key exchange, wrong or broken certificate, chain too large for
+#      REALITY to relay
 #   2  works, but the disguise is weak: fronted by a CDN, announced from
 #      a published range, or a redirector
 # In every non-zero case it prints every reason it found, joined with
@@ -1919,13 +2002,24 @@ probe_reality_dest() {
     note+=("certificate chain is ~$chain_bytes bytes, close to REALITY's 8192-byte ceiling")
   fi
 
-  # Advisory, not fatal: a dest that negotiates something else still
-  # works, it just gives REALITY less to hide behind. Reported only when
-  # s_client actually printed the line -- not every build does, and
-  # treating a missing line as a missing X25519 would flag every
-  # candidate on those boxes.
-  if grep -q "Server Temp Key" <<<"$out" && ! grep -qi "Server Temp Key: *X25519" <<<"$out"; then
-    note+=("does not negotiate X25519")
+  # X25519, or REALITY does not work at all. Fatal, and decided by a
+  # handshake of its own rather than by a line of the one above: see
+  # reality_x25519_only for what went wrong when it was neither.
+  #
+  # The second half is the same failure reached another way. The
+  # handshake above offered a choice of groups with X25519 first, as a
+  # browser does. A dest that answers that by moving the key exchange to
+  # another group has sent a HelloRetryRequest, and REALITY's server
+  # gives up on exactly that answer. Judged only when s_client named the
+  # group: a build that prints none proves nothing either way.
+  local kx_group=""
+  if ! reality_x25519_only "$ip" "$port" "$host"; then
+    bad+=("refuses a TLS 1.3 handshake that offers X25519 alone -- REALITY relays a dest's answer only when the key exchange is X25519, so every customer would be handed to the real site and see 'received real certificate'")
+  else
+    kx_group="$(reality_negotiated_group "$out")"
+    if [[ -n "$kx_group" && ! "${kx_group^^}" =~ ^X25519(MLKEM768)?$ ]]; then
+      bad+=("moves the key exchange to $kx_group when it is offered a choice -- REALITY relays only an X25519 answer, so customers would see 'received real certificate'")
+    fi
   fi
   # A bonus point upstream names explicitly, and free to observe here.
   if grep -q "OCSP response: *no response sent" <<<"$out"; then
@@ -2144,6 +2238,21 @@ xray_fix_modes() {
   fi
 }
 
+# Saves the running firewall rules as the ones the node boots with.
+#
+# Whatever is loaded at this moment is what gets written, so chains that
+# a removed ufw left behind are taken out first (installer/lib/image.sh).
+# On the image two nodes were built on in November 2026 they had to be
+# deleted by hand before the first save, or every boot would have put
+# them back. The check is skipped where image.sh was not loaded: the
+# scripts that source this file on its own never save rules.
+persist_firewall_rules() {
+  if declare -F drop_ufw_leftovers >/dev/null; then
+    drop_ufw_leftovers || true
+  fi
+  netfilter-persistent save >/dev/null 2>&1 || true
+}
+
 # Xray may not open connections to this node's own public address.
 #
 # A client reconnect bug once had a customer's tunnel dial the server it
@@ -2183,7 +2292,7 @@ install_self_loop_guard() {
   iptables -I OUTPUT 2 -d "$ip/32" -p udp -m owner --uid-owner nobody -m conntrack --ctstate NEW \
     -m comment --comment "$SELF_LOOP_GUARD_COMMENT" -j REJECT --reject-with icmp-port-unreachable
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent >/dev/null 2>&1 || true
-  netfilter-persistent save >/dev/null 2>&1 || true
+  persist_firewall_rules
   echo "  Xray is barred from connecting to this node's own address."
 }
 
@@ -2380,13 +2489,22 @@ install_xray() {
         [[ -n "$reason" ]] && echo "  Note: $reason."
         break
       fi
+      # Two different questions, worded differently on purpose. A weak
+      # disguise still carries traffic, and accepting one is a decision
+      # an operator (or scripts/fleet, with --accept-weak-dest) may have
+      # made beforehand. A dest that cannot work is not that decision:
+      # the override stays for a person who knows the probe is wrong
+      # from where it ran, and an answer prepared for the first question
+      # must never land on the second.
       if [[ "$chosen_rc" == 2 ]]; then
         echo "  $server_name works, but it is a weak disguise: $reason." >&2
         echo "  It will carry traffic. It will also be what gets this node found." >&2
+        read -r -p "  Use it anyway? [y/N]: " force_dest || force_dest=""
       else
         echo "  $server_name is not usable as a dest from this server: $reason." >&2
+        echo "  REALITY will carry no traffic through it." >&2
+        read -r -p "  Build on it although REALITY will not work? [y/N]: " force_dest || force_dest=""
       fi
-      read -r -p "  Use it anyway? [y/N]: " force_dest || force_dest=""
       [[ "${force_dest,,}" == "y" ]] && break
       # Cleared so the loop cannot fall out of its last iteration still
       # holding a name the operator just declined.
@@ -3984,7 +4102,7 @@ CONF
     # After the ACCEPTs, so these land above them.
     isolate_client_subnet "$listen_pool"
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent >/dev/null 2>&1 || true
-    netfilter-persistent save >/dev/null 2>&1 || true
+    persist_firewall_rules
   fi
 
   systemctl enable --now strongswan >/dev/null 2>&1 || \
@@ -4259,6 +4377,11 @@ EOF
   # survive a reboot -- iptables-persistent's own systemd unit restores
   # /etc/iptables/rules.v4 on every boot.
   apt-get install -y -qq iptables-persistent
+  # Not through persist_firewall_rules alone: here a save that fails is
+  # an error, as it always was.
+  if declare -F drop_ufw_leftovers >/dev/null; then
+    drop_ufw_leftovers || true
+  fi
   netfilter-persistent save
 
   cat <<EOF
