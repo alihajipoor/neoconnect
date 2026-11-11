@@ -8276,3 +8276,48 @@ wording of its errors.
 **Not done:** the Mac re-sign of the endpoint lists; the door region
 gate for foreign-registered networks (task filed); why some Windows
 installs stay on old versions.
+
+## 2026-11-11 — india-1 retired; block watch set to notify
+
+**Why:** the owner asked which servers do not work for users in the
+restricted country, then why nothing had alerted him about India. Three
+days of app reports from those networks: India worked for 1 of the 8
+customers who tried it and moved 0.2 GB in a day; the two Hetzner exits
+worked for 13 of 15 and 8 of 11. From an open network India passed all
+four Xray protocols with the exit address matching, so the server was
+healthy: the path from those ISPs to its address is what fails (the
+same provider as two other exits that show the same pattern, and the
+bare-address test before its build on 11-07 had already shown uploads
+held). He ruled that a server that does not work for those users is not
+wanted.
+
+**Retired india-1** (dump `pre-retire-india-1-20261111T025434Z`):
+- Its 12 routes (8 direct, 4 relay through the Iranian relay) taken out
+  of all five plans, one plan at a time, 1 to 12 s each, every node's
+  heartbeat fresh after each; 761 revocations acked, no credential left.
+- The 4 relay routes deleted through the API: REMOVE_ROUTE acked four
+  times, no rule left on the relay, its engine's PID unchanged.
+- Its agent stopped and disabled; once OFFLINE the node was set DISABLED
+  with its key and mirror host cleared and its 8 routes switched off.
+  Usage history (10,055 rows) and protocol configs are kept.
+- Both DNS names deleted; no zone points at its address any more.
+- The relay hop: port 47134 and its address removed on the Germany exit
+  (its own nft table reloaded), and the matching rule removed on the
+  relay live by handle, its file edited and only syntax-checked. The six
+  remaining relay routes passed end to end afterwards.
+- The website's location list drops India (code committed; not deployed
+  until the owner has seen it). The VPS itself is the owner's to delete.
+
+**Why no alert, and what changed:**
+- The block watch had been in `digest` mode since 2026-10-27: incidents
+  went into a daily summary and nothing was ever paged. It had opened
+  germany-2's incident 25 minutes after that block; the server was
+  retired before the next summary. It is now `notify` (env backup
+  `/root/infra-env-pre-blockwatch-notify-*`).
+- It only detects a server that worked and then stopped. India never
+  worked for those users, so nothing dropped. A check for "works for how
+  many of the customers who tried it" is still to be built.
+
+**Also in hand:** `claude/fleet-tool`, a checklisted add / replace /
+retire process for servers, asked for by the owner so that nothing is
+missed; not merged.

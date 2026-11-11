@@ -13,8 +13,8 @@
  *  Source: docs/journal/HANDOVER-2026-08-22.md section 2 ("Fleet state"),
  *  which listed the nodes, every one of them live and carrying paying
  *  customers -- since changed: France retired, the UK added, Finland and
- *  Singapore moved to replacement servers, and the Netherlands and India
- *  added (2026-11-06).
+ *  Singapore moved to replacement servers, the Netherlands and India
+ *  added (2026-11-06), and India retired again (2026-11-11).
  *
  *  Rules for editing:
  *    - Add a country here ONLY when a node is actually enrolled and
@@ -73,12 +73,6 @@ return array(
                change -- it has always been ترکیه. */
             'country' => array('en' => 'Türkiye', 'fa' => 'ترکیه'),
             'city' => array('en' => 'Istanbul', 'fa' => 'استانبول'),
-        ),
-
-        array(
-            'code' => 'in',
-            'country' => array('en' => 'India', 'fa' => 'هند'),
-            'city' => null,
         ),
 
         array(
