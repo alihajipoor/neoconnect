@@ -11,7 +11,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { namesOutsideZones, randomLabel } from "./dns.mjs";
 import {
-  chainAdd, chainFromRelayRules, chainRemove, parseChainFw, parseHopRules,
+  chainAdd, chainFromRelayRules, chainRemove, countHopRules, hopRuleIs, parseChainFw, parseHopRules,
   relayFileAdd, relayFileRemove, relayFileRepoint, relayRuleText, renderChainFw, ruleForExit,
 } from "./hop.mjs";
 import { planGuard, planSteps } from "./planlist.mjs";
@@ -50,10 +50,14 @@ const commands = {
   //   (the exit address goes to <out-dir>/<handle>.exit, never to the screen)
   "hop-through": () => {
     for (const r of parseHopRules(read(a[0])).filter((x) => x.hopIp === a[1])) {
-      if (a[2]) writeFileSync(`${a[2]}/${r.handle}.exit`, r.exitIp);
+      if (a[2] && r.handle !== null) writeFileSync(`${a[2]}/${r.handle}.exit`, r.exitIp);
       out([r.handle ?? "-", r.exitName, r.hopPort].join("|"));
     }
   },
+  // hop-count <listing-or-file> exit|hop <ip> -> how many hop rules are for that exit / go through that hop
+  "hop-count": () => out(String(countHopRules(parseHopRules(read(a[0])), a[1], a[2]))),
+  // hop-is <listing-or-file> <exitIp> <hopIp> [hopPort] -> yes | no | none (no rule for that exit)
+  "hop-is": () => out(hopRuleIs(parseHopRules(read(a[0])), { exitIp: a[1], hopIp: a[2], hopPort: a[3] ? Number(a[3]) : null })),
   // hop-rule <exitIp> <hopIp> <hopPort> <exitName> <hopName> <out-file>
   "hop-rule": () => writeFileSync(a[5], relayRuleText({ exitIp: a[0], hopIp: a[1], hopPort: Number(a[2]), exitName: a[3], hopName: a[4] })),
   // hop-file-remove <in> <out> <exitIp>
@@ -67,9 +71,11 @@ const commands = {
   // hop-file-add <in> <out> <exitIp> <hopIp> <hopPort> <exitName> <hopName>
   "hop-file-add": () => writeFileSync(a[1], relayFileAdd(read(a[0]), { exitIp: a[2], hopIp: a[3], hopPort: Number(a[4]), exitName: a[5], hopName: a[6] })),
 
-  // chain-from-relay <listing-file> <out> <relayIp> <oldHopIp> -> number of exits
+  // chain-from-relay <listing-file> <out> <relayIp> <hopIp> [hopIp...] -> number of exits
+  //   (every rule through ANY of those hops: the old one, and the new one for
+  //   the exits an earlier pass already moved)
   "chain-from-relay": () => {
-    const m = chainFromRelayRules(parseHopRules(read(a[0])), [a[2]], a[3]);
+    const m = chainFromRelayRules(parseHopRules(read(a[0])), [a[2]], a.slice(3));
     writeFileSync(a[1], renderChainFw(m));
     out(String(m.hops.length));
   },

@@ -75,7 +75,8 @@ rpipe() {
 # (the repository's own maintenance scripts).
 lrun() {
   if dry; then
-    echo "local \$ $*" >&2
+    local shown="$*"
+    echo "local \$ ${shown//"$REPO_ROOT"\//}" >&2
     return 0
   fi
   "$@"

@@ -33,22 +33,48 @@ ok_replace_params() {
   dry || { state_has name && state_has region; }
 }
 
+# This step can stop halfway (one dropped connection to the relay box is
+# enough), and then it is run again. So it never works from "the rules
+# that still go through the old server" alone:
+#
+#   - the new server's table is built from the rules through the old
+#     server AND the rules through the new one. Built from the first
+#     only, a second pass would load a table without the exits the first
+#     pass had already moved, over the one that had them, and cut them off;
+#   - "nothing to move" is said only when no live rule goes through
+#     either server AND the relay's file has no line through the old one.
+#     The file is read at the relay's next boot: a pass that moved the
+#     live rules and stopped before the file would otherwise be followed
+#     by one that says "nothing to move" and leaves the boot-time rules
+#     pointing at a server that is about to go.
 do_move_hop() {
-  local oldip n handle exitname port exitip dest
+  local oldip n=0 n_old=0 n_new=0 n_file=0 handle exitname port exitip dest
   oldip="$(old_ip)" || return 1
   rscript relay relay/relay.sh hop-list || return 1
   rget relay "$REMOTE_DIR/hop-live.txt" "$RUN_DIR/hop-live.txt" || return 1
+  rget relay /etc/nftables.conf "$RUN_DIR/nft.old" || return 1
   if dry; then
     say "only when the old server carries the hop; then, for every exit that goes through it:"
-    echo "local \$ tool.mjs chain-from-relay (the hop table rebuilt from the relay's own rules, so it works when the old box is already gone)" >&2
-    n="{exits}"
+    echo "local \$ tool.mjs chain-from-relay (the hop table rebuilt from the relay's own rules through the old server AND, on a second pass, the new one; it works when the old box is already gone)" >&2
   else
     mkdir -p "$RUN_DIR/hopx"
-    n="$(tool hop-through "$RUN_DIR/hop-live.txt" "$oldip" "$RUN_DIR/hopx" | tee "$RUN_DIR/hop-through.txt" | grep -c . || true)"
-    if [[ "$n" == 0 ]]; then
-      say "$OLD carries no hop: nothing to move"
+    tool hop-through "$RUN_DIR/hop-live.txt" "$oldip" "$RUN_DIR/hopx" >"$RUN_DIR/hop-old.txt" || return 1
+    tool hop-through "$RUN_DIR/hop-live.txt" "$NEW_IP" "$RUN_DIR/hopx" >"$RUN_DIR/hop-new.txt" || return 1
+    cat "$RUN_DIR/hop-old.txt" "$RUN_DIR/hop-new.txt" >"$RUN_DIR/hop-through.txt"
+    n_old="$(grep -c . "$RUN_DIR/hop-old.txt" || true)"
+    n_new="$(grep -c . "$RUN_DIR/hop-new.txt" || true)"
+    n_file="$(tool hop-count "$RUN_DIR/nft.old" hop "$oldip")" || return 1
+    n=$((n_old + n_new))
+    if [[ $n -eq 0 ]]; then
+      if [[ "$n_file" != 0 ]]; then
+        say "No live rule on the relay goes through $OLD or through the new server, but the relay's nftables file"
+        say "still has $n_file line(s) through $OLD. Nobody made that on purpose, and there is no live rule to learn"
+        say "the right target from: look at the relay's file and its live rules by hand."
+        return 1
+      fi
+      say "$OLD carries no hop (no live rule and no file line on the relay goes through it): nothing to move"
       state_set move_hop none
-      rm -rf "$RUN_DIR/hopx" "$RUN_DIR"/hop-*
+      rm -rf "$RUN_DIR/hopx" "$RUN_DIR"/hop-* "$RUN_DIR"/nft.*
       return 0
     fi
     if [[ "$(st pre_relay_443 PASS)" != PASS && "$OPT_HOP" != no ]]; then
@@ -62,13 +88,17 @@ do_move_hop() {
       exitip="$(node_field "$exitname" publicIp)" || return 1
       [[ "$exitip" == "$(cat "$RUN_DIR/hopx/$handle.exit")" ]] || { say "the relay's rule for $exitname does not point at the address the panel has for it: fix that by hand first"; return 1; }
     done <"$RUN_DIR/hop-through.txt"
-    tool chain-from-relay "$RUN_DIR/hop-live.txt" "$RUN_DIR/chain.new" "$RELAY_HOST" "$oldip" >/dev/null || return 1
-    say "$OLD carries the hop for $n exit(s): $(cut -d'|' -f2 "$RUN_DIR/hop-through.txt" | tr '\n' ' ')"
+    tool chain-from-relay "$RUN_DIR/hop-live.txt" "$RUN_DIR/chain.new" "$RELAY_HOST" "$oldip" "$NEW_IP" >/dev/null || return 1
+    say "the hop carries $n exit(s): $(cut -d'|' -f2 "$RUN_DIR/hop-through.txt" | tr '\n' ' ')"
+    say "  still through $OLD: $n_old; already through the new server (an earlier pass): $n_new; lines through $OLD in the relay's file: $n_file"
   fi
-  # 1. the new server gets the same table
+  # 1. the new server gets the table (loading it again is harmless: it is
+  #    the same table, and flows already through it keep their entries)
   rput new "$RUN_DIR/chain.new" "$REMOTE_DIR/chain-fw.nft.new" 600 || return 1
   rscript new node/hop-server.sh apply || return 1
   undo "on the new server: $REMOTE_DIR/hop-server.sh remove (or: systemctl disable --now neoxify-chain-fw; nft delete table ip neoxify_chain)"
+  dry && n="<exits>"
+  rsh new "$REMOTE_DIR/hop-server.sh check $n" || { say "the new server's hop table is not as it should be: the relay was not touched"; return 1; }
   # 2. proof before the relay is touched: each exit's disguise site answers through the new server
   rpushdir relay inside || return 1
   if dry; then
@@ -79,64 +109,68 @@ do_move_hop() {
       rsh relay "$REMOTE_DIR/inside.sh sni $NEW_IP $port ${dest%:*}" | sed "s/^/  $exitname through the new hop: /" || { say "the new hop does not carry $exitname: the relay was not touched"; return 1; }
     done <"$RUN_DIR/hop-through.txt"
   fi
-  # 3. the relay: each live rule repointed by its handle, then the same lines in the file
+  # 3. the relay: each live rule that is still through the old server
+  #    repointed by its handle, then the same lines in the file
   rsh relay "$REMOTE_DIR/relay.sh hop-backup move-to-$(nn)" || return 1
   if dry; then
     rput relay "$RUN_DIR/hop-rule.txt" "$REMOTE_DIR/hop-rule.txt" 600
-    rsh relay "$REMOTE_DIR/relay.sh hop-set <handle>   (once per exit)"
+    rsh relay "$REMOTE_DIR/relay.sh hop-set <handle>   (once per exit still through the old server)"
   else
     while IFS='|' read -r handle exitname port; do
       tool hop-rule "$(cat "$RUN_DIR/hopx/$handle.exit")" "$NEW_IP" "$port" "$exitname" "$(nn)" "$RUN_DIR/hop-rule.txt" || return 1
       rput relay "$RUN_DIR/hop-rule.txt" "$REMOTE_DIR/hop-rule.txt" 600 || return 1
       rsh relay "$REMOTE_DIR/relay.sh hop-set $handle" | sed "s/^/  $exitname: /" || return 1
-    done <"$RUN_DIR/hop-through.txt"
+    done <"$RUN_DIR/hop-old.txt"
+    [[ $n_old -gt 0 ]] || say "no live rule is left through $OLD (an earlier pass moved them)"
   fi
   undo "on the relay box, per exit: nft replace rule ip neoxify_relay_chain output handle <h> <the old rule, from /root/nft-live.bak-pre-move-to-$(nn)-*>"
-  rget relay /etc/nftables.conf "$RUN_DIR/nft.old" || return 1
-  dry || tool hop-file-repoint "$RUN_DIR/nft.old" "$RUN_DIR/nft.new" "$oldip" "$NEW_IP" "$(nn)" >/dev/null || return 1
-  rput relay "$RUN_DIR/nft.new" "$REMOTE_DIR/nftables.conf.new" 600 || return 1
-  rsh relay "$REMOTE_DIR/relay.sh hop-file-swap" || return 1
-  undo "on the relay box: cp -a /etc/nftables.conf.bak-pre-move-to-$(nn)-<time> /etc/nftables.conf (never load that file)"
+  if dry || [[ "$n_file" != 0 ]]; then
+    dry || tool hop-file-repoint "$RUN_DIR/nft.old" "$RUN_DIR/nft.new" "$oldip" "$NEW_IP" "$(nn)" >/dev/null || return 1
+    rput relay "$RUN_DIR/nft.new" "$REMOTE_DIR/nftables.conf.new" 600 || return 1
+    rsh relay "$REMOTE_DIR/relay.sh hop-file-swap" || return 1
+    undo "on the relay box: cp -a /etc/nftables.conf.bak-pre-move-to-$(nn)-<time> /etc/nftables.conf (never load that file)"
+  else
+    say "the relay's nftables file has no line through $OLD (an earlier pass edited it)"
+  fi
   dry && return 0
   state_set move_hop "$n"
   state_set move_hop_exits "$(cut -d'|' -f2 "$RUN_DIR/hop-through.txt" | tr '\n' ' ')"
   rm -rf "$RUN_DIR/hopx" "$RUN_DIR"/hop-* "$RUN_DIR"/chain.* "$RUN_DIR"/nft.*
 }
+# What this run recorded is not taken for the answer: the relay's live
+# rules and its file are read again, every time. A run whose state says
+# "nothing was moved" while rules go through the new server, or while the
+# file still names the old one, fails here.
 ok_move_hop() {
-  local oldip left now x rows pu out bad=0
-  expect "no live rule and no file line on the relay goes through the old server; the new server's hop table is loaded and survives a reboot; and a relay tunnel to each exit behind the hop still exits on that exit's own address"
-  [[ "$(st move_hop none)" == none ]] && ! dry && return 0
+  local oldip left now fleft fnow want bad=0
+  expect "no live rule and no file line on the relay goes through the old server, and as many of each go through the new one as this step moved; the new server's hop table is loaded with exactly those exits, is the file it loads at boot, its unit is enabled and forwarding is on and written down; and a relay tunnel to each exit behind the hop still exits on that exit's own address"
   oldip="$(old_ip)" || return 1
   rscript relay relay/relay.sh hop-list >/dev/null || return 1
   rget relay "$REMOTE_DIR/hop-live.txt" "$RUN_DIR/hop-live.txt" || return 1
+  rget relay /etc/nftables.conf "$RUN_DIR/nft.chk" || return 1
   relay_pid_same || return 1
-  rscript new node/verify.sh "$(need l1)" "$(need l2)" hop | grep -E '^FAIL|hop table|forwarding' | sed 's/^/  /'
-  pscript nx-xray-get.sh "$XRAY_VERSION" >/dev/null || return 1
-  panel_mint >/dev/null || return 1
   if dry; then
-    q test-creds "name=<each exit behind the hop>" "email=${TEST_RELAY_EMAIL:-}"
-    rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-build.sh <relay REALITY credential> | $PANEL_ENV$REMOTE_DIR/nx-e2e-run.sh $REMOTE_DIR/xray 'relay to <exit> through the moved hop'"
+    rscript new node/hop-server.sh check "<exits>"
+    hop_exits_dial "through the moved hop"
     return 0
   fi
-  left="$(tool hop-through "$RUN_DIR/hop-live.txt" "$oldip" | grep -c . || true)"
-  now="$(tool hop-through "$RUN_DIR/hop-live.txt" "$NEW_IP" | grep -c . || true)"
-  rm -f "$RUN_DIR/hop-live.txt"
-  say "live hop rules through the old server: $left; through the new one: $now"
-  [[ "$left" == 0 && "$now" == "$(st move_hop)" ]] || bad=1
-  [[ "$(rsh relay "grep -c ' via $OLD\"' /etc/nftables.conf || true")" == 0 ]] || { say "the relay's file still has a line through $OLD"; bad=1; }
-  for x in $(st move_hop_exits); do
-    rows="$(q test-creds "name=$x" "email=${TEST_RELAY_EMAIL:-}")" || return 1
-    pu="$(awk -F'|' '$4 == "relay" && $1 ~ /REALITY/ {print $3; exit}' <<<"$rows")"
-    if [[ -z "$pu" ]]; then
-      say "UNVERIFIED: the relay test account has no REALITY credential to $x, so that exit was not dialled through the moved hop"
-      bad=1
-      continue
-    fi
-    out="$(rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-build.sh $pu | $PANEL_ENV$REMOTE_DIR/nx-e2e-run.sh $REMOTE_DIR/xray 'relay to $x through the moved hop'")" || true
-    grep -E ' \| EXIT-' <<<"$out" | sed 's/^/  /'
-    grep -q '^E2E-PASS' <<<"$out" || bad=1
-  done
-  panel_token_shred >/dev/null
+  left="$(tool hop-count "$RUN_DIR/hop-live.txt" hop "$oldip")" || return 1
+  now="$(tool hop-count "$RUN_DIR/hop-live.txt" hop "$NEW_IP")" || return 1
+  fleft="$(tool hop-count "$RUN_DIR/nft.chk" hop "$oldip")" || return 1
+  fnow="$(tool hop-count "$RUN_DIR/nft.chk" hop "$NEW_IP")" || return 1
+  rm -f "$RUN_DIR/hop-live.txt" "$RUN_DIR/nft.chk"
+  say "hop rules through the old server: $left live, $fleft in the relay's file; through the new one: $now live, $fnow in the file"
+  [[ "$left" == 0 ]] || { say "a live rule on the relay still goes through $OLD"; bad=1; }
+  [[ "$fleft" == 0 ]] || { say "the relay's file still has a line through $OLD: it would be loaded at the relay's next boot"; bad=1; }
+  want="$(st move_hop none)"
+  if [[ "$want" == none ]]; then
+    [[ "$now" == 0 && "$fnow" == 0 ]] || { say "rules go through the new server, but this run has no record of a finished move: run the step again"; bad=1; }
+    return $bad
+  fi
+  [[ "$now" == "$want" && "$fnow" == "$want" ]] || { say "this step moved $want exit(s); the relay has $now live rule(s) and $fnow file line(s) through the new server"; bad=1; }
+  rscript new node/hop-server.sh check "$want" || bad=1
+  # shellcheck disable=SC2046
+  hop_exits_dial "through the moved hop" $(st move_hop_exits "") || bad=1
   return $bad
 }
 
@@ -156,6 +190,10 @@ ok_move_defaults() {
 
 checklist_replace() {
   step replace.params auto "Old server exists; the new one gets the next free name, its region and its disguise site"
+  # Before the build, not after it: when the old box is already deleted
+  # at the provider, its names point at an address a stranger may hold,
+  # and the build and its proofs take an hour at best.
+  register_retire_reach
   step add.params auto "Name is free; region, peer, disguise site and versions settled"
   step add.access auto "Key-only access to the panel host, both inside boxes and the new box"
   step add.snapshot auto "Read-only snapshot of the fleet into the run log"
@@ -163,11 +201,15 @@ checklist_replace() {
   register_add_steps
   step move.hop ask "Relay hop moved to the new server before the old one goes (only if the old one carries it)"
   step add.plans auto "Plans, one at a time: the new server in and the old one out in the same edit (database dump first)"
+  # Nothing reaches a customer until every proof before this has passed
+  # in this run. --from and --only do not get round that.
+  needs_prior add.plans
   step add.provision auto "Provisioning check: credentials created and acknowledged"
   step add.e2e-issued auto "Tunnels again, with credentials the panel issued"
   step add.monitoring auto "Monitoring picked it up: inside probe reading and the server's API door"
   step move.defaults auto "No plan route and no plan default left on the old server"
   step retire.snapshot auto "Read-only snapshot of the old server: status, routes, plans, names"
+  register_retire_guards
   register_retire_steps
   step add.owner-after owner "What only the owner can do for the new server afterwards"
   step add.cleanup auto "Scratch files shredded on every host"

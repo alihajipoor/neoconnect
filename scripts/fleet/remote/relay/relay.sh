@@ -27,6 +27,11 @@
 #                        every backend deploy)
 #   adu / rmu            temporary test users: `adu` reads the file on
 #                        stdin, `rmu <tag> <email>` removes one
+#   usercount <tag>...   read-only: "tag=n" per inbound, "tag=?" when
+#                        Xray's API gave no answer. This is how a removed
+#                        test user is known to be gone: this Xray is
+#                        never restarted, so one that was missed would
+#                        stay for good.
 set -uo pipefail
 X=/usr/local/bin/xray
 API=127.0.0.1:10085
@@ -129,8 +134,21 @@ case "$verb" in
   rmu)
     "$X" api rmu -s "$API" -tag="${1:?tag}" "${2:?email}" 2>&1 | tail -1
     ;;
+  usercount)
+    for t in "$@"; do
+      [[ "$t" =~ ^[a-z0-9-]{1,48}$ ]] || { echo "bad tag"; exit 2; }
+      # Zero is printed as no "count" at all, so an empty answer from a
+      # call that succeeded is 0, and only a failed call is unknown.
+      if O=$("$X" api inboundusercount -s "$API" -tag "$t" 2>/dev/null); then
+        N=$(grep -o '"count": *[0-9]*' <<<"$O" | grep -o '[0-9]*$')
+        echo "$t=${N:-0}"
+      else
+        echo "$t=?"
+      fi
+    done
+    ;;
   *)
-    echo "usage: relay.sh state|hop-list|hop-backup|hop-del|hop-set|hop-add|hop-file-swap|control-name|adu|rmu" >&2
+    echo "usage: relay.sh state|hop-list|hop-backup|hop-del|hop-set|hop-add|hop-file-swap|control-name|adu|rmu|usercount" >&2
     exit 2
     ;;
 esac

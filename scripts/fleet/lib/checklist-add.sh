@@ -74,6 +74,247 @@ relay_pid_same() {
   fi
 }
 
+# Does the relay box need the hop to reach this exit? --hop yes|no is the
+# owner's word; otherwise the bare-box reading on 443 from the relay
+# decides. Asked by add.e2e-inside and by add.hop, which must agree.
+hop_wanted() {
+  case "$OPT_HOP" in yes) return 0 ;; no) return 1 ;; esac
+  [[ "$(st pre_relay_443 PASS)" != PASS ]]
+}
+
+# Is this server already carrying people? "yes" once any plan holds one
+# of its routes or any shared credential exists on it, else "no". From
+# then on nothing in this checklist restarts an engine on it: add.postfix
+# and add.parity verify only, and say what is left for a person.
+customers_on_it() {
+  local holds have
+  holds="$(q plan-holds "name=$(nn)")" || return 1
+  have="$(q provision "name=$(nn)")" || return 1
+  if dry; then
+    echo no
+    return 0
+  fi
+  if awk -F'|' '$2 != 0 {f = 1} END {exit !f}' <<<"$holds" || [[ "$(sed -n 's/^have|//p' <<<"$have")" != 0 ]]; then
+    echo yes
+  else
+    echo no
+  fi
+}
+
+# The relay box's agent must be reporting before a relay route is made
+# or deleted through the API. With it away the panel's rows change and
+# the relay's running Xray does not: a deleted route keeps its rule
+# there, a new one never gets its outbound. Every backend deploy drops
+# the agents' streams, and the relay's has to dial in again from inside.
+relay_agent_online() {
+  local row status age name
+  row="$(q node-row "name=$RELAY_NODE_NAME")" || return 1
+  name="$(rscript relay relay/relay.sh control-name)" || true
+  dry && return 0
+  IFS='|' read -r _ _ _ status age _ <<<"$row"
+  [[ -n "$name" ]] && say "relay box: $name"
+  if [[ "$status" == ONLINE && "$age" =~ ^[0-9]+$ && "$age" -le 90 ]]; then
+    say "relay box agent: ONLINE, heartbeat $age s ago"
+    return 0
+  fi
+  say "REFUSED: the relay box's agent is not reporting (status ${status:-unknown}, heartbeat ${age:-never} s ago)."
+  say "A route change now would change the panel's rows and leave the relay's running Xray as it is."
+  say "After a backend deploy it has to dial in again, and it only can if the name it uses is not reset"
+  say "from inside (the line above; 'fleet status $RELAY_NODE_NAME'). Nothing was changed. Run again once it reports."
+  return 1
+}
+
+# xray_counts <role> <tag>...: "tag=n tag=n" from that host's running
+# Xray, "tag=?" where its API gave no answer. Counting is how a removed
+# test user is known to be gone.
+xray_counts() {
+  local role="$1" t
+  shift
+  if ! dry; then
+    for t in "$@"; do [[ "$t" =~ ^[a-z0-9-]+$ ]] || { say "bad inbound tag"; return 1; }; done
+  fi
+  if [[ "$role" == relay ]]; then
+    rscript relay relay/relay.sh usercount "$@" | tr '\n' ' '
+  else
+    rsh "$role" "for t in $*; do if o=\$(/usr/local/bin/xray api inboundusercount -s 127.0.0.1:10085 -tag \$t 2>/dev/null); then n=\$(grep -o '\"count\": *[0-9]*' <<<\"\$o\" | grep -o '[0-9]*\$'); echo \"\$t=\${n:-0}\"; else echo \"\$t=?\"; fi; done | tr '\n' ' '"
+  fi
+}
+
+# "a=1  b=2 " -> "a=1 b=2": two counts are compared as lists, not as text.
+squash() {
+  local a
+  read -ra a <<<"$1"
+  echo "${a[*]}"
+}
+
+DIRECT_TAGS="vless-in vless-tls-in vless-ws-in trojan-in shadowsocks-in"
+# A server nobody is on yet: no user anywhere, and the one seed user
+# Shadowsocks keeps.
+DIRECT_EMPTY="vless-in=0 vless-tls-in=0 vless-ws-in=0 trojan-in=0 shadowsocks-in=1"
+
+# no_strays <new|relay> <counts>: the users counted before the test users
+# go in are taken as "what was there", and the step must bring the count
+# back to them. That only holds if they are real. When nobody can be on
+# these inbounds yet (no plan holds a route of this server) and they are
+# not empty all the same, what is there is test users an earlier pass
+# left behind after its files were cleaned away, and counting from them
+# would hide them for good.
+no_strays() {
+  local role="$1" have="$2" pair stray=0 c r
+  # Empty is no user at all; a Shadowsocks inbound keeps one seed user.
+  for pair in $have; do
+    case "${pair%%=*}" in
+      shadowsocks*) [[ "${pair#*=}" == 0 || "${pair#*=}" == 1 ]] || stray=1 ;;
+      *) [[ "${pair#*=}" == 0 ]] || stray=1 ;;
+    esac
+  done
+  [[ $stray -eq 0 ]] && return 0
+  c="$(customers_on_it)" || return 1
+  [[ "$c" == yes ]] && return 0
+  if [[ "$role" == new ]]; then
+    # Relay routes put their own uplink users on the exit before any plan does.
+    r="$(q route-ids "name=$(nn)" kind=relay)" || return 1
+    [[ -n "$r" ]] && return 0
+  fi
+  say "REFUSED: no plan holds a route of this server yet, so nobody can be on these inbounds, but they hold users:"
+  say "  $have   (empty is 0 everywhere, and 1 on Shadowsocks: its seed)"
+  say "Those are test users an earlier pass left behind. No test user was added now."
+  if [[ "$role" == new ]]; then
+    say "On a server nobody is on, restarting Xray clears them and costs nothing: on the box, systemctl restart xray."
+  else
+    say "The relay box's Xray is NEVER restarted. List those inbounds' users through its API by hand, and take"
+    say "each test user out with $REMOTE_DIR/relay.sh rmu <tag> <email> (their emails start with nxt)."
+  fi
+  say "Then run this step again."
+  return 1
+}
+
+# temp_users_off <key> <new|relay>: ask that host's Xray to remove the
+# temporary users of that key. This only asks: whether they are gone is
+# read back by count, by the caller.
+temp_users_off() {
+  local key="$1" role="$2" lines tag email
+  lines="$(pscript nx-e2e-temp.sh rmu "$key")" || return 1
+  if dry; then
+    if [[ "$role" == relay ]]; then
+      rsh relay "$REMOTE_DIR/relay.sh rmu <tag> <test email>   (once per temporary user)"
+    else
+      rsh "$role" "/usr/local/bin/xray api rmu -s 127.0.0.1:10085 -tag=<tag> <test email>   (once per temporary user)"
+    fi
+    return 0
+  fi
+  while read -r tag email; do
+    [[ "$tag" =~ ^[a-z0-9-]+$ && "$email" =~ ^[a-z0-9-]+$ ]] || continue
+    if [[ "$role" == relay ]]; then
+      rsh relay "$REMOTE_DIR/relay.sh rmu $tag $email" || true
+    else
+      rsh "$role" "/usr/local/bin/xray api rmu -s 127.0.0.1:10085 -tag=$tag $email 2>&1 | tail -1" || true
+    fi
+  done <<<"$lines"
+}
+
+# temp_users_settle <key> <new|relay> <state key of the count before> [fallback]:
+# remove that key's temporary users, then count. Only when the counts are
+# back to what they were before the users were added are the key's files
+# shredded: the removal needs the test emails in them, so they are kept
+# for another try for as long as a user may still be there.
+temp_users_settle() {
+  local key="$1" role="$2" skey="$3" want now has tags
+  has="$(pscript nx-e2e-temp.sh has "$key")" || return 1
+  if dry; then
+    temp_users_off "$key" "$role"
+    xray_counts "$role" "<each inbound the users were added to>"
+    pscript nx-e2e-temp.sh shred "$key"
+    return 0
+  fi
+  want="$(squash "$(st "$skey" "${4:-}")")"
+  if [[ "$has" == yes ]]; then
+    temp_users_off "$key" "$role" || return 1
+  else
+    say "no temporary users on record for this step (their files are gone: they were counted out before)"
+  fi
+  [[ -n "$want" ]] || { say "there is no count from before the temporary users were added, so nothing to compare with"; return 1; }
+  tags="$(sed 's/=[^ ]*//g' <<<"$want")"
+  # shellcheck disable=SC2086
+  now="$(xray_counts "$role" $tags)" || return 1
+  now="$(squash "$now")"
+  if [[ "$now" != "$want" ]]; then
+    say "TEMPORARY TEST USERS MAY STILL BE THERE."
+    say "  users per inbound now:             $now"
+    say "  before the test users were added:  $want"
+    say "Their files are kept on the panel host so this step can try again: run it again. If a customer was"
+    say "given or lost a credential on these inbounds in the same minute, the count moved for that reason:"
+    say "compare by hand before going on."
+    return 1
+  fi
+  say "temporary users gone: users per inbound are back to $want"
+  pscript nx-e2e-temp.sh shred "$key" >/dev/null
+}
+
+# temp_users_count_ok <new|relay> <state key> [fallback]: the verify side
+# of the above, on its own: are the counts what they were before?
+temp_users_count_ok() {
+  local role="$1" want now tags
+  dry && { xray_counts "$role" "<each inbound the users were added to>"; return 0; }
+  want="$(squash "$(st "$2" "${3:-}")")"
+  [[ -n "$want" ]] || { say "there is no count from before the temporary users were added"; return 1; }
+  tags="$(sed 's/=[^ ]*//g' <<<"$want")"
+  # shellcheck disable=SC2086
+  now="$(xray_counts "$role" $tags)" || return 1
+  now="$(squash "$now")"
+  [[ "$now" == "$want" ]] || { say "users per inbound are $now, and were $want before the temporary users: one may still be there"; return 1; }
+}
+
+# XRAY_VLESS_TLS/WS -> WS and so on: the five names the tunnels go by here.
+shape_proto() {
+  case "$1" in
+    XRAY_VLESS_REALITY/*) echo REALITY ;;
+    XRAY_VLESS_TLS/WS) echo WS ;;
+    XRAY_VLESS_TLS/*) echo TLS ;;
+    XRAY_TROJAN/*) echo TROJAN ;;
+    SHADOWSOCKS/*) echo SS ;;
+    *) echo OTHER ;;
+  esac
+}
+
+# hop_exits_dial <label> <exit name>...: one relay tunnel per exit, with
+# the REALITY credential the panel issued to the relay test account; each
+# must leave from that exit's own address. Run whenever the hop server's
+# table was loaded again: that table carries EVERY exit behind the hop,
+# so all of them are dialled, not only the one the step was about.
+hop_exits_dial() {
+  local label="$1" x rows pu out bad=0
+  shift
+  if dry; then
+    pscript nx-xray-get.sh "$XRAY_VERSION"
+    panel_mint
+    q test-creds "name=<each exit behind the hop>" "email=${TEST_RELAY_EMAIL:-}"
+    rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-build.sh <relay REALITY credential> | $PANEL_ENV$REMOTE_DIR/nx-e2e-run.sh $REMOTE_DIR/xray 'relay to <exit> $label'"
+    panel_token_shred
+    return 0
+  fi
+  if [[ $# -eq 0 ]]; then
+    say "no other exit goes through the hop: nothing to dial again"
+    return 0
+  fi
+  pscript nx-xray-get.sh "$XRAY_VERSION" >/dev/null || return 1
+  panel_mint >/dev/null || return 1
+  for x in "$@"; do
+    rows="$(q test-creds "name=$x" "email=${TEST_RELAY_EMAIL:-}")" || return 1
+    pu="$(awk -F'|' '$4 == "relay" && $1 ~ /REALITY/ {print $3; exit}' <<<"$rows")"
+    if [[ -z "$pu" ]]; then
+      say "UNVERIFIED: the relay test account (TEST_RELAY_EMAIL) holds no REALITY credential to $x, so that exit was not dialled $label"
+      bad=1
+      continue
+    fi
+    out="$(rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-build.sh $pu | $PANEL_ENV$REMOTE_DIR/nx-e2e-run.sh $REMOTE_DIR/xray 'relay to $x $label'")" || true
+    grep -E ' \| EXIT-' <<<"$out" | sed 's/^/  /'
+    grep -q '^E2E-PASS' <<<"$out" || { say "relay to $x $label: DID NOT PASS"; bad=1; }
+  done
+  panel_token_shred >/dev/null
+  return $bad
+}
+
 do_add_zone_inside() {
   local out rc=0
   rpushdir relay inside || return 1
@@ -183,7 +424,7 @@ do_add_dns() {
     state_set "$n" "$name"
   done
   say "two names created, DNS-only, no AAAA: the first for TLS, IKEv2 and the mirror, the second for the direct mirror"
-  undo "fleet dns sweep <the new address> /dev/null $NODE_DNS_ZONE --delete   (or: fleet dns delete $NODE_DNS_ZONE <record id from the lines above>)"
+  undo "fleet dns sweep <the new address> - $NODE_DNS_ZONE --delete   (every record in that zone that points at the new box; or one at a time: fleet dns delete $NODE_DNS_ZONE <record id from the lines above>)"
 }
 ok_add_dns() {
   local n try
@@ -361,12 +602,26 @@ ok_add_install_cleanup() {
 }
 
 do_add_postfix() {
+  local c
   if rscript new node/postinstall.sh check "$XRAY_VERSION" "$NEW_IP"; then
     dry || say "the installer left nothing to repair"
     dry || return 0
   fi
-  dry && say "only if the check above found drift (a box built with an older installer):"
-  RENV="NX_ALLOW_RESTART=1 " rscript new node/postinstall.sh fix "$XRAY_VERSION" "$NEW_IP" || return 1
+  dry && say "only if the check above found drift (a box built with an older installer), and only while nobody is on the server:"
+  # The repair may restart Xray. That is free on a box nobody is on, and
+  # it is refused here once anybody is: this step can be reached again
+  # with --only or --from long after the build, and any drift (a new
+  # XRAY_VERSION in fleet.env is enough) would then restart Xray under
+  # customers. The script on the box has its own refusal as well, and
+  # nothing here switches that off.
+  c="$(customers_on_it)" || return 1
+  if [[ "$c" == yes ]]; then
+    say "REFUSED: this server is in the plans, and the repair for the drift above may restart Xray under its"
+    say "customers. Nothing was changed. That repair is a person's, at a time the owner chose: on the box,"
+    say "  NX_ALLOW_RESTART=1 $REMOTE_DIR/postinstall.sh fix <xray version> <its address>"
+    return 1
+  fi
+  rscript new node/postinstall.sh fix "$XRAY_VERSION" "$NEW_IP" || return 1
   undo "on the new box: the unit and rules it replaced are saved beside it (/root/xray.service.before-fleet-*, /etc/iptables/rules.v4.bak-pre-selfloop-*)"
 }
 ok_add_postfix() {
@@ -375,6 +630,18 @@ ok_add_postfix() {
 }
 
 do_add_parity() {
+  local c
+  # Bringing a box to the fleet's form restarts OpenVPN and the agent and
+  # reloads nginx. On a server that already has customers this step only
+  # looks (see add.postfix for why it can be reached then).
+  c="$(customers_on_it)" || return 1
+  if [[ "$c" == yes ]]; then
+    say "this server is in the plans: checking only, nothing is changed or restarted under its customers"
+    if rscript new node/parity.sh check "$PANEL_HOST" "$PANEL_ORIGIN_NAME" "$(need l1)" "$(need l2)"; then return 0; fi
+    say "REFUSED: the drift above needs a change this step will not make on a server with customers."
+    say "It is a person's, at a time the owner chose: on the box, parity.sh apply (same arguments)."
+    return 1
+  fi
   rscript new node/parity.sh apply "$PANEL_HOST" "$PANEL_ORIGIN_NAME" "$(need l1)" "$(need l2)" || return 1
   undo "on the new box: every file it changed is in /root/pre-parity-<time>/ (named in the lines above); copy back and reload nginx"
 }
@@ -400,21 +667,46 @@ ok_add_renew_dry() {
 }
 
 do_add_maintenance_audit() {
-  local s out="" dest
+  local s out="" dest before bpe after
   dest="$(need dest)" || return 1
+  if dry; then
+    # Said here, because below their output is captured to be judged.
+    for s in isolate-tunnel-clients xray-ipv4-only no-self-loop block-private-egress; do
+      lrun bash "$REPO_ROOT/installer/maintenance/$s.sh" "root@$NEW_IP" "$NODE_KEY"
+    done
+    say "(each as its own dry run: it reports, and changes nothing)"
+  fi
   for s in isolate-tunnel-clients xray-ipv4-only no-self-loop; do
     out+="== $s"$'\n'"$(lrun bash "$REPO_ROOT/installer/maintenance/$s.sh" "root@$NEW_IP" "$NODE_KEY" 2>&1 | tail -12)"$'\n'
   done
+  # block-private-egress has no "nothing to do" line: run dry it prints
+  # the rules as they would be afterwards and tests that config. So the
+  # rule count before is read off the box, and a dry run that ends with
+  # one rule more is a dry run that wants to insert the private-range
+  # block. (That the rule is there and in the right place is checked on
+  # its own in add.verify.)
+  before="$(rsh new "jq -r '(.routing.rules | length | tostring) + \" \" + (.routing.domainStrategy // \"none\")' /usr/local/etc/xray/config.json")" || return 1
+  bpe="$(lrun bash "$REPO_ROOT/installer/maintenance/block-private-egress.sh" "root@$NEW_IP" "$NODE_KEY" 2>&1)" || true
   out+="== reality-dest-audit"$'\n'"$(rsh new "bash /root/neoxify-installer/maintenance/reality-dest-audit.sh ${dest%:*} 2>&1 | tail -6")"$'\n'
   dry && return 0
+  after="$(awk '/^rules now:/ {on = 1; next} /^domainStrategy:/ {on = 0} on && /\{/ {n++} END {print n + 0}' <<<"$bpe") $(sed -n 's/^domainStrategy: //p' <<<"$bpe" | head -1)"
+  out+="== block-private-egress"$'\n'"rules and routing strategy now: $before; after its dry run: $after"$'\n'"$(grep -E 'Xray refuses|^dry run:|Configuration OK' <<<"$bpe" | tail -3)"$'\n'
   echo "$out" | sed 's/^/  /'
   echo "$out" >"$RUN_DIR/audit.out"
+  state_set bpe_before "$before"
+  state_set bpe_after "$after"
 }
 ok_add_maintenance_audit() {
-  expect "the repository's maintenance scripts, run dry, find nothing to change on a fresh build (a diff means the install drifted from the template); the disguise-site rating is shown for the owner"
+  expect "the repository's maintenance scripts, run dry, find nothing to change on a fresh build (a diff means the install drifted from the template): isolate-tunnel-clients, xray-ipv4-only, no-self-loop, and block-private-egress, whose dry run must leave the rule count as it is; the disguise-site rating is shown for the owner"
   dry && return 0
   if grep -qE '^\s*would (insert|append)|^would ' "$RUN_DIR/audit.out"; then say "a maintenance script wants to change something"; return 1; fi
   [[ "$(grep -c 'Nothing to do' "$RUN_DIR/audit.out")" -ge 2 ]] || { say "xray-ipv4-only and no-self-loop must both say 'Nothing to do.'"; return 1; }
+  grep -q '^dry run: nothing written (pass --apply to write it and restart xray)' "$RUN_DIR/audit.out" || { say "block-private-egress did not finish its dry run (its last lines are above)"; return 1; }
+  [[ "$(st bpe_before x)" == "$(st bpe_after y)" && "$(st bpe_after y)" == *" IPIfNonMatch" ]] || {
+    say "block-private-egress wants to change the Xray config (rules and strategy now '$(st bpe_before "?")', after its dry run '$(st bpe_after "?")'):"
+    say "the private-range block or IPIfNonMatch is missing, so a customer could reach this server's own loopback."
+    return 1
+  }
 }
 
 do_add_agent_version() {
@@ -565,9 +857,28 @@ e2e_record() { # <state key> <output>
 }
 
 do_add_e2e_direct() {
-  local p out key
+  local p out key has before
   key="d-$(nn)"
   pscript nx-xray-get.sh "$XRAY_VERSION" || return 1
+  # An earlier pass of this step may have added its users and stopped
+  # before add.temp-off took them out. They go first, and are counted
+  # out, before new ones are made: making new ones overwrites the test
+  # emails the removal needs.
+  has="$(pscript nx-e2e-temp.sh has "$key")" || return 1
+  dry && say "(when that says yes, those users are removed and counted out first, as in add.temp-off)"
+  if [[ "$has" == yes ]]; then
+    say "an earlier pass left its temporary users on the server: removing them first"
+    temp_users_settle "$key" new direct_temp_before "$DIRECT_EMPTY" || return 1
+  fi
+  # What the server's Xray holds before the test users go in. add.temp-off
+  # must bring it back to exactly this.
+  # shellcheck disable=SC2086
+  before="$(xray_counts new $DIRECT_TAGS)" || return 1
+  if ! dry; then
+    [[ "$before" != *"=?"* ]] || { say "the server's Xray API gave no user count: $(squash "$before")"; return 1; }
+    no_strays new "$(squash "$before")" || return 1
+    state_set direct_temp_before "$(squash "$before")"
+  fi
   pscript nx-e2e-temp.sh gen-direct "$key" "$(nn)" | sed 's/^/  /' || return 1
   rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh adu $key" | rpipe new "umask 077; mkdir -p $REMOTE_DIR; cat > $REMOTE_DIR/adu.json; /usr/local/bin/xray api adu -s 127.0.0.1:10085 $REMOTE_DIR/adu.json 2>&1 | tail -1; shred -u $REMOTE_DIR/adu.json" || return 1
   undo "the temporary users live only in the new server's running Xray; add.temp-off removes them (or: xray api rmu per user, or any Xray restart)"
@@ -595,9 +906,24 @@ do_add_e2e_inside() {
   say "a temporary client beside the relay box's own Xray, which is not touched; nothing was sent to the sign-in box"
 }
 ok_add_e2e_inside() {
-  local p bad=0 must="REALITY SS"
-  expect "from inside the country, straight to the server: REALITY and Shadowsocks pass always; the three TLS-name protocols too, unless the node zone is known to be blocked inside"
+  local p bad=0 must="REALITY SS" passed=""
+  expect "from inside the country, straight to the server: REALITY and Shadowsocks pass always; the three TLS-name protocols too, unless the node zone is known to be blocked inside. When the relay box cannot reach this exit directly (bare-box test held from it, or --hop yes) nothing can pass here: the readings are shown, and the proof from inside is add.e2e-relay, through the hop"
   dry && return 0
+  if hop_wanted; then
+    # A held address range holds these tunnels too: that is what the hop
+    # is for, and add.hop comes after this step. Demanding a pass here
+    # would stop every build that needs the hop before it got one.
+    for p in $NODE_PROTOS; do [[ "$(st "e2e_inside_$p" fail)" == pass ]] && passed+="$p "; done
+    say "the relay box does not reach this exit directly, so these tunnels are a reading, not a requirement:"
+    say "  passed from inside, straight to the server: ${passed:-none}"
+    if [[ "$OPT_NO_RELAY" == 1 ]]; then
+      say "UNVERIFIED FROM INSIDE: --no-relay, so no tunnel through the hop will be dialled either. Nothing in"
+      say "this run shows this server working from inside the country."
+    else
+      say "The proof from inside is add.e2e-relay: the relay protocols through the hop, exit address matched."
+    fi
+    return 0
+  fi
   [[ "$(st zone_inside clean)" == clean ]] && must="$NODE_PROTOS"
   for p in $NODE_PROTOS; do
     if [[ "$(st "e2e_inside_$p" fail)" == pass ]]; then continue; fi
@@ -607,21 +933,13 @@ ok_add_e2e_inside() {
 }
 
 do_add_temp_off() {
-  local lines tag email key
-  key="d-$(nn)"
-  lines="$(pscript nx-e2e-temp.sh rmu "$key")" || return 1
-  dry && rsh new "/usr/local/bin/xray api rmu -s 127.0.0.1:10085 -tag=<tag> <test email>   (once per temporary user)"
-  while read -r tag email; do
-    [[ -n "$tag" && -n "$email" ]] || continue
-    rsh new "/usr/local/bin/xray api rmu -s 127.0.0.1:10085 -tag=$tag $email 2>&1 | tail -1" || true
-  done <<<"$lines"
-  pscript nx-e2e-temp.sh shred "$key"
+  # Removed, counted, and only then are the files that name them
+  # shredded: see temp_users_settle.
+  temp_users_settle "d-$(nn)" new direct_temp_before "$DIRECT_EMPTY"
 }
 ok_add_temp_off() {
-  local n
-  n="$(rsh new "for t in vless-in vless-tls-in vless-ws-in trojan-in; do /usr/local/bin/xray api inboundusercount -s 127.0.0.1:10085 -tag \$t 2>/dev/null | grep -o '\"count\": *[0-9]*' | grep -o '[0-9]*\$'; done | awk '{s += \$1} END {print s + 0}'")" || true
-  expect "the new server's Xray holds no user again (Shadowsocks keeps its one seed)"
-  dry || [[ "$n" == 0 ]]
+  expect "every one of the five inbounds, Shadowsocks included, holds exactly the users it held before the test users went in (on a new server: none, and Shadowsocks its one seed)"
+  temp_users_count_ok new direct_temp_before "$DIRECT_EMPTY"
 }
 
 do_add_udp_reach() {
@@ -655,13 +973,16 @@ hop_server_name() {
   tool hop-rules "$RUN_DIR/hop-live.txt" | awk -F'|' '{print $3}' | sort | uniq -c | sort -rn | awk 'NR==1{print $2}'
 }
 
+# Every part of this step looks before it changes: the hop server's port,
+# the relay's live rule and the relay's file line are each kept when an
+# earlier pass already made them, made when they are missing, and refused
+# when they point somewhere else. So a pass that stopped anywhere (one
+# dropped connection to the relay box is enough) is finished by running
+# the step again.
 do_add_hop() {
-  local need_hop="$OPT_HOP" hopname hopip port dest
+  local hopname hopip port dest is f
   dest="$(need dest)" || return 1
-  if [[ "$need_hop" == auto ]]; then
-    if dry || [[ "$(st pre_relay_443 PASS)" != PASS ]]; then need_hop=yes; else need_hop=no; fi
-  fi
-  if [[ "$need_hop" != yes ]]; then
+  if ! dry && ! hop_wanted; then
     say "the relay box reaches this exit directly (bare-box test on 443 passed from it): no hop"
     state_set hop none
     return 0
@@ -676,40 +997,108 @@ do_add_hop() {
     return 1
   fi
   hopip="$(node_field "$hopname" publicIp)" || return 1
+  dry || [[ "$hopip" =~ ^[0-9.]+$ ]] || { say "the panel has no address for the hop server '$hopname' the relay's rules name"; return 1; }
+  # 0. before anything is changed anywhere: a rule for this exit that
+  #    goes through some other server is nobody's to overwrite.
+  rget relay /etc/nftables.conf "$RUN_DIR/nft.old" || return 1
+  if ! dry; then
+    for f in "$RUN_DIR/hop-live.txt" "$RUN_DIR/nft.old"; do
+      is="$(tool hop-is "$f" "$NEW_IP" "$hopip")" || return 1
+      [[ "$is" != no ]] && continue
+      say "REFUSED: the relay already has a hop rule for this exit that goes somewhere else than $hopname"
+      say "(in its live rules or in its nftables file). Nobody made that on purpose: look at both by hand"
+      say "(nft -a list chain ip neoxify_relay_chain output) before going on. Nothing was changed."
+      return 1
+    done
+  fi
   # 1. the hop server: one more port in its own table
   rget "ip:$hopip" /etc/neoxify/chain-fw.nft "$RUN_DIR/chain.old" || return 1
   if dry; then
-    echo "local \$ tool.mjs chain-add (the new exit on the lowest free port from $HOP_PORT_BASE)" >&2
+    echo "local \$ tool.mjs chain-port, then chain-add (the new exit on the lowest free port from $HOP_PORT_BASE, unless an earlier pass gave it one)" >&2
     port="{hop-port}"
   else
-    port="$(tool chain-add "$RUN_DIR/chain.old" "$RUN_DIR/chain.new" "$NEW_IP" "$(nn)" "$HOP_PORT_BASE")" || return 1
+    port="$(tool chain-port "$RUN_DIR/chain.old" "$NEW_IP")" || return 1
   fi
-  rput "ip:$hopip" "$RUN_DIR/chain.new" "$REMOTE_DIR/chain-fw.nft.new" 600 || return 1
-  rscript "ip:$hopip" node/hop-server.sh apply || return 1
-  undo "on the hop server $hopname: cp -a /etc/neoxify/chain-fw.nft.bak-<time> /etc/neoxify/chain-fw.nft && nft -f /etc/neoxify/chain-fw.nft (its own table only)"
+  if dry || [[ "$port" == none ]]; then
+    dry || port="$(tool chain-add "$RUN_DIR/chain.old" "$RUN_DIR/chain.new" "$NEW_IP" "$(nn)" "$HOP_PORT_BASE")" || return 1
+    rput "ip:$hopip" "$RUN_DIR/chain.new" "$REMOTE_DIR/chain-fw.nft.new" 600 || return 1
+    rscript "ip:$hopip" node/hop-server.sh apply || return 1
+    undo "on the hop server $hopname: cp -a /etc/neoxify/chain-fw.nft.bak-<time> /etc/neoxify/chain-fw.nft && nft -f /etc/neoxify/chain-fw.nft (its own table only)"
+  else
+    say "the hop server already forwards port $port to this exit (an earlier pass of this step): kept"
+  fi
+  dry || { state_set hop_server "$hopname"; state_set hop_port "$port"; }
+  rscript "ip:$hopip" node/hop-server.sh check - has "$NEW_IP" || { say "the hop server's table is not as it should be: the relay was not touched"; return 1; }
   # 2. proof before the relay is touched: the disguise site answers through the new port
   rpushdir relay inside || return 1
   rsh relay "$REMOTE_DIR/inside.sh sni $hopip $port ${dest%:*}" || { say "the new hop port does not carry a TLS hello to the exit: the relay was not touched"; return 1; }
   # 3. the relay: one live rule, then the same line in its file (checked, never loaded)
   rscript relay relay/relay.sh hop-backup "$(nn)-hop" || return 1
-  dry || tool hop-rule "$NEW_IP" "$hopip" "$port" "$(nn)" "$hopname" "$RUN_DIR/hop-rule.txt" || return 1
-  rput relay "$RUN_DIR/hop-rule.txt" "$REMOTE_DIR/hop-rule.txt" 600 || return 1
-  rsh relay "$REMOTE_DIR/relay.sh hop-add" || return 1
-  undo "on the relay box: nft -a list chain ip neoxify_relay_chain output, then nft delete rule ip neoxify_relay_chain output handle <the new rule's handle>"
-  rget relay /etc/nftables.conf "$RUN_DIR/nft.old" || return 1
-  dry || tool hop-file-add "$RUN_DIR/nft.old" "$RUN_DIR/nft.new" "$NEW_IP" "$hopip" "$port" "$(nn)" "$hopname" || return 1
-  rput relay "$RUN_DIR/nft.new" "$REMOTE_DIR/nftables.conf.new" 600 || return 1
-  rsh relay "$REMOTE_DIR/relay.sh hop-file-swap" || return 1
-  undo "on the relay box: cp -a /etc/nftables.conf.bak-pre-$(nn)-hop-<time> /etc/nftables.conf (never load that file)"
-  dry || { rm -f "$RUN_DIR"/chain.* "$RUN_DIR"/nft.* "$RUN_DIR"/hop-*; state_set hop "$port"; state_set hop_server "$hopname"; }
+  if dry; then
+    echo "local \$ tool.mjs hop-is (is the live rule, and is the file line, already there and already right?)" >&2
+    is=none
+  else
+    is="$(tool hop-is "$RUN_DIR/hop-live.txt" "$NEW_IP" "$hopip" "$port")" || return 1
+  fi
+  case "$is" in
+    none)
+      dry || tool hop-rule "$NEW_IP" "$hopip" "$port" "$(nn)" "$hopname" "$RUN_DIR/hop-rule.txt" || return 1
+      rput relay "$RUN_DIR/hop-rule.txt" "$REMOTE_DIR/hop-rule.txt" 600 || return 1
+      rsh relay "$REMOTE_DIR/relay.sh hop-add" || return 1
+      undo "on the relay box: nft -a list chain ip neoxify_relay_chain output, then nft delete rule ip neoxify_relay_chain output handle <the new rule's handle>"
+      ;;
+    yes) say "the relay already has the live rule for this exit (an earlier pass of this step): kept" ;;
+    *)
+      say "REFUSED: the relay already has a live rule for this exit that goes somewhere else. Nobody made that"
+      say "on purpose: look at it by hand (nft -a list chain ip neoxify_relay_chain output) before going on."
+      return 1
+      ;;
+  esac
+  dry || is="$(tool hop-is "$RUN_DIR/nft.old" "$NEW_IP" "$hopip" "$port")" || return 1
+  case "$is" in
+    none)
+      dry || tool hop-file-add "$RUN_DIR/nft.old" "$RUN_DIR/nft.new" "$NEW_IP" "$hopip" "$port" "$(nn)" "$hopname" || return 1
+      rput relay "$RUN_DIR/nft.new" "$REMOTE_DIR/nftables.conf.new" 600 || return 1
+      rsh relay "$REMOTE_DIR/relay.sh hop-file-swap" || return 1
+      undo "on the relay box: cp -a /etc/nftables.conf.bak-pre-$(nn)-hop-<time> /etc/nftables.conf (never load that file)"
+      ;;
+    yes) say "the relay's nftables file already has the line for this exit: kept" ;;
+    *)
+      say "REFUSED: the relay's nftables file already has a line for this exit that goes somewhere else: look at it by hand."
+      return 1
+      ;;
+  esac
+  dry || { rm -f "$RUN_DIR"/chain.* "$RUN_DIR"/nft.* "$RUN_DIR"/hop-*; state_set hop "$port"; }
 }
 ok_add_hop() {
-  local out
-  expect "either no hop is needed, or: one live rule and one file line on the relay for this exit, the hop server's table lists it, and the relay's Xray is the same process"
-  [[ "$(st hop none)" == none ]] && ! dry && return 0
-  out="$(rsh relay "L=\$(nft list chain ip neoxify_relay_chain output); echo \"live=\$(grep -c 'comment \"$(nn) via ' <<<\"\$L\") file=\$(grep -c 'comment \"$(nn) via ' /etc/nftables.conf)\"")" || return 1
+  local hopname hopip port live file others bad=0
+  expect "either no hop is needed, or: one live rule and one file line on the relay for this exit, both to the hop server's port for it; the hop server's table is loaded with this exit in it, is the file it loads at boot, its unit is enabled and forwarding is on and written down; every OTHER exit behind the hop still answers a relay tunnel on its own address (the table that was reloaded carries them all); and the relay's Xray is the same process"
+  if ! dry; then
+    state_has hop || { say "this run has no record of the hop step finishing"; return 1; }
+    [[ "$(st hop)" == none ]] && return 0
+  fi
+  hopname="$(st hop_server "{hop-server}")"
+  port="$(st hop_port "{hop-port}")"
+  hopip="$(node_field "$hopname" publicIp)" || return 1
+  rscript relay relay/relay.sh hop-list >/dev/null || return 1
+  rget relay "$REMOTE_DIR/hop-live.txt" "$RUN_DIR/hop-live.txt" || return 1
+  rget relay /etc/nftables.conf "$RUN_DIR/nft.chk" || return 1
   relay_pid_same || return 1
-  dry || [[ "$out" == "live=1 file=1" ]]
+  rscript "ip:$hopip" node/hop-server.sh check - has "$NEW_IP" || bad=1
+  if dry; then
+    hop_exits_dial "after the hop table was reloaded"
+    return 0
+  fi
+  live="$(tool hop-is "$RUN_DIR/hop-live.txt" "$NEW_IP" "$hopip" "$port")" || return 1
+  file="$(tool hop-is "$RUN_DIR/nft.chk" "$NEW_IP" "$hopip" "$port")" || return 1
+  others="$(tool hop-rules "$RUN_DIR/hop-live.txt" | awk -F'|' -v h="$hopname" -v me="$(nn)" '$3 == h && $2 != me {print $2}' | tr '\n' ' ')"
+  rm -f "$RUN_DIR/hop-live.txt" "$RUN_DIR/nft.chk"
+  [[ "$live" == yes ]] || { say "the relay's live rule for this exit: $live (must be one rule, to the hop server's port for it)"; bad=1; }
+  [[ "$file" == yes ]] || { say "the relay's file line for this exit: $file (must be one line, the same as the live rule)"; bad=1; }
+  # shellcheck disable=SC2086
+  hop_exits_dial "after the hop table was reloaded" $others || bad=1
+  rclean "ip:$hopip" >/dev/null || true
+  return $bad
 }
 
 exit_label() { sed -E 's/-/ /g; s/(^| )([a-z])/\1\u\2/g' <<<"$1"; }
@@ -737,6 +1126,9 @@ do_add_relay_routes() {
   fi
   xcfg="$(q reality-config "name=$(nn)")" || return 1
   dry && xcfg="{reality-config-id}"
+  # Before any row is made: the relay's agent has to be there to put the
+  # routes into the relay's running Xray.
+  relay_agent_online || return 1
   panel_dump "pre-$(nn)-relay" || return 1
   panel_mint >/dev/null || return 1
   RENV="${PANEL_ENV}NX_APPLY=0 " rscript panel panel/nx-relay-add.sh "$RELAY_NODE_NAME" "$set" "$xcfg" "$(exit_label "$(nn)")" || return 1
@@ -764,7 +1156,7 @@ ok_add_relay_routes() {
 }
 
 do_add_e2e_relay() {
-  local p out lines tag email key set
+  local p out lines key set has tags before
   key="r-$(nn)"
   set="$(st relay_set none)"
   dry && set="{relay-set}"
@@ -773,28 +1165,46 @@ do_add_e2e_relay() {
     return 0
   fi
   pscript nx-xray-get.sh "$XRAY_VERSION" || return 1
-  pscript nx-e2e-temp.sh gen-relay "$key" "$RELAY_NODE_NAME" "$set" "$(nn)" | sed 's/^/  /' || return 1
   rpushdir relay relay || return 1
+  # The relay box's Xray is never restarted, so a test user that was
+  # added and not removed would stay in it for good. An earlier pass of
+  # this step may have left some: they go first, and are counted out,
+  # before new ones are made (making new ones overwrites the test emails
+  # the removal needs).
+  has="$(pscript nx-e2e-temp.sh has "$key")" || return 1
+  dry && say "(when that says yes, those users are removed from the relay's Xray and counted out first)"
+  if [[ "$has" == yes ]]; then
+    say "an earlier pass left its temporary users in the relay's Xray: removing them first"
+    temp_users_settle "$key" relay relay_temp_before || return 1
+  fi
+  pscript nx-e2e-temp.sh gen-relay "$key" "$RELAY_NODE_NAME" "$set" "$(nn)" | sed 's/^/  /' || return 1
+  # What the set's four inbounds hold before the test users go in. The
+  # end of this step must bring them back to exactly this.
+  lines="$(pscript nx-e2e-temp.sh rmu "$key")" || return 1
+  tags="$(awk '{print $1}' <<<"$lines" | tr '\n' ' ')"
+  dry && tags="<the set's four inbound tags>"
+  # shellcheck disable=SC2086
+  before="$(xray_counts relay $tags)" || return 1
+  if ! dry; then
+    [[ -n "$(squash "$before")" && "$before" != *"=?"* ]] || { say "the relay's Xray API gave no user count ($(squash "$before")): no test user was added"; return 1; }
+    no_strays relay "$(squash "$before")" || return 1
+    state_set relay_temp_before "$(squash "$before")"
+  fi
   rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh adu $key" | rpipe relay "$REMOTE_DIR/relay.sh adu" || return 1
-  undo "the temporary users live only in the relay's running Xray and are removed at the end of this step (relay.sh rmu <tag> <email>)"
+  undo "the temporary users live only in the relay's running Xray; this step removes them and counts them out before it ends (by hand: relay.sh rmu <tag> <email>, the pairs from nx-e2e-temp.sh rmu $key on the panel host)"
   for p in $RELAY_PROTOS; do
     out="$(rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh env $key $p | $PANEL_ENV$REMOTE_DIR/nx-e2e-run.sh $REMOTE_DIR/xray 'relay to $(nn) $p'")" || true
     dry || e2e_record "e2e_relay_$p" "$out"
   done
-  lines="$(pscript nx-e2e-temp.sh rmu "$key")" || return 1
-  dry && rsh relay "$REMOTE_DIR/relay.sh rmu <tag> <test email>   (once per temporary user)"
-  while read -r tag email; do
-    [[ -n "$tag" && -n "$email" ]] || continue
-    rsh relay "$REMOTE_DIR/relay.sh rmu $tag $email" || true
-  done <<<"$lines"
-  pscript nx-e2e-temp.sh shred "$key"
+  temp_users_settle "$key" relay relay_temp_before
 }
 ok_add_e2e_relay() {
   local p bad=0
-  expect "through the relay box, REALITY, VLESS-TLS, Trojan and Shadowsocks each exit on the NEW server's address with 256 KB both ways; the relay's Xray is the same process"
+  expect "through the relay box, REALITY, VLESS-TLS, Trojan and Shadowsocks each exit on the NEW server's address with 256 KB both ways; the set's four inbounds on the relay hold exactly the users they held before the test users went in; the relay's Xray is the same process"
   relay_pid_same || return 1
+  if ! dry && [[ "$(st relay_set none)" == none ]]; then return 0; fi
+  temp_users_count_ok relay relay_temp_before || bad=1
   dry && return 0
-  [[ "$(st relay_set none)" == none ]] && return 0
   for p in $RELAY_PROTOS; do [[ "$(st "e2e_relay_$p" fail)" == pass ]] || { say "relay $p did not pass"; bad=1; }; done
   return $bad
 }
@@ -852,6 +1262,9 @@ plan_pass_done() { # <incoming> <outgoing>
   [[ -z "$steps" ]] || { say "plans still to change: $(cut -d'|' -f2 <<<"$steps" | tr '\n' ' ')"; return 1; }
 }
 
+# The engine refuses to start this step while any step before it has
+# neither passed in this run nor been waived on the record (needs_prior):
+# this is where customers get the server.
 do_add_plans() {
   if [[ "$OPT_NO_PLANS" == 1 ]]; then
     say "--no-plans: the server stays out of every plan"
@@ -888,10 +1301,17 @@ ok_add_provision() {
 }
 
 do_add_e2e_issued() {
-  local email rows shape pu kind out n=0
+  local email rows shape pu kind out n=0 p key
   [[ "$OPT_NO_PLANS" == 1 ]] && { say "--no-plans: no panel-issued credential exists to test with"; return 0; }
   pscript nx-xray-get.sh "$XRAY_VERSION" || return 1
   panel_mint >/dev/null || return 1
+  # One result per kind and protocol, started from "none" on every pass:
+  # what the verify wants is every protocol dialled and passed, and "no
+  # credential of that shape" must read as missing, never as fine.
+  if ! dry; then
+    for p in $NODE_PROTOS; do state_set "e2e_issued_direct_$p" none; done
+    for p in $RELAY_PROTOS; do state_set "e2e_issued_relay_$p" none; done
+  fi
   for email in "${TEST_DIRECT_EMAIL:-}" "${TEST_RELAY_EMAIL:-}"; do
     [[ -n "$email" ]] || continue
     rows="$(q test-creds "name=$(nn)" "email=$email")" || return 1
@@ -900,21 +1320,48 @@ do_add_e2e_issued() {
       [[ -n "$pu" ]] || continue
       n=$((n + 1))
       out="$(rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-build.sh $pu | $PANEL_ENV$REMOTE_DIR/nx-e2e-run.sh $REMOTE_DIR/xray '$(nn) $kind ${shape//\//-} issued'")" || true
-      dry || e2e_record "e2e_issued_$n" "$out"
+      dry && continue
+      key="e2e_issued_${kind}_$(shape_proto "$shape")"
+      grep -E ' \| EXIT-' <<<"$out" | sed 's/^/  /'
+      # A failure sticks: two accounts may hold the same shape, and one
+      # passing must not paper over the other.
+      if grep -q '^E2E-PASS' <<<"$out"; then
+        [[ "$(st "$key" none)" == fail ]] || state_set "$key" pass
+      else
+        state_set "$key" fail
+      fi
     done <<<"$rows"
   done
   dry || state_set e2e_issued_n "$n"
   panel_token_shred
 }
 ok_add_e2e_issued() {
-  local i n bad=0
-  expect "with credentials the panel itself issued to the test accounts after the plan edit: every Xray protocol exits on the new server, direct and through the relay"
+  local p r bad=0 relay=1
+  expect "with credentials the panel itself issued to the test accounts after the plan edit, ALL of: REALITY, VLESS-TLS, WebSocket, Trojan and Shadowsocks straight to the new server, and (unless it has no relay routes) REALITY, VLESS-TLS, Trojan and Shadowsocks through the relay box; each exits on the new server's address. A protocol the test accounts hold no credential for is a failure here, not a pass"
   dry && return 0
   [[ "$OPT_NO_PLANS" == 1 ]] && return 0
-  n="$(st e2e_issued_n 0)"
-  [[ "$n" -ge 1 ]] || { say "the test accounts hold no credential on this server. Are TEST_DIRECT_EMAIL and TEST_RELAY_EMAIL (fleet.env) on plans that hold it?"; return 1; }
-  for i in $(seq 1 "$n"); do [[ "$(st "e2e_issued_$i" fail)" == pass ]] || bad=1; done
-  [[ $bad -eq 0 ]] || say "a tunnel with a panel-issued credential did not pass (lines above)"
+  if [[ "$OPT_NO_RELAY" == 1 || "$(st relay_set none)" == none ]]; then relay=0; fi
+  for p in $NODE_PROTOS; do
+    r="$(st "e2e_issued_direct_$p" none)"
+    [[ "$r" == pass ]] && continue
+    bad=1
+    if [[ "$r" == none ]]; then say "direct $p: NOT DIALLED, the test accounts hold no panel-issued credential of that shape on this server"; else say "direct $p: did not pass"; fi
+  done
+  if [[ $relay -eq 1 ]]; then
+    for p in $RELAY_PROTOS; do
+      r="$(st "e2e_issued_relay_$p" none)"
+      [[ "$r" == pass ]] && continue
+      bad=1
+      if [[ "$r" == none ]]; then say "relay $p: NOT DIALLED, the test accounts hold no panel-issued credential on that relay route"; else say "relay $p: did not pass"; fi
+    done
+  else
+    say "no relay routes on this server: the relay half is not asked for"
+  fi
+  if [[ $bad -ne 0 ]]; then
+    say "TEST_DIRECT_EMAIL has to be on a plan that now holds this server's direct routes, and TEST_RELAY_EMAIL on"
+    say "one that holds its relay routes (fleet.env; with --plans, one of the plans named). Fix that and run the"
+    say "step again. Going on without this proof is the owner's call: --waive add.e2e-issued puts it on the record."
+  fi
   return $bad
 }
 
@@ -1004,6 +1451,9 @@ register_add_steps() {
 
 register_add_tail() {
   step add.plans auto "Plans, one at a time, smallest first, heartbeats checked after each (database dump first)"
+  # Nothing reaches a customer until every proof before this has passed
+  # in this run. --from and --only do not get round that.
+  needs_prior add.plans
   step add.provision auto "Provisioning check: credentials created and acknowledged"
   step add.e2e-issued auto "Tunnels again, with credentials the panel issued"
   step add.monitoring auto "Monitoring picked it up: inside probe reading and the server's API door"

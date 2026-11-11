@@ -15,6 +15,8 @@
 #   --only <step>        run that one step
 #   --yes                do not ask before steps that change a live host
 #   --done <step>        the owner did that step (for runs with no terminal to wait at)
+#   --waive <step,...>   the owner decided to go on although that step did not pass;
+#                        written to the run log, and the run ends "complete EXCEPT" it
 #   --env <file>         the local address file (default ~/.neoxify/fleet.env)
 #   --run <dir>          continue that run directory; --new-run starts a fresh one
 # add / replace:
@@ -44,13 +46,13 @@ FLEET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$FLEET_DIR/../.." && pwd)"
 FLEET_HOME="${FLEET_HOME:-$HOME/.neoxify}"
 
-OPT_DRY=0 OPT_YES=0 OPT_NEW_RUN=0 OPT_FROM="" OPT_ONLY="" OPT_RUN="" OPT_ENV="" OPT_FLAGS="" OPT_DONE=""
+OPT_DRY=0 OPT_YES=0 OPT_NEW_RUN=0 OPT_FROM="" OPT_ONLY="" OPT_RUN="" OPT_ENV="" OPT_FLAGS="" OPT_DONE="" OPT_WAIVE=""
 OPT_PEER="" OPT_RELAY_SET="" OPT_HOP=auto OPT_PLANS="" OPT_NO_RELAY=0 OPT_NO_PLANS=0
 OPT_ACCEPT_HELD=0 OPT_ACCEPT_ZONE=0 OPT_ACCEPT_DEST=0 OPT_DEFAULT_TO="" OPT_NAME=""
 REGION="" DEST="" NAME="" OLD="" NEW_IP=""
 
 usage() {
-  sed -n '2,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-2}"
 }
 
@@ -68,12 +70,18 @@ while [[ $# -gt 0 ]]; do
     --accept-held) OPT_ACCEPT_HELD=1 ;;
     --accept-blocked-zone) OPT_ACCEPT_ZONE=1 ;;
     --accept-weak-dest) OPT_ACCEPT_DEST=1 ;;
-    --from | --only | --done | --run | --env | --region | --dest | --peer | --relay-set | --hop | --plans | --default-to | --name)
+    --delete)
+      # Only `fleet dns sweep ... --delete` takes it: it goes on to the DNS helper.
+      [[ "$CMD" == dns ]] || { echo "fleet: unknown option $1" >&2; exit 2; }
+      POS+=("$1")
+      ;;
+    --from | --only | --done | --waive | --run | --env | --region | --dest | --peer | --relay-set | --hop | --plans | --default-to | --name)
       [[ $# -ge 2 ]] || { echo "fleet: $1 needs a value" >&2; exit 2; }
       case "$1" in
         --from) OPT_FROM="$2" ;;
         --only) OPT_ONLY="$2" ;;
         --done) OPT_DONE="$2" ;;
+        --waive) OPT_WAIVE="${OPT_WAIVE:+$OPT_WAIVE,}$2" ;;
         --run) OPT_RUN="$2" ;;
         --env) OPT_ENV="$2" ;;
         --region) REGION="$2" ;;
@@ -85,7 +93,8 @@ while [[ $# -gt 0 ]]; do
         --default-to) OPT_DEFAULT_TO="$2" ;;
         --name) OPT_NAME="$2" ;;
       esac
-      OPT_FLAGS+="$1 "
+      # A waiver goes into the run log with what it waives.
+      case "$1" in --waive) OPT_FLAGS+="$1 $2 " ;; *) OPT_FLAGS+="$1 " ;; esac
       shift
       ;;
     -h | --help) usage 0 ;;
@@ -140,17 +149,15 @@ load_checklists() {
   source "$FLEET_DIR/lib/checklist-status.sh"
 }
 
+# A run ends as complete only when every step of it passed, or was
+# waived on the record (lib/engine.sh conclude_run). --only is one step
+# and concludes nothing.
 run_and_finish() {
   build_mask
-  if run_checklist; then
-    if [[ -z "$OPT_ONLY" ]] && ! dry; then
-      finish_run
-      echo
-      echo "Checklist complete. Run log: $RUN_DIR/run.log"
-    fi
-    return 0
-  fi
-  return 1
+  run_checklist || return 1
+  if [[ -n "$OPT_ONLY" ]] || dry; then return 0; fi
+  conclude_run || return 1
+  echo "Run log: $RUN_DIR/run.log"
 }
 
 case "$CMD" in
@@ -232,6 +239,12 @@ case "$CMD" in
   dns)
     load_env
     build_mask
+    if dry; then
+      # Like every other command under --dry-run: say what would be
+      # asked of Cloudflare, and ask nothing.
+      echo "cloudflare ${POS[*]}" | mask
+      exit 0
+    fi
     CF_TOKEN_FILE="$CF_TOKEN_FILE" node "$FLEET_DIR/lib/cf.mjs" "${POS[@]}" 2>&1 | mask
     exit "${PIPESTATUS[0]}"
     ;;

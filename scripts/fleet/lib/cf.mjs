@@ -14,6 +14,7 @@
  *                                             every record in those zones whose content IS the
  *                                             address (compared here, never printed whole); the
  *                                             names go to the file, for the NXDOMAIN check
+ *                                             ("-" for no file)
  *   cf.mjs doh      <fqdn> gone|<ipv4>        public resolver check: NXDOMAIN, or exactly that address
  */
 import { readFileSync, writeFileSync } from "node:fs";
@@ -104,7 +105,7 @@ const run = {
         }
       }
     }
-    writeFileSync(namesOut, names.join("\n") + (names.length ? "\n" : ""));
+    if (namesOut !== "-") writeFileSync(namesOut, names.join("\n") + (names.length ? "\n" : ""));
     console.log(`total ${total}${del ? " deleted" : " found"}`);
   },
   async doh() {

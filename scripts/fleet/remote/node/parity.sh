@@ -224,6 +224,14 @@ p_openvpn() {
     bad openvpn "no ccd-exclusive: a revoked credential would still connect"
     return
   fi
+  # The line needs an OpenVPN restart, which drops everyone connected.
+  # Free on a new box; on one that already has clients it is a person's
+  # to do, at a time the owner chose (NX_ALLOW_RESTART=1, never set by
+  # the checklist).
+  if [ "$(find /etc/openvpn/ccd -type f 2>/dev/null | wc -l)" -gt 0 ] && [ "${NX_ALLOW_RESTART:-0}" != 1 ]; then
+    bad openvpn "no ccd-exclusive, and adding it restarts OpenVPN under the clients this server already has: REFUSED here"
+    return
+  fi
   backup "$f"
   echo ccd-exclusive >>"$f"
   systemctl restart openvpn-server@server

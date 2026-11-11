@@ -61,7 +61,10 @@ describe("nothing address-like or ours is committed with the tool", () => {
   };
   walk(".");
   it("every IPv4 literal is loopback, a public resolver, a tunnel pool or a documentation range", () => {
-    const ok = /^(127\.0\.0\.1|0\.0\.0\.0|1\.1\.1\.1|8\.8\.8\.8|10\.\d+\.\d+\.\d+|203\.0\.113\.\d+|198\.51\.100\.\d+|192\.0\.2\.\d+)$/;
+    // The four network addresses are the private ranges themselves
+    // (loopback, RFC 1918, link-local), as verify.sh names them when it
+    // checks that Xray blocks them. No server of anybody's is there.
+    const ok = /^(127\.0\.0\.1|0\.0\.0\.0|1\.1\.1\.1|8\.8\.8\.8|10\.\d+\.\d+\.\d+|203\.0\.113\.\d+|198\.51\.100\.\d+|192\.0\.2\.\d+|127\.0\.0\.0|172\.16\.0\.0|192\.168\.0\.0|169\.254\.0\.0)$/;
     for (const f of files) {
       const text = readFileSync(join(ROOT, f), "utf8");
       for (const m of text.matchAll(/(?<![\d.])(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?![\d.])/g)) {
@@ -122,6 +125,33 @@ describe("jq programs", { skip: JQ ? false : "jq is not installed here (CI has i
     assert.equal(e.nxExpectIp, "203.0.113.99", "a relay route expects the EXIT's address, not the entry's");
   });
 
+  // verify.sh's check that no customer can reach the server's own
+  // loopback through a tunnel, lifted out of the script as it is written
+  // there and run on the installer's own Xray template, and on that
+  // template broken in the three ways the check exists to catch.
+  it("the private-range block check passes the installer's template and fails what it must", () => {
+    const verify = readFileSync(join(ROOT, "remote", "node", "verify.sh"), "utf8");
+    const prog = /jq -e '(\.routing\.rules as \$r[^']+)' "\$C" >\/dev\/null &&\n\s+pass "xray private ranges blocked/.exec(verify)?.[1];
+    assert.ok(prog, "could not find the check in verify.sh");
+    const template = readFileSync(join(ROOT, "..", "..", "installer", "assets", "xray-config.json.template"), "utf8")
+      .replace(/(:\s*)__[A-Z_]+__/g, (_, colon) => colon + "1");
+    const base = JSON.parse(template);
+    const rules = base.routing.rules;
+    const withRules = (r) => ({ ...base, routing: { ...base.routing, rules: r } });
+    const passes = (cfg) => spawnSync("jq", ["-e", prog], { encoding: "utf8", input: JSON.stringify(cfg) }).status === 0;
+    const isPrivate = (r) => r.outboundTag === "block" && (r.ip || []).includes("127.0.0.0/8");
+    assert.equal(rules.filter(isPrivate).length, 1, "the template has the rule this test is about");
+
+    assert.ok(passes(base), "the installer's own template");
+    assert.ok(!passes(withRules(rules.filter((r) => !isPrivate(r)))), "no private-range rule at all");
+    assert.ok(!passes(withRules([rules[0], { type: "field", network: "tcp,udp", outboundTag: "direct" }, ...rules.slice(1)])),
+      "a rule that sends customers out sits before the block");
+    assert.ok(!passes(withRules(rules.map((r) => (isPrivate(r) ? { ...r, ip: r.ip.filter((x) => x !== "127.0.0.0/8") } : r)))),
+      "loopback left out of the block");
+    // A server with relay routes: route rules are appended after the block, and that is fine.
+    assert.ok(passes(withRules([...rules, { type: "field", inboundTag: ["vless-x-in"], outboundTag: "route-1-out" }])));
+  });
+
   // nx-e2e-temp.sh keeps its working files in RAM on the panel host. On
   // a Linux runner the same path exists, so its three read-side verbs
   // can be run against files made here (the verbs that ask the database
@@ -173,10 +203,14 @@ describe("jq programs", { skip: JQ ? false : "jq is not installed here (CI has i
       assert.equal(e.config.outbounds[0].streamSettings.wsSettings.path, "/static/aa");
       assert.equal(e.config.outbounds[0].settings.vnext[0].users[0].id, "U3");
       assert.notEqual(sh("env", key, "NOPE").status, 0);
+      // The files are what a later removal needs, so the checklist asks
+      // whether they are still there before it makes new ones.
+      assert.equal(sh("has", key).stdout.trim(), "yes");
     } finally {
       sh("shred", key);
       rmSync(dir, { recursive: true, force: true });
     }
+    assert.equal(sh("has", key).stdout.trim(), "no");
   });
 
   // The guard nx-plan-edit.sh runs on the panel host, lifted out of the

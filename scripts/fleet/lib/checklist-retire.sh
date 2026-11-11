@@ -55,22 +55,31 @@ ok_retire_snapshot() {
 }
 
 do_retire_guard_hop() {
-  local ip n
+  local ip n f
   ip="$(old_ip)" || return 1
   rscript relay relay/relay.sh hop-list || return 1
   rget relay "$REMOTE_DIR/hop-live.txt" "$RUN_DIR/hop-live.txt" || return 1
-  dry && { echo "local \$ tool.mjs hop-through (how many exits reach the relay through this server)" >&2; return 0; }
-  n="$(tool hop-through "$RUN_DIR/hop-live.txt" "$ip" | grep -c . || true)"
-  rm -f "$RUN_DIR/hop-live.txt"
+  rget relay /etc/nftables.conf "$RUN_DIR/nft.chk" || return 1
+  dry && { echo "local \$ tool.mjs hop-count (how many exits reach the relay through this server: in the live rules, and in the file the relay loads at boot)" >&2; return 0; }
+  n="$(tool hop-count "$RUN_DIR/hop-live.txt" hop "$ip")" || return 1
+  f="$(tool hop-count "$RUN_DIR/nft.chk" hop "$ip")" || return 1
+  rm -f "$RUN_DIR/hop-live.txt" "$RUN_DIR/nft.chk"
   state_set hop_through "$n"
-  say "exits that reach the relay through $OLD: $n"
+  state_set hop_through_file "$f"
+  say "exits that reach the relay through $OLD: $n in the live rules, $f in the relay's nftables file"
 }
 ok_retire_guard_hop() {
-  expect "no other exit reaches the relay box through this server's hop"
+  expect "no other exit reaches the relay box through this server's hop: not in the relay's live rules, and not in the file it loads at its next boot"
   dry && return 0
-  [[ "$(st hop_through 1)" == 0 ]] && return 0
-  say "REFUSED: $OLD carries the relay hop for $(st hop_through) exit(s). Retiring it now would cut every relay route"
-  say "to them. The hop moves first: use 'fleet replace $OLD <new address>', which does that before retiring."
+  [[ "$(st hop_through 1)" == 0 && "$(st hop_through_file 1)" == 0 ]] && return 0
+  if [[ "$(st hop_through 1)" != 0 ]]; then
+    say "REFUSED: $OLD carries the relay hop for $(st hop_through) exit(s). Retiring it now would cut every relay route"
+    say "to them. The hop moves first: use 'fleet replace $OLD <new address>', which does that before retiring."
+  else
+    say "REFUSED: no live rule goes through $OLD any more, but the relay's nftables file still has $(st hop_through_file)"
+    say "line(s) through it. The relay would load them at its next boot and send those exits to a server that is"
+    say "gone. A hop move stopped halfway: finish it ('fleet replace', step move.hop) before retiring $OLD."
+  fi
   return 1
 }
 
@@ -96,25 +105,67 @@ ok_retire_guard_plans() {
   return 1
 }
 
-do_retire_reach() {
-  local ip
+# Three tries, spaced: one dropped connection must never read as "gone".
+box_answers() { # <address>
+  local i
+  for i in 1 2 3; do
+    rsh "ip:$1" "true" 2>/dev/null && return 0
+    [[ $i -eq 3 ]] || sleep 5
+  done
+  return 1
+}
+
+# retire_reach_now: what is known about the old box, into the run's state.
+#   yes    it answers this PC's key
+#   no     it does not answer, AND the panel does not show it ONLINE: gone
+#          (deleted at the provider, or dead). Its names go at once and
+#          nothing is stopped on it.
+#   alive  it does not answer, but the panel shows it ONLINE. That is a
+#          live server this PC has no key for (some were built from the
+#          other machine), or a connection that fails just now. It is
+#          never taken for gone: deleting the names of a server that is
+#          serving customers, and skipping its agent, is what one failed
+#          SSH attempt used to do.
+retire_reach_now() {
+  local ip row status age
   ip="$(old_ip)" || return 1
+  row="$(q node-row "name=$OLD")" || return 1
   if dry; then
-    rsh "ip:$ip" "true"
+    rsh "ip:$ip" "true   (three tries)"
     return 0
   fi
-  if rsh "ip:$ip" "true" 2>/dev/null; then
+  IFS='|' read -r _ _ _ status age _ <<<"$row"
+  if box_answers "$ip"; then
     state_set reach yes
-    say "the box still answers this PC's key"
+    say "the box still answers this PC's key (panel: $status)"
+  elif [[ "$status" == ONLINE ]]; then
+    state_set reach alive
+    say "the box does not answer this PC's key on three tries, but the panel shows it ONLINE (heartbeat ${age:-?} s ago)."
   else
     state_set reach no
-    say "the box does not answer: deleted at the provider, blocked, or it never had this PC's key."
-    say "It is treated as gone: its names are deleted at once, and nothing is stopped on it."
+    say "the box does not answer on three tries and the panel shows it $status (last heartbeat ${age:-never} s ago):"
+    say "it is treated as gone. Its names are deleted at once, and nothing is stopped on it."
   fi
 }
+
+reach_alive_stop() {
+  say "STOPPED: $OLD is ONLINE in the panel and does not accept this PC's key, so it is not gone and this PC"
+  say "cannot stop its agent. Nothing of it was touched: its names are still there."
+  say "  - If it was deleted at the provider a moment ago, the panel shows OFFLINE within minutes: run again then."
+  say "  - If it is alive, it was built from the other machine and never got this PC's key. Add the key (the"
+  say "    owner's say-so; authorized_keys only, never sshd's settings), or run the retirement from the machine"
+  say "    whose key it accepts. 'fleet status $OLD' shows the same reading."
+}
+
+do_retire_reach() { retire_reach_now; }
 ok_retire_reach() {
-  expect "it is known whether the box still answers"
-  dry || state_has reach
+  expect "the box answers this PC's key, or it does not answer AND the panel does not show it ONLINE (gone). ONLINE with no answer is neither, and stops the run"
+  dry && return 0
+  case "$(st reach "")" in
+    yes | no) return 0 ;;
+    alive) reach_alive_stop ;;
+  esac
+  return 1
 }
 
 dns_sweep() { # deletes every record in our zones that points at the old address
@@ -140,11 +191,11 @@ dns_gone() { # every swept name answers NXDOMAIN from a public resolver
 }
 
 do_retire_dns_now() {
-  if ! dry && [[ "$(st reach yes)" == yes ]]; then
-    say "the box still answers, so its address is still ours: the names go after its customers are off it (retire.dns)"
+  if ! dry && [[ "$(st reach yes)" != no ]]; then
+    say "the box is still there, so its address is still ours: the names go after its customers are off it (retire.dns)"
     return 0
   fi
-  dry && say "only when the box no longer answers (its address may already be someone else's):"
+  dry && say "only when the box is gone: no answer, and not ONLINE in the panel (its address may already be someone else's):"
   # A released address goes to a stranger, who can get a real certificate
   # for any name still pointing at it and collect our apps' API calls.
   dns_sweep
@@ -152,7 +203,7 @@ do_retire_dns_now() {
 ok_retire_dns_now() {
   expect "when the box is gone: no record in any zone points at its address, and each deleted name answers 'no such name'"
   dry && { dns_gone; return 0; }
-  [[ "$(st reach yes)" == yes ]] && return 0
+  [[ "$(st reach yes)" != no ]] && return 0
   dns_gone
 }
 
@@ -190,6 +241,10 @@ do_retire_relay_routes() {
     say "no relay route exits on $OLD"
     return 0
   fi
+  # The delete is only hot while the relay's agent is there to take the
+  # rules out of the relay's running Xray. With it away the rows would
+  # go and the rules would stay, still sending customers to this exit.
+  relay_agent_online || return 1
   dry || state_set relay_deleted "$ids"
   panel_mint >/dev/null || return 1
   # shellcheck disable=SC2086
@@ -231,9 +286,20 @@ ok_retire_incident() {
 
 do_retire_agent_stop() {
   local ip
-  if ! dry && [[ "$(st reach no)" != yes ]]; then
-    say "the box is gone: there is no agent to stop"
-    return 0
+  # Asked again here, not read from the start of the run: in a replace
+  # the first reading is an hour old by now.
+  retire_reach_now || return 1
+  if ! dry; then
+    case "$(st reach "")" in
+      no)
+        say "the box is gone: there is no agent to stop"
+        return 0
+        ;;
+      alive)
+        reach_alive_stop
+        return 1
+        ;;
+    esac
   fi
   ip="$(old_ip)" || return 1
   # The agent is stopped BEFORE the row is disabled: a connected agent
@@ -243,9 +309,13 @@ do_retire_agent_stop() {
 }
 ok_retire_agent_stop() {
   local ip out
-  expect "the agent on the old box is stopped and disabled (when the box still answers)"
+  expect "the agent on the old box is stopped and disabled (when the box still answers; a box that is gone has none)"
   dry && return 0
-  [[ "$(st reach no)" == yes ]] || return 0
+  case "$(st reach "")" in
+    no) return 0 ;;
+    yes) ;;
+    *) return 1 ;;
+  esac
   ip="$(old_ip)" || return 1
   out="$(rsh "ip:$ip" "systemctl is-active neoxify-agentd; systemctl is-enabled neoxify-agentd" | tr '\n' ' ')" || true
   [[ "$out" == "inactive disabled "* ]]
@@ -333,53 +403,105 @@ ok_retire_dns_other() {
   return $bad
 }
 
+# The exit's hop entry lives in three places: a live rule on the relay, a
+# line in the relay's file, and a port on the hop server. Each is looked
+# at and removed on its own, so a pass that stopped after the first is
+# finished by running the step again. (It used to read "no live rule" as
+# "no hop entry" and return, leaving the port open on the hop server.)
 do_retire_hop() {
-  local ip handle hopname hopip
+  local ip handle hopnames h hopip port n changed=0
   ip="$(old_ip)" || return 1
   rscript relay relay/relay.sh hop-list || return 1
   rget relay "$REMOTE_DIR/hop-live.txt" "$RUN_DIR/hop-live.txt" || return 1
+  rget relay /etc/nftables.conf "$RUN_DIR/nft.old" || return 1
   if dry; then
-    handle="{handle}" hopname="{hop-server}"
-    say "only when the relay reached this exit through the hop:"
+    handle="{handle}" hopnames="{hop-server}" n=1
+    say "only where the relay reached this exit through the hop (each of the three places is looked at on its own):"
   else
     handle="$(tool hop-handle "$RUN_DIR/hop-live.txt" "$ip")" || return 1
-    if [[ "$handle" == none ]]; then
-      say "the relay box has no hop entry for $OLD"
-      rm -f "$RUN_DIR/hop-live.txt"
-      return 0
-    fi
-    hopname="$(tool hop-rules "$RUN_DIR/hop-live.txt" | awk -F'|' -v h="$handle" '$1 == h {print $3}')"
+    n="$(tool hop-count "$RUN_DIR/nft.old" exit "$ip")" || return 1
+    # The servers to ask for a port to this exit: every hop the relay's
+    # rules name now, and any that an earlier pass of this step wrote
+    # down before it deleted the rule that named it.
+    hopnames="$({ st retire_hop_servers ""; echo; tool hop-rules "$RUN_DIR/hop-live.txt" | cut -d'|' -f3; } | tr ' ' '\n' | grep -vx -e "" -e "$OLD" | sort -u | tr '\n' ' ')"
+    state_set retire_hop_servers "$hopnames"
+    [[ "$(st retire_hop_changed 0)" == 1 ]] && changed=1
   fi
-  # the relay box: the live rule by its handle, then the one line in the file
-  rsh relay "$REMOTE_DIR/relay.sh hop-backup retire-$OLD" || return 1
-  rsh relay "$REMOTE_DIR/relay.sh hop-del $handle $ip" || return 1
-  undo "on the relay box: nft add rule ip neoxify_relay_chain output <the rule, from /root/nft-live.bak-pre-retire-$OLD-*>"
-  rget relay /etc/nftables.conf "$RUN_DIR/nft.old" || return 1
-  dry || tool hop-file-remove "$RUN_DIR/nft.old" "$RUN_DIR/nft.new" "$ip" || return 1
-  rput relay "$RUN_DIR/nft.new" "$REMOTE_DIR/nftables.conf.new" 600 || return 1
-  rsh relay "$REMOTE_DIR/relay.sh hop-file-swap" || return 1
-  undo "on the relay box: cp -a /etc/nftables.conf.bak-pre-retire-$OLD-<time> /etc/nftables.conf (never load that file)"
-  # the hop server: the exit's port out of its own table
-  hopip="$(node_field "$hopname" publicIp)" || return 1
-  rget "ip:$hopip" /etc/neoxify/chain-fw.nft "$RUN_DIR/chain.old" || return 1
-  dry || tool chain-remove "$RUN_DIR/chain.old" "$RUN_DIR/chain.new" "$ip" || return 1
-  rput "ip:$hopip" "$RUN_DIR/chain.new" "$REMOTE_DIR/chain-fw.nft.new" 600 || return 1
-  rscript "ip:$hopip" node/hop-server.sh apply || return 1
-  undo "on the hop server $hopname: cp -a /etc/neoxify/chain-fw.nft.bak-<time> /etc/neoxify/chain-fw.nft && nft -f /etc/neoxify/chain-fw.nft"
+  # 1. the relay box: the live rule, by its handle
+  if dry || [[ "$handle" != none || "$n" != 0 ]]; then
+    rsh relay "$REMOTE_DIR/relay.sh hop-backup retire-$OLD" || return 1
+  fi
+  if dry || [[ "$handle" != none ]]; then
+    rsh relay "$REMOTE_DIR/relay.sh hop-del $handle $ip" || return 1
+    undo "on the relay box: nft add rule ip neoxify_relay_chain output <the rule, from /root/nft-live.bak-pre-retire-$OLD-*>"
+    changed=1
+  else
+    say "the relay box has no live hop rule for $OLD"
+  fi
+  # 2. the relay's file: the one line (edited, checked, never loaded)
+  if dry || [[ "$n" != 0 ]]; then
+    dry || tool hop-file-remove "$RUN_DIR/nft.old" "$RUN_DIR/nft.new" "$ip" || return 1
+    rput relay "$RUN_DIR/nft.new" "$REMOTE_DIR/nftables.conf.new" 600 || return 1
+    rsh relay "$REMOTE_DIR/relay.sh hop-file-swap" || return 1
+    undo "on the relay box: cp -a /etc/nftables.conf.bak-pre-retire-$OLD-<time> /etc/nftables.conf (never load that file)"
+    changed=1
+  else
+    say "the relay's nftables file has no line for $OLD"
+  fi
+  dry || state_set retire_hop_changed "$changed"
+  # 3. every hop server: the exit's port out of its own table
+  for h in $hopnames; do
+    hopip="$(node_field "$h" publicIp)" || return 1
+    dry || [[ "$hopip" =~ ^[0-9.]+$ ]] || { say "the panel has no address for the hop server '$h' the relay's rules name"; return 1; }
+    rget "ip:$hopip" /etc/neoxify/chain-fw.nft "$RUN_DIR/chain.old" || return 1
+    if ! dry; then
+      port="$(tool chain-port "$RUN_DIR/chain.old" "$ip")" || return 1
+      if [[ "$port" == none ]]; then
+        say "hop server $h: no port for $OLD"
+        continue
+      fi
+      tool chain-remove "$RUN_DIR/chain.old" "$RUN_DIR/chain.new" "$ip" || return 1
+    fi
+    rput "ip:$hopip" "$RUN_DIR/chain.new" "$REMOTE_DIR/chain-fw.nft.new" 600 || return 1
+    rscript "ip:$hopip" node/hop-server.sh apply || return 1
+    undo "on the hop server $h: cp -a /etc/neoxify/chain-fw.nft.bak-<time> /etc/neoxify/chain-fw.nft && nft -f /etc/neoxify/chain-fw.nft (its own table only)"
+    dry || state_set retire_hop_changed 1
+  done
   dry || rm -f "$RUN_DIR"/chain.* "$RUN_DIR"/nft.* "$RUN_DIR"/hop-*
 }
 ok_retire_hop() {
-  local ip h
-  expect "the relay box has no live rule and no file line for this exit, and its Xray is the same process"
+  local ip h hopip live file hopnames others bad=0
+  expect "the relay box has no live rule and no file line for this exit; no hop server forwards a port to it any more, and each one's table is loaded, is the file it loads at boot, with its unit enabled and forwarding on; every exit still behind the hop answers a relay tunnel on its own address (the table that was reloaded carries them all); and the relay's Xray is the same process"
   ip="$(old_ip)" || return 1
   rscript relay relay/relay.sh hop-list >/dev/null || return 1
   rget relay "$REMOTE_DIR/hop-live.txt" "$RUN_DIR/hop-live.txt" || return 1
+  rget relay /etc/nftables.conf "$RUN_DIR/nft.chk" || return 1
   relay_pid_same || return 1
-  dry && return 0
-  h="$(tool hop-handle "$RUN_DIR/hop-live.txt" "$ip")"
-  rm -f "$RUN_DIR/hop-live.txt"
-  [[ "$h" == none ]] || { say "a live hop rule for $OLD is still there"; return 1; }
-  [[ "$(rsh relay "grep -c 'comment \"$OLD via ' /etc/nftables.conf || true")" == 0 ]]
+  if dry; then
+    hopip="$(node_field "{hop-server}" publicIp)"
+    rscript "ip:$hopip" node/hop-server.sh check - lacks "$ip"
+    hop_exits_dial "after the hop table was reloaded"
+    return 0
+  fi
+  live="$(tool hop-count "$RUN_DIR/hop-live.txt" exit "$ip")" || return 1
+  file="$(tool hop-count "$RUN_DIR/nft.chk" exit "$ip")" || return 1
+  hopnames="$(st retire_hop_servers "")"
+  others="$(tool hop-rules "$RUN_DIR/hop-live.txt" | awk -F'|' -v hs=" $hopnames " 'index(hs, " " $3 " ") {print $2}' | tr '\n' ' ')"
+  rm -f "$RUN_DIR/hop-live.txt" "$RUN_DIR/nft.chk"
+  [[ "$live" == 0 ]] || { say "a live hop rule for $OLD is still on the relay box"; bad=1; }
+  [[ "$file" == 0 ]] || { say "the relay's nftables file still has a line for $OLD"; bad=1; }
+  for h in $hopnames; do
+    hopip="$(node_field "$h" publicIp)" || return 1
+    rscript "ip:$hopip" node/hop-server.sh check - lacks "$ip" || bad=1
+    rclean "ip:$hopip" >/dev/null || true
+  done
+  if [[ "$(st retire_hop_changed 0)" == 1 ]]; then
+    # shellcheck disable=SC2086
+    hop_exits_dial "after the hop table was reloaded" $others || bad=1
+  else
+    say "$OLD had no hop entry anywhere: nothing was reloaded, so nothing is dialled again"
+  fi
+  return $bad
 }
 
 do_retire_alerts() {
@@ -436,11 +558,22 @@ ok_retire_delete_vps() {
   return 0
 }
 
-register_retire_steps() {
-  step retire.guard-hop gate "Refuse while other exits reach the relay through this server's hop"
-  step retire.guard-plans gate "Refuse if a plan would be left empty or its default would have nowhere to go"
-  step retire.reach auto "Does the box still answer?"
+# Is the old box gone already? Then its names go before anything else is
+# done: before the guards in `retire` (a refusal there must not leave
+# them standing), and in `replace` first of all, before the hour or more
+# of building the new server. For all that time names of ours would
+# otherwise point at an address a stranger may hold.
+register_retire_reach() {
+  step retire.reach auto "Does the box still answer? Gone means no answer AND not ONLINE in the panel"
   step retire.dns-now auto "Names deleted at once when the box is already gone"
+}
+
+register_retire_guards() {
+  step retire.guard-hop gate "Refuse while other exits reach the relay through this server's hop (live rules and the relay's file)"
+  step retire.guard-plans gate "Refuse if a plan would be left empty or its default would have nowhere to go"
+}
+
+register_retire_steps() {
   step retire.dump auto "Database dump"
   step retire.plans auto "Routes out of every plan, one plan at a time, heartbeats checked after each"
   step retire.revoked auto "Revocation check: no active credential left, every plan still serves"
@@ -452,7 +585,7 @@ register_retire_steps() {
   step retire.keys auto "Agent key and mirror host cleared"
   step retire.dns auto "DNS names deleted in every zone, 'no such name' confirmed"
   step retire.dns-other owner "Names at registrars the tool cannot edit"
-  step retire.hop ask "Relay hop entry for this exit removed: live rule by handle, file by line, never loaded"
+  step retire.hop ask "Relay hop entry for this exit removed (relay rule by handle, file by line, never loaded; hop server's port), the other exits behind the hop dialled again"
   step retire.alerts auto "Reachability alerts resolved"
   step retire.leftovers auto "Leftovers: nothing still points at the server"
   step retire.owner-after owner "What only the owner can do afterwards"
@@ -462,5 +595,7 @@ register_retire_steps() {
 checklist_retire() {
   step retire.params auto "Server exists and is an exit (the relay box is refused on purpose)"
   step retire.snapshot auto "Read-only snapshot: status, routes, plans, names"
+  register_retire_reach
+  register_retire_guards
   register_retire_steps
 }

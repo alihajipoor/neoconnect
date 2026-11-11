@@ -17,6 +17,10 @@
 #   env <key> <PROTO>   envelope for nx-e2e-run.sh  (CONTAINS A CREDENTIAL: pipe only)
 #   adu <key>           file for `xray api adu`      (CONTAINS CREDENTIALS: pipe only)
 #   rmu <key>           "tag email" lines for `xray api rmu` (no secrets)
+#   has <key>           yes or no: are that key's files still here? They are
+#                       kept until its users are known to be gone from the
+#                       Xray they were added to, because the removal needs
+#                       their test emails
 #   shred <key>
 #
 # PROTO: REALITY TLS WS TROJAN SS (no WS on the relay). Files live 0600
@@ -129,6 +133,9 @@ SQL
         {c: ($cfg[0] | rowfor($p)), u: {credentials: $crs[0][$p]}}' |
         jq '.c as $c | .u as $u | '"$(cat "$HERE/nx-e2e-client.jq")"
     fi
+    ;;
+  has)
+    if [ -s "$D/cfg.json" ] && [ -s "$D/creds.json" ] && [ -s "$D/protos" ]; then echo yes; else echo no; fi
     ;;
   shred)
     if [ -d "$D" ]; then

@@ -24,6 +24,10 @@
 # `fix` restarts Xray when it changed the unit or the binary. That is
 # free on a new box and is why this runs before any customer exists; it
 # refuses when the server already has users, unless NX_ALLOW_RESTART=1.
+# The checklist never sets that: restarting an exit's Xray under
+# customers drops every one of them, and once wiped the uplink users of
+# its relay routes until the panel put them back. It is for a person,
+# at a time the owner chose.
 set -uo pipefail
 MODE=${1:?check or fix}
 VER=${2:?xray version}
@@ -211,6 +215,9 @@ has_users() {
     n=$("$X" api inboundusercount -s 127.0.0.1:10085 -tag "$t" 2>/dev/null | grep -o '"count": *[0-9]*' | grep -o '[0-9]*$')
     [ "${n:-0}" -gt 0 ] && return 0
   done
+  # Shadowsocks keeps one seed user on every server; more than that is people.
+  n=$("$X" api inboundusercount -s 127.0.0.1:10085 -tag shadowsocks-in 2>/dev/null | grep -o '"count": *[0-9]*' | grep -o '[0-9]*$')
+  [ "${n:-0}" -gt 1 ] && return 0
   return 1
 }
 

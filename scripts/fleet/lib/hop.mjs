@@ -230,9 +230,17 @@ export function chainRemove(model, ip) {
  * The hop table rebuilt from the relay's own rules. This is how the hop
  * moves to a new server when the old one is already gone: the relay
  * still knows every exit and port it was using.
+ *
+ * `hopIps` is every server the rules may point at while the move is
+ * under way: the old hop, and the new one. A move that stopped halfway
+ * leaves some rules on each, and a table built from the old hop's rules
+ * alone would, loaded over the new server's table, drop the exits that
+ * had already moved.
  */
-export function chainFromRelayRules(rules, relayIps, oldHopIp) {
-  const mine = rules.filter((r) => r.hopIp === oldHopIp);
+export function chainFromRelayRules(rules, relayIps, hopIps) {
+  const through = [].concat(hopIps);
+  if (!through.length || !through.every(isV4)) throw new Error("hop addresses must be IPv4");
+  const mine = rules.filter((r) => through.includes(r.hopIp));
   if (!mine.length) throw new Error("the relay has no rule through that hop");
   const model = {
     relays: [...relayIps],
@@ -240,4 +248,25 @@ export function chainFromRelayRules(rules, relayIps, oldHopIp) {
   };
   checkModel(model);
   return model;
+}
+
+/** How many hop rules, in a live listing or in the file, are for that exit / go through that hop. */
+export function countHopRules(rules, by, ip) {
+  if (!isV4(ip)) throw new Error("not an IPv4 address");
+  if (by !== "exit" && by !== "hop") throw new Error("count by exit or by hop");
+  return rules.filter((r) => (by === "exit" ? r.exitIp : r.hopIp) === ip).length;
+}
+
+/**
+ * Is the exit's rule exactly "to that hop, on that port"? "none" when the
+ * exit has no rule, "yes" or "no" otherwise. This is what lets a step
+ * that stopped halfway run again: a rule that is already right is kept,
+ * and one that points somewhere else is nobody's to overwrite. With no
+ * port given, only the hop is compared (asked before a port is chosen).
+ */
+export function hopRuleIs(rules, { exitIp, hopIp, hopPort = null }) {
+  if (!isV4(exitIp) || !isV4(hopIp)) throw new Error("exit and hop must be IPv4 addresses");
+  const r = ruleForExit(rules, exitIp);
+  if (!r) return "none";
+  return r.hopIp === hopIp && (hopPort === null || r.hopPort === hopPort) ? "yes" : "no";
 }

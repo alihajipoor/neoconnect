@@ -59,6 +59,21 @@ C=/usr/local/etc/xray/config.json
   pass "xray uot-direct outbound, unresolved" || nope "xray uot-direct outbound missing or resolving"
 jq -e '[.routing.rules[] | select(.outboundTag == "uot-direct")] | length == 1' "$C" >/dev/null && pass "xray UDP-over-TCP rule" || nope "xray UDP-over-TCP rule missing"
 jq -e '[.routing.rules[] | select((.ip // []) | index("::/0"))] | length >= 1' "$C" >/dev/null && pass "xray IPv6 egress blocked" || nope "xray has no ::/0 block rule"
+# No customer may reach this server's own loopback or private ranges
+# through a tunnel: the Xray API and OpenVPN's management port listen
+# there. Three things hold that, and each is checked: the rule is there,
+# nothing a customer's traffic could match sits before it (only the API's
+# own rule and the UDP-over-TCP carve-out may), and IPIfNonMatch is on,
+# without which a name that resolves to loopback walks past an ip rule.
+# shellcheck disable=SC2016
+jq -e '.routing.rules as $r
+  | ([$r[] | (.outboundTag == "block" and ((.ip // []) | (index("127.0.0.0/8") != null and index("10.0.0.0/8") != null
+       and index("172.16.0.0/12") != null and index("192.168.0.0/16") != null and index("169.254.0.0/16") != null)))]
+     | index(true)) as $p
+  | $p != null
+    and ([$r[:$p][] | select(.inboundTag != ["api-in"] and .inboundTag != ["api"] and .outboundTag != "uot-direct")] | length == 0)' "$C" >/dev/null &&
+  pass "xray private ranges blocked, before any rule a customer's traffic could match" || nope "xray private-range block rule missing, or a rule sits before it"
+[ "$(jq -r '.routing.domainStrategy // empty' "$C")" = IPIfNonMatch ] && pass "xray routing IPIfNonMatch" || nope "xray routing.domainStrategy is not IPIfNonMatch: a name resolving to loopback passes the private-range block"
 
 if [ -f /etc/swanctl/conf.d/neoxify.conf ]; then
   # The local id must be the name the panel publishes, or every IKE_AUTH
@@ -78,6 +93,16 @@ done
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://127.0.0.1/)
 [ "$code" = 200 ] && pass "disguise page on 80: 200" || nope "disguise page on 80: $code"
 curl -sI --max-time 8 http://127.0.0.1/ | grep -qi '^server: nginx/[0-9]' && nope "nginx shows its version" || pass "nginx hides its version"
+# What installer/maintenance/fix-node-port-80.sh reports, as checks: the
+# distribution's default site is off, and no certificate renews by
+# binding port 80 itself (nginx holds it, so that renewal would fail in
+# silence about ninety days from now).
+[ ! -e /etc/nginx/sites-enabled/default ] && [ -e /etc/nginx/sites-enabled/neoxify-http ] && pass "nginx default site off, the deliberate port 80 site in place" || nope "nginx default site still enabled, or the deliberate port 80 site missing"
+if grep -lsE '^[[:space:]]*authenticator[[:space:]]*=[[:space:]]*standalone' /etc/letsencrypt/renewal/*.conf >/dev/null; then
+  nope "a certificate renews by standalone: it cannot while nginx holds port 80"
+else
+  pass "no certificate renews by standalone"
+fi
 
 IF6=$(ip -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
 if [ -n "$IF6" ]; then

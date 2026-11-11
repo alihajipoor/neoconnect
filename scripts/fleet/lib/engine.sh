@@ -18,7 +18,7 @@
 # command they would have run, and every step and verify is shown.
 
 STEP_IDS=()
-declare -A STEP_TITLE=() STEP_KIND=()
+declare -A STEP_TITLE=() STEP_KIND=() STEP_PRIOR=()
 
 die() { echo "fleet: $*" >&2; exit 1; }
 dry() { [[ "${OPT_DRY:-0}" == 1 ]]; }
@@ -37,6 +37,14 @@ step() {
   STEP_IDS+=("$id")
   STEP_TITLE[$id]="$title"
   STEP_KIND[$id]="$kind"
+}
+
+# needs_prior <id>: that step is where customers get the server, so it
+# refuses to run -- alone under --only as well -- unless every step
+# before it passed in this run, or was waived on the record.
+needs_prior() {
+  [[ -n "${STEP_TITLE[$1]:-}" ]] || die "needs_prior: no step $1"
+  STEP_PRIOR[$1]=1
 }
 
 # ---------------------------------------------------------------- state
@@ -76,6 +84,32 @@ need() {
 
 step_done() { [[ -f "$RUN_DIR/done" ]] && grep -qx "$1" "$RUN_DIR/done"; }
 mark_done() { echo "$1" >>"$RUN_DIR/done"; }
+step_waived() { [[ -f "$RUN_DIR/waived" ]] && grep -qx "$1" "$RUN_DIR/waived"; }
+
+# --waive a,b: the owner's decision to go on although those steps did not
+# pass. It is kept in the run directory, so it holds on the next pass,
+# and written to the run log, so the run never reads as fully proven.
+record_waivers() {
+  local id
+  for id in ${OPT_WAIVE:+${OPT_WAIVE//,/ }}; do
+    [[ -n "${STEP_TITLE[$id]:-}" ]] || die "--waive: no step '$id' in this checklist"
+    if step_done "$id" || step_waived "$id"; then continue; fi
+    echo "$id" >>"$RUN_DIR/waived"
+    log_line "WAIVED $id ${STEP_TITLE[$id]} (--waive: the owner's decision to go on without it)"
+    echo "Waived on the owner's say-so, and written to the run log: $id"
+  done
+}
+
+# unproven [<step>]: the steps (before <step>, or all of them) that
+# neither passed in this run nor were waived.
+unproven() {
+  local id
+  for id in "${STEP_IDS[@]}"; do
+    [[ "$id" == "${1:-}" ]] && return 0
+    step_done "$id" || step_waived "$id" || echo "$id"
+  done
+  return 0
+}
 
 # undo "<how to take this step back>": goes into the run log beside the
 # step that made the change.
@@ -166,11 +200,34 @@ resume_hint() {
   echo "Run log, with the undo line of every change so far: $RUN_DIR/run.log"
 }
 
+refuse_unproven() { # <what is refused> <the unproven step ids, one per line>
+  echo "REFUSED: $1. These earlier steps never passed in this run:"
+  echo "$2" | sed 's/^/    /'
+  echo "Run the same command with no --from and no --only: it resumes at the first of them."
+  echo "If the owner has decided to go on without one, record that with --waive <step>[,<step>]:"
+  echo "it is written to the run log, and the run then ends as complete EXCEPT those steps."
+}
+
 run_checklist() {
-  local total=${#STEP_IDS[@]} n=0 id fn kind rc started=1
+  local total=${#STEP_IDS[@]} n=0 id fn kind rc started=1 miss
   [[ -n "${OPT_FROM:-}" ]] && started=0
   if [[ -n "${OPT_FROM:-}" && -z "${STEP_TITLE[$OPT_FROM]:-}" ]]; then die "no step '$OPT_FROM' in this checklist"; fi
   if [[ -n "${OPT_ONLY:-}" && -z "${STEP_TITLE[$OPT_ONLY]:-}" ]]; then die "no step '$OPT_ONLY' in this checklist"; fi
+
+  if ! dry; then
+    record_waivers
+    # --from starts later in the list; it is not a way past a step that
+    # never passed. Without this a server could reach the plans with its
+    # reboot test and its tunnels unproven, and the log would say complete.
+    if [[ -n "${OPT_FROM:-}" ]]; then
+      miss="$(unproven "$OPT_FROM")"
+      if [[ -n "$miss" ]]; then
+        refuse_unproven "--from $OPT_FROM would skip steps that have not passed" "$miss"
+        log_line "REFUSED --from $OPT_FROM (unproven before it: $(tr '\n' ' ' <<<"$miss"))"
+        return 1
+      fi
+    fi
+  fi
 
   for id in "${STEP_IDS[@]}"; do
     n=$((n + 1))
@@ -194,6 +251,22 @@ run_checklist() {
     if [[ -z "${OPT_ONLY:-}" && -z "${OPT_FROM:-}" ]] && step_done "$id"; then
       echo "  done in an earlier pass"
       continue
+    fi
+
+    # A waived step is passed over, never run and never marked done.
+    # Naming it with --only or --from runs it all the same.
+    if [[ "$id" != "${OPT_ONLY:-}" && "$id" != "${OPT_FROM:-}" ]] && ! step_done "$id" && step_waived "$id"; then
+      echo "  WAIVED (--waive, in the run log): not run, not proven"
+      continue
+    fi
+
+    if [[ -n "${STEP_PRIOR[$id]:-}" ]]; then
+      miss="$(unproven "$id")"
+      if [[ -n "$miss" ]]; then
+        refuse_unproven "$id is where customers get the server, and it does not run on unproven work" "$miss" | sed 's/^/  /'
+        log_line "REFUSED $id (unproven before it: $(tr '\n' ' ' <<<"$miss"))"
+        return 1
+      fi
     fi
 
     if [[ "$kind" == "ask" ]]; then
@@ -291,3 +364,33 @@ open_run() {
 }
 
 finish_run() { dry || touch "$RUN_DIR/finished"; }
+
+# conclude_run: a run is complete only when every step passed in it, or
+# was waived on the record. Says which of the two, and only then marks
+# the run finished.
+conclude_run() {
+  local miss id waived=""
+  dry && return 0
+  miss="$(unproven)"
+  if [[ -n "$miss" ]]; then
+    echo
+    echo "NOT COMPLETE. These steps never passed in this run:"
+    echo "$miss" | sed 's/^/    /'
+    echo "Run the same command again with no --from: it resumes at the first of them."
+    log_line "INCOMPLETE (never passed: $(tr '\n' ' ' <<<"$miss"))"
+    return 1
+  fi
+  for id in "${STEP_IDS[@]}"; do
+    step_done "$id" || waived+="$id "
+  done
+  finish_run
+  echo
+  if [[ -n "$waived" ]]; then
+    echo "Checklist complete, EXCEPT these steps, which were waived and never passed: $waived"
+    echo "What they prove is UNVERIFIED for this run."
+    log_line "COMPLETE EXCEPT waived: $waived"
+  else
+    echo "Checklist complete."
+    log_line "COMPLETE"
+  fi
+}
