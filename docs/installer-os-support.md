@@ -11,6 +11,14 @@ server on loopback), never yet run on a real box.** The two Ubuntu
 build that goes through the installer and `scripts/fleet` as they are
 now is the proof, and until then each item is unverified on a server.
 
+Two things have run on one of those nodes since, both read-only
+(2026-11-11): the image report (`maintenance/provider-image.sh` with no
+flag) found all six items in order, on an interface that is not `eth0`
+and with no global IPv6; and the dest audit's control case passed on
+that node's OpenSSL 4.0, so the "Negotiated TLS1.3 group" line is now
+read from a real handshake there and not from a report of one. No
+repair has run on a real box.
+
 ## Supported releases
 
 `installer/lib/os-detect.sh` refuses anything outside this list. It is a

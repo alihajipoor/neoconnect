@@ -33,7 +33,7 @@
 #                        never restarted, so one that was missed would
 #                        stay for good.
 set -uo pipefail
-X=/usr/local/bin/xray
+X=${NX_XRAY:-/usr/local/bin/xray}
 API=127.0.0.1:10085
 F=/etc/nftables.conf
 CHAIN="ip neoxify_relay_chain output"
@@ -41,6 +41,18 @@ W=/dev/shm/nxf
 verb=${1:-}
 shift || true
 xstate() { echo "xray pid $(systemctl show xray -p MainPID --value), restarts $(systemctl show xray -p NRestarts --value)"; }
+# rule_count <rule listing> <tag pattern>: how many route rules carry
+# that tag. `xray api lsrules` prints a rule as two lines, "ruleTag" and
+# "tag", and both hold the route's tag: counted by line, the 28 rules of
+# the first real run read as 56. A rule is its "ruleTag" line. Should a
+# build ever print none, every line that names the tag is counted
+# instead, so a rule that is still there is never read as gone.
+rule_count() {
+  local n
+  n=$(grep -c "\"ruleTag\": *\"$2" <<<"$1")
+  [ "$n" != 0 ] || n=$(grep -c "$2" <<<"$1")
+  echo "$n"
+}
 
 case "$verb" in
   state)
@@ -48,10 +60,10 @@ case "$verb" in
     echo "agent $(systemctl is-active neoxify-agentd), $(/usr/local/bin/agentd --version 2>&1 | head -1)"
     R=$("$X" api lsrules -s "$API" 2>&1)
     O=$("$X" api lso -s "$API" 2>&1)
-    echo "route rules $(grep -c 'route-' <<<"$R"), route outbounds $(grep -c 'route-' <<<"$O")"
+    echo "route rules $(rule_count "$R" 'route-'), route outbounds $(grep -c 'route-' <<<"$O")"
     for id in "$@"; do
       [[ "$id" =~ ^[0-9a-f-]{36}$ ]] || continue
-      echo "$id rules=$(grep -c "route-$id-out" <<<"$R") outbounds=$(grep -c "route-$id-out" <<<"$O")"
+      echo "$id rules=$(rule_count "$R" "route-$id-out") outbounds=$(grep -c "route-$id-out" <<<"$O")"
     done
     ;;
   hop-list)
@@ -116,7 +128,9 @@ case "$verb" in
     T=$(jq -r '.grpcTarget // empty' /etc/neoxify/agent.json)
     N=$(jq -r '.tlsServerName // empty' /etc/neoxify/agent.json)
     [ -n "$T" ] && [ -n "$N" ] || { echo "control-name-unknown (agent.json has no target or no name)"; exit 1; }
-    if echo | timeout 8 openssl s_client -connect "$T" -servername "$N" 2>/dev/null | grep -q 'BEGIN CERTIFICATE'; then
+    # Captured first, for the reason hop-list gives.
+    O=$(echo | timeout 8 openssl s_client -connect "$T" -servername "$N" 2>/dev/null)
+    if grep -q 'BEGIN CERTIFICATE' <<<"$O"; then
       echo "control-name-ok; agent $(systemctl is-active neoxify-agentd)"
     else
       echo "control-name-reset: the name the agent uses does not get through from here"

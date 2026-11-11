@@ -23,9 +23,24 @@ t() { # t "<label>" <command...>
   shift
   if "$@" >/dev/null 2>&1; then pass "$l"; else nope "$l"; fi
 }
+# ip6tables prints, and saves, the owner of a rule as a number (65534),
+# whatever name the rule was added with: "--uid-owner nobody" is in
+# neither. Read by name alone, every server of the first real run looked
+# open to IPv6 with both rules in place. Both spellings are the rule.
+v6_owner_rules() { # rules on stdin -> how many name uid nobody
+  local uid
+  uid=$(id -u nobody 2>/dev/null || echo 65534)
+  grep -cE -- "--uid-owner ($uid|nobody)( |\$)"
+}
 
+# Captured first, then looked at, here and below. Piped straight into
+# `grep -q` under pipefail, the command on the left is killed when grep
+# closes the pipe on its first match, and the pipeline fails with the
+# match found: on a real server that runs chrony this line chose
+# systemd-timesyncd 16 times out of 40, and then failed it as a unit.
+units_listed=$(systemctl list-unit-files chrony.service 2>/dev/null)
 timeunit=chrony
-systemctl list-unit-files chrony.service 2>/dev/null | grep -q chrony || timeunit=systemd-timesyncd
+grep -q chrony <<<"$units_listed" || timeunit=systemd-timesyncd
 ike=strongswan
 [ "$(systemctl show -p LoadState --value strongswan.service 2>/dev/null)" = loaded ] || ike=strongswan-starter
 units="xray nginx wg-quick@wg0 openvpn-server@server $ike neoxify-swanctl-load neoxify-agentd fail2ban $timeunit netfilter-persistent"
@@ -78,8 +93,10 @@ jq -e '.routing.rules as $r
 if [ -f /etc/swanctl/conf.d/neoxify.conf ]; then
   # The local id must be the name the panel publishes, or every IKE_AUTH
   # fails while IKE_SA_INIT looks fine.
-  swanctl --list-conns 2>/dev/null | grep -q "id: $L1" && pass "ikev2 local id is the certificate name" || nope "ikev2 local id is not the first name"
-  swanctl --list-pools 2>/dev/null | grep -q . && pass "ikev2 pool loaded" || nope "ikev2 pool not loaded"
+  conns=$(swanctl --list-conns 2>/dev/null)
+  pools=$(swanctl --list-pools 2>/dev/null)
+  grep -q "id: $L1" <<<"$conns" && pass "ikev2 local id is the certificate name" || nope "ikev2 local id is not the first name"
+  [ -n "$pools" ] && pass "ikev2 pool loaded" || nope "ikev2 pool not loaded"
 fi
 t "wireguard interface up" wg show wg0
 grep -q '^ccd-exclusive' /etc/openvpn/server/server.conf 2>/dev/null && pass "openvpn ccd-exclusive" || nope "openvpn has no ccd-exclusive"
@@ -92,7 +109,8 @@ for pair in "$L1:2053" "$L2:2096"; do
 done
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://127.0.0.1/)
 [ "$code" = 200 ] && pass "disguise page on 80: 200" || nope "disguise page on 80: $code"
-curl -sI --max-time 8 http://127.0.0.1/ | grep -qi '^server: nginx/[0-9]' && nope "nginx shows its version" || pass "nginx hides its version"
+headers=$(curl -sI --max-time 8 http://127.0.0.1/)
+grep -qi '^server: nginx/[0-9]' <<<"$headers" && nope "nginx shows its version" || pass "nginx hides its version"
 # What installer/maintenance/fix-node-port-80.sh reports, as checks: the
 # distribution's default site is off, and no certificate renews by
 # binding port 80 itself (nginx holds it, so that renewal would fail in
@@ -107,7 +125,7 @@ fi
 # Closed for Xray whether or not the box has a global IPv6 today: the
 # provider can turn it on later, and nothing is run again when it does.
 if [ -d /proc/sys/net/ipv6 ]; then
-  [ "$(ip6tables -S OUTPUT 2>/dev/null | grep -c -- '--uid-owner nobody')" -ge 2 ] && pass "ipv6 rejected for xray (global IPv6 addresses now: $(ip -6 addr show scope global 2>/dev/null | grep -c inet6))" || nope "ipv6 open for xray"
+  [ "$(ip6tables -S OUTPUT 2>/dev/null | v6_owner_rules)" -ge 2 ] && pass "ipv6 rejected for xray (global IPv6 addresses now: $(ip -6 addr show scope global 2>/dev/null | grep -c inet6))" || nope "ipv6 open for xray"
   [ "$(cat /proc/sys/net/ipv6/conf/all/forwarding)" = 0 ] && pass "ipv6 forwarding off" || nope "ipv6 forwarding on"
 else
   pass "no IPv6 in this kernel"

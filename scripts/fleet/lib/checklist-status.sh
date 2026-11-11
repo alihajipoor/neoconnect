@@ -22,7 +22,13 @@ status_one() {
   IFS='|' read -r _ role _ status _ <<<"$row"
   echo
   echo "== $name"
-  awk -F'|' '{printf "  panel: %s %s, status %s, heartbeat %s s ago, agent %s, mirror host %s, API door %s (port %s)\n", $2, $3, $4, $5, $6, ($7 == "t" ? "set" : "NOT SET"), ($8 == "t" ? "checked" : "NOT FOUND"), $9}' <<<"$row"
+  # The relay box is no exit: it has no API mirror and no door, and
+  # "NOT SET, NOT FOUND" on the one box where that is right reads as an alarm.
+  awk -F'|' '{
+    printf "  panel: %s %s, status %s, heartbeat %s s ago, agent %s", $2, $3, $4, $5, $6
+    if ($2 != "RELAY") printf ", mirror host %s, API door %s (port %s)", ($7 == "t" ? "set" : "NOT SET"), ($8 == "t" ? "checked" : "NOT FOUND"), $9
+    printf "\n"
+  }' <<<"$row"
   dry || {
     grep '^plan|' <<<"$out" | awk -F'|' '{printf "  plan %s: %s route(s)\n", $2, $3}'
     grep '^relay-routes|' <<<"$out" | awk -F'|' '{printf "  relay routes to it: %s enabled of %s\n", $2, $3}'

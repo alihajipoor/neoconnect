@@ -8,9 +8,27 @@ It is a **checklist, not a script**. Every step has an id, a command and
 a verify, and the next step does not start until the verify passes. A
 run can stop anywhere and the same command picks it up again.
 
-**Status: written and statically checked, never yet run against a real
-server.** Its first real run is a supervised one. Until then everything
-below about what a command "proves" describes what the step checks, not
+**Status: its reading side has run against the real fleet; nothing that
+writes has.** On 2026-11-11 `status` ran for every server, `precheck`
+against a built server (it stops before it starts anything), `add` and
+`retire` under `--dry-run`, and the read-only pieces one by one against
+live servers: the retire guards, `verify.sh`, the parity and fleet-form
+checks, the maintenance audit, the image report, the dest audit, the
+hop and plan parsers, the user counts. That run found four places where
+a healthy server was read wrongly, all fixed and now tests built from
+what the servers printed (`test/real-output.test.mjs`):
+
+- a route rule on the relay box counted twice;
+- the two IPv6 rules for Xray "missing" on every server that has them,
+  because ip6tables prints the owner as a number;
+- the API mirror sites called drift on every server, over a comment
+  line and the order of two headers;
+- the time unit chosen wrongly four times in ten, a command piped into
+  `grep -q` under pipefail.
+
+No `add`, `retire` or `replace` has run, and no step that changes a
+host. The first one is a supervised run. Until then everything below
+about what a step that writes "proves" describes what it checks, not
 something that has been seen to work.
 
 No address and no name of ours is in this file or anywhere in
@@ -77,8 +95,9 @@ unverified for that server.
 
 Two servers were built by hand in November 2026 on Ubuntu 26.10, on a
 provider image the installer had never seen. What each of them met is
-now a step. `docs/installer-os-support.md` has the detail; neither step
-has run against a real box yet.
+now a step. `docs/installer-os-support.md` has the detail. Neither step
+has run against a real box yet; what each reads has: the image report
+and the dest audit with its control case, on one of those two servers.
 
 **`add.image`** (after `add.mask-upgrades`, before `add.packages`).
 That image arrived with ufw active on DROP policies, a hostname taken
@@ -245,7 +264,8 @@ node --test scripts/fleet/test/*.test.mjs
 - the jq programs that run on the panel host (skipped where `jq` is missing; CI has it);
 - the bare-box sink and probe against each other on loopback;
 - `add.dest` and `add.image` with the box's answers replaced by stand-ins: a `BAD` site never reaches the trial, a failed trial fails the step and is still stopped, `--accept-weak-dest` is no way past `BAD`;
-- the installer's image repairs against stand-ins for `iptables` and `ufw` (`image.test.mjs`): ufw's chains go policies first, an active ufw is not torn down by a save, `/etc/hosts` and `/etc/fstab` rewritten on fixtures, Ubuntu 26.10 accepted, and no interface name written anywhere in the installer, this tool or the agent.
+- the installer's image repairs against stand-ins for `iptables` and `ufw` (`image.test.mjs`): ufw's chains go policies first, an active ufw is not torn down by a save, `/etc/hosts` and `/etc/fstab` rewritten on fixtures, Ubuntu 26.10 accepted, and no interface name written anywhere in the installer, this tool or the agent;
+- what real servers printed on the first read-only run, addresses and names replaced (`real-output.test.mjs`): Xray's rule listing and user counts, ip6tables' numeric owner, the mirror sites as they stand on the fleet, the hop server's hand-edited table, and a unit listing that outlives the `grep -q` reading it.
 
 The dest audit has a control case of its own, with no network: two TLS
 servers on loopback, one that refuses X25519.

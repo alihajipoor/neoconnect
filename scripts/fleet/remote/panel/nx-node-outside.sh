@@ -70,7 +70,10 @@ for t in "$L1:2053" "$L1:8443" "$L2:2096"; do
 done
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://$N/")
 [ "$code" = 200 ] && pass "disguise page on 80" || nope "disguise page on 80: $code"
-curl -sI --max-time 8 "http://$N/" | grep -qi '^server: nginx/[0-9]' && nope "nginx shows its version on 80" || pass "nginx hides its version"
+# Captured first: piped into `grep -q` under pipefail, a match can still
+# end as a failed pipeline, and here that would read as "hidden".
+headers=$(curl -sI --max-time 8 "http://$N/")
+grep -qi '^server: nginx/[0-9]' <<<"$headers" && nope "nginx shows its version on 80" || pass "nginx hides its version"
 if [ -n "$DEST" ]; then
   r=$(echo | timeout 8 openssl s_client -connect "$N:443" -servername "$DEST" -verify_return_error -verify_hostname "$DEST" 2>&1 | grep -m1 'Verify return code')
   grep -q 'Verify return code: 0 ' <<<"$r" && pass "443 shows the disguise site's real certificate" || nope "443 disguise certificate: ${r:-no answer}"

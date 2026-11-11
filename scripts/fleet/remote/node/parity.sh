@@ -29,6 +29,7 @@ L1=${4:?first name}
 L2=${5:?second name}
 D=/etc/letsencrypt/renewal-hooks/deploy
 SA=/etc/nginx/sites-available
+RULES6=/etc/iptables/rules.v6
 drift=0
 B=""
 
@@ -45,6 +46,30 @@ backup() {
     echo "backups in $B"
   fi
   [ -e "$1" ] && cp -a "$1" "$B/"
+}
+
+# ip6tables prints, and saves, the owner of a rule as a number (65534),
+# whatever name the rule was added with: "--uid-owner nobody" is in
+# neither. Read by name alone, every server of the first real run looked
+# open to IPv6 with both rules in place. Both spellings are the rule.
+v6_owner_rules() { # rules on stdin -> how many name uid nobody
+  local uid
+  uid=$(id -u nobody 2>/dev/null || echo 65534)
+  grep -cE -- "--uid-owner ($uid|nobody)( |\$)"
+}
+# Are both IPv6 rules in the file the box boots with?
+v6_saved() {
+  local n=0
+  [ -f "$RULES6" ] && n=$(v6_owner_rules <"$RULES6")
+  [ "${n:-0}" -ge 2 ]
+}
+
+# same_site <rendered> <on the box>: the same site, comment lines aside.
+# On the servers built before this tool a person wrote a line above each
+# site, and a byte comparison called every one of them drift.
+same_site() {
+  [ -f "$2" ] || return 1
+  cmp -s <(grep -v '^[[:space:]]*#' "$1") <(grep -v '^[[:space:]]*#' "$2")
 }
 
 # Both certificates have to exist before anything is pointed at them:
@@ -69,12 +94,12 @@ api_block() {
         proxy_pass https://\$neoxify_panel\$request_uri;
         proxy_set_header Host $PNAME;
         proxy_ssl_name $PNAME;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
         proxy_ssl_server_name on;
         proxy_ssl_verify on;
         proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
         proxy_ssl_verify_depth 3;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
         proxy_buffering off;
         proxy_read_timeout 120s;
     }
@@ -140,7 +165,7 @@ p_nginx() {
   t=$(mktemp -d)
   render_sites "$t"
   for f in neoxify-fallback neoxify-mirror-direct; do
-    cmp -s "$t/$f" "$SA/$f" || same=0
+    same_site "$t/$f" "$SA/$f" || same=0
   done
   [ -L /etc/nginx/sites-enabled/neoxify-mirror-direct ] || same=0
   if [ "$same" = 1 ]; then
@@ -259,7 +284,7 @@ p_ipv6() {
   fi
   if ip6tables -C OUTPUT -o "$IF" -m owner --uid-owner nobody -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null &&
     ip6tables -C OUTPUT -o "$IF" -m owner --uid-owner nobody -j REJECT 2>/dev/null &&
-    grep -q -- '--uid-owner nobody' /etc/iptables/rules.v6 2>/dev/null; then
+    v6_saved; then
     ok ipv6
     return
   fi
@@ -267,13 +292,13 @@ p_ipv6() {
     bad ipv6 "Xray could leave over IPv6"
     return
   fi
-  [ -f /etc/iptables/rules.v6 ] && cp -a /etc/iptables/rules.v6 /root/rules.v6.bak-pre-ipv6-nobody
+  [ -f "$RULES6" ] && cp -a "$RULES6" /root/rules.v6.bak-pre-ipv6-nobody
   ip6tables -C OUTPUT -o "$IF" -m owner --uid-owner nobody -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null ||
     ip6tables -A OUTPUT -o "$IF" -m owner --uid-owner nobody -p tcp -j REJECT --reject-with tcp-reset
   ip6tables -C OUTPUT -o "$IF" -m owner --uid-owner nobody -j REJECT 2>/dev/null ||
     ip6tables -A OUTPUT -o "$IF" -m owner --uid-owner nobody -j REJECT
   netfilter-persistent save >/dev/null 2>&1
-  if ip6tables -C OUTPUT -o "$IF" -m owner --uid-owner nobody -j REJECT 2>/dev/null && grep -q -- '--uid-owner nobody' /etc/iptables/rules.v6 2>/dev/null; then
+  if ip6tables -C OUTPUT -o "$IF" -m owner --uid-owner nobody -j REJECT 2>/dev/null && v6_saved; then
     echo "applied ipv6 on $IF (forwarding stays $(cat /proc/sys/net/ipv6/conf/all/forwarding))"
   else
     bad ipv6 "the two rules did not go in, or were not saved"

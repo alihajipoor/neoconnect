@@ -43,7 +43,11 @@ case "$verb" in
     A=${1:?address}
     P=${2:?port}
     N=${3:?name}
-    if echo | timeout 8 openssl s_client -connect "$A:$P" -servername "$N" 2>/dev/null | grep -q 'BEGIN CERTIFICATE'; then echo "sni-ok"; else echo "sni-reset"; exit 1; fi
+    # Captured first: piped into `grep -q` under pipefail, openssl is
+    # killed when grep closes the pipe on its match, and a name that got
+    # through would read as reset.
+    O=$(echo | timeout 8 openssl s_client -connect "$A:$P" -servername "$N" 2>/dev/null)
+    if grep -q 'BEGIN CERTIFICATE' <<<"$O"; then echo "sni-ok"; else echo "sni-reset"; exit 1; fi
     ;;
   *)
     echo "usage: inside.sh bare|zone|probe|sni ..." >&2
