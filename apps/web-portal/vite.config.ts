@@ -41,6 +41,20 @@ export default defineConfig({
     alias: [
       { find: "@shared", replacement: shared },
 
+      // theme.css (imported by index.css) names its fonts relative to
+      // itself, "./assets/<font>.woff2", and nothing rebases a URL
+      // inside an @import'ed stylesheet: the build kept it as written,
+      // so the page asked for /account/assets/assets/<font>.woff2 and
+      // got a 404 (Inter and Inter Tight, live until 2026-11-11). Point
+      // those names at the shared folder. auth.css's copies of the same
+      // names are the same bytes, so one file is emitted for both.
+      // scripts/deploy-portal.sh refuses a build whose CSS names a file
+      // it does not contain.
+      {
+        find: /^\.\/assets\/((?:Inter|InterTight|Vazirmatn)-[\w-]+\.woff2)$/,
+        replacement: `${shared}/assets/$1`,
+      },
+
       // Tauri modules -> browser equivalents. Aliases resolve before
       // node resolution, so these packages need not be installed here.
       { find: "@tauri-apps/plugin-store", replacement: shim("plugin-store.ts") },

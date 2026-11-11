@@ -218,6 +218,24 @@ if [ -z "$ROLLBACK_FROM" ]; then
     case "$path" in /account/*) ;; *) die "unexpected asset path $path (the portal is served from /account/)" ;; esac
     [ -f "$BUILD_DIR/${path#/account/}" ] || die "the page asks for $path, which the build does not contain"
   done
+  # Every url() in the built stylesheets must name a file the build has.
+  # An @import'ed stylesheet's relative URLs are not rebased by the
+  # bundler, and the miss is silent: the browser falls back to another
+  # font (theme.css's Inter and Inter Tight, live until 2026-11-11).
+  node -e '
+    const fs = require("fs"), path = require("path");
+    const root = process.argv[1], dir = path.join(root, "assets"), bad = [];
+    for (const f of fs.readdirSync(dir).filter((n) => n.endsWith(".css"))) {
+      const css = fs.readFileSync(path.join(dir, f), "utf8");
+      for (const m of css.matchAll(/url\(\s*(["\x27]?)([^"\x27)]+)\1\s*\)/g)) {
+        const u = m[2].trim().split(/[?#]/)[0];
+        if (!u || /^(data:|https?:|#)/.test(u)) continue;
+        const file = u.startsWith("/account/") ? path.join(root, u.slice(9)) : path.resolve(dir, u);
+        if (!fs.existsSync(file)) bad.push(f + " -> " + m[2]);
+      }
+    }
+    if (bad.length) { console.error([...new Set(bad)].join("\n")); process.exit(1); }
+  ' "$BUILD_DIR" || die "a built stylesheet points at files the build does not contain (above)"
   for lic in Inter-OFL.txt InterTight-OFL.txt Vazirmatn-OFL.txt world-atlas-LICENSE.txt; do
     [ -f "$BUILD_DIR/licenses/$lic" ] || die "licence missing from the build: licenses/$lic"
   done

@@ -14,19 +14,11 @@
    HTML -- which is the failure mode that looks like a broken build. */
 @source "../../desktop-windows/src";
 
-/* Re-declare Vazirmatn with a path resolvable from HERE.
-   theme.css asks for "./assets/Vazirmatn-variable.woff2", which is
-   correct relative to itself but not relative to this file, so the
-   bundler left it untouched and it would 404 from /account/assets/.
-   Persian text would then silently fall back to a system font -- easy
-   to miss from an English browser, and Persian is not a minority case
-   for this product. Declared after the import so it wins. */
-@font-face {
-  font-family: "Vazirmatn";
-  src: url("../../desktop-windows/src/assets/Vazirmatn-variable.woff2") format("woff2-variations");
-  font-weight: 100 900;
-  font-display: swap;
-}
+/* theme.css names its fonts relative to itself ("./assets/<font>.woff2"),
+   which the bundler does not rebase inside an @import. vite.config.ts
+   points those names at the shared folder, so they resolve: no font is
+   re-declared here. A miss falls back to a system font silently (Persian
+   included), so scripts/deploy-portal.sh checks every url() in the build. */
 
 @layer base {
   html {
