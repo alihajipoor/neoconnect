@@ -8521,3 +8521,75 @@ Xray has the same PID as on 11-07.
 - For the owner: rename the two servers' dashboard labels, which carry
   the brand. 26.10 is an interim release, not an LTS like the peers'.
   The panel host's disk is 87 % full (5 GB free), mostly database dumps.
+
+## 2026-11-11 (afternoon) — the UK relay routes go through the Germany hop
+
+**Status:** fixed, proven by script. The four relay routes to uk-1 gave
+the right exit address but stalled on upload. They now leave the relay
+through the kernel NAT hop on germany-3, like Türkiye and the
+Netherlands, and move data both ways.
+
+**The fault, measured first (14:09-14:13Z):**
+- The server is fine. From the panel host straight to uk-1's REALITY
+  port: exit address matched, 256 KB each way in 0.26-0.29 s, three of
+  three. On the box: load 0.1, no I/O wait, memory free, no drops. Its
+  disk is 77 % full with a large syslog, which is another job's and not
+  the cause.
+- The path from the relay is not. From the relay straight to the same
+  port, three runs: the exit address matched every time, no upload
+  finished in 25 s, and two of three downloads stopped at 114 and
+  147 KB. The same method from the relay to germany-3 took 0.67 s.
+- The inside probe had rated relay-to-uk-1 "slow" on 144 of 144 checks
+  in 72 hours.
+
+**The change, staged:**
+- On germany-3, one hop port (47133) for uk-1 was added beside the two
+  in use: a live rule pair and the same lines in its file, syntax check
+  only. The Türkiye and Netherlands entries were not touched and kept
+  counting.
+- Before any relay rule changed, a temporary client on the relay went
+  through that port: exit address uk-1, 256 KB both ways in
+  0.84-1.75 s, three of three.
+- Then one rule was added on the relay, sending its uk-1 uplink to the
+  hop: live by `nft add rule`, the same line in its file, syntax check
+  only. The file was never loaded and nothing was reloaded. Backups of
+  file and live ruleset on both servers; undo lines in the private log.
+- No engine was restarted anywhere. Xray's process on the relay, on
+  germany-3 and on uk-1 is the same as before. Nothing changed on
+  uk-1. No plan, route or database change.
+
+**Proven afterwards (14:17-14:27Z):**
+- The four UK relay routes with the relay test account's panel-issued
+  credentials, three rounds: 12 of 12 exit address matched and 256 KB
+  finished both ways. Most took 1.1-1.7 s; round one had uploads of
+  5.6 to 9.6 s on three entries.
+- One relay route for each of the other six exits (Finland, Germany,
+  the Netherlands, Türkiye, France, Sweden): 6 of 6 matched and
+  finished both ways.
+- The relay-to-exit leg alone, from a client on the relay: uk-1 seven
+  of seven at 0.82-0.87 s (three of them through the relay's new rule
+  itself), Türkiye and the Netherlands three of three each at
+  0.8-1.2 s through their rules.
+
+**Not proven:**
+- Real customer traffic: no customer has used a UK relay route in the
+  last seven days, so nothing but test traffic has crossed the hop.
+- A real app, a phone, or a home or mobile network inside the
+  restricted country. The proof is scripted, from the panel host and
+  from the relay itself.
+- Where the slow uploads in the full-route test come from. They showed
+  on routes this change does not touch (Finland, Türkiye, the
+  Netherlands) and not on the relay-to-exit leg, which points at the
+  test client's own leg into the relay. Not located further.
+- A reboot of either server: both files were syntax-checked, neither
+  was loaded.
+
+**Open:**
+- The inside probe will go on rating relay-to-uk-1 "slow". It measures
+  the direct path on another port, not the relay's uplink, so that line
+  no longer describes these routes.
+- From the relay, downloads from finland-3 (direct, no hop) took 4 to
+  8 s for 256 KB, three of three, while uploads took under 1 s. Not
+  caused by this work; worth watching.
+- germany-3 now carries the relay traffic of three exits. If it is
+  blocked or down, twelve relay routes stop with it.
