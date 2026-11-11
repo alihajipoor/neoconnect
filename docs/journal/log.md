@@ -8957,3 +8957,82 @@ read-only run.
 - The backups sit on the disk they protect.
 - Provider dashboard chores (a label rename, one VPS to delete) need
   the owner signed in.
+
+---
+
+## 2026-11-11 (night) — backend deployed; backups, the retired-server queue and the usage table
+
+**Status:** deploy done and checked. Off-server backup and the queue fix
+are on branches, not merged. Usage-table trimming is a proposal that
+waits for the owner.
+**Touches:** production backend (`7c4d3520`), `CLAUDE.md`,
+`claude/offbox-backup`, `claude/queue-skip-disabled`
+
+**Deploy.** The panel host went from `ab8704f6` to `7c4d3520` as a
+fast-forward, after a dump at 21:46Z. No new migrations: the database
+was already through `20261111_node_doors`. The API was down for 14 s.
+A second agent checked it on its own:
+- The running image has the purchase check and the region check. POST
+  /nodes with `uk-london` or `United Kingdom` gets a 400, while
+  `gb-london` passes the region check. No node row was created.
+- All 8 nodes came back ONLINE within minutes, ir2 among them.
+- No ERROR or WARN lines in the backend log for the first 10 minutes.
+- Log size caps are live on backend, panel, postgres and redis.
+- The updater serves 0.9.63.
+- On the VM, Automatic connected through Stealth, and the exit matched
+  sweden-1.
+
+Not proven:
+- The purchase refusal over HTTP with a real customer token, and any
+  real store purchase.
+- Rotation of the logs once they reach the cap (only the config is
+  proven).
+- Any test from a censored network.
+
+Two things left over:
+- `discord-bot` still has no log cap. The documented `up` command skips
+  its profile, so it was not recreated; it needs `--profile discord`.
+- The `until=72h` prune freed 0 B right after the build, because the
+  3.4 GB of cache is all new. A plain `docker builder prune -f` would
+  free it.
+
+The disk is 45% used.
+
+**Off-server backups.** Before tonight nothing left the box: the
+nightly tarball (14 kept, about 153 MB each) shares the disk with the
+database it protects. Tonight's 03:00 `database.dump` was pulled to
+this PC, into the private folder outside the repo. Its sha256 matches
+on both ends and `pg_restore` reads the whole archive. A restore into a
+real database is **unverified**, because this PC has no Postgres or
+Docker.
+
+`claude/offbox-backup` (`ce4b7b91`, not merged) adds
+`infra/scripts/pull-offbox-backup.ps1`. It copies only the dump, never
+`.env`, and keeps 7 days plus 4 weeks. It fails when the host's
+nightly is older than 30 h. Its first version ran once against the real
+host. The review fixes in `ce4b7b91` (age check, error lines, leftover
+partial files) were tested only against a fake ssh. No scheduled task was
+registered: that waits for the owner's yes.
+
+The bigger gap: `infra/.env` exists only on the box. That includes
+`CREDENTIALS_ENCRYPTION_KEY`, which also stands in for the unset
+`EXIT_HANDLE_SECRET`. Without it no dump restores the credential
+blobs, so the owner should keep a copy off the box himself. Also only
+on the box: the relay TLS and standby keys, the live nginx configs,
+and the inside-probe config, cron and keys.
+
+**Retired-server queue.** `claude/queue-skip-disabled` (`efb06a2a`,
+reviewed, CI green, not merged). For a DISABLED node with no live
+stream, it stops queuing CREATE_USER, ENABLE_USER and CONFIGURE_ROUTE.
+A Hello re-asserts every credential and route anyway. It still stores
+DELETE_USER and DISABLE_USER, but drops an exact repeat of the pending
+one: nothing else reconciles a returning node, so skipping an "off"
+would leave a revoked credential working. Nothing has run against the
+production queue.
+
+**Trimming proposal, waiting for the owner.** The database is 1.76 GB.
+`usage_records` is 1.54 GB, with 2.7 M rows growing by about 45 k a day,
+and 55% of them are older than 35 days. `agent_commands` has 8,332 rows
+QUEUED for DISABLED nodes. No production data was changed tonight. The
+keep-rule and the delete plan go to the owner first, with a dump
+before any delete.
