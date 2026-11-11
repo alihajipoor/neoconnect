@@ -9188,6 +9188,8 @@ certificate.", drops "before the public launch", en+fa, one sentence
 each) is on `claude/website-download-line`, not merged, not live. The
 owner asked to see it before it goes up.
 
+Later: the download line went live after the owner saw it ("ok put the download line live"; main `d0af4bac`, only `inc/lang/en.php` and `fa.php`, backup in `/root/web-backups/lang-pre-download-line-20261111T234624Z/`). Checked independently in headless Chrome: new sentence on `/download/` (1440) and `/fa/download/` (phone width), old wording gone from every sitemap page in both languages, all 18 return 200 with no PHP warning, `/account/` loads with no failed request, download buttons unchanged.
+
 ## 2026-11-11 (night, last) — database trimmed, deploy 3, off-server copy scheduled, a restore proven
 
 **Status:** done; VACUUM/REINDEX not done (see below)
