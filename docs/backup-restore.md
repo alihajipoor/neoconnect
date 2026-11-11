@@ -37,6 +37,15 @@ on the cron line to change it), logging to `/var/log/neoxify-backup.log`.
 
 Backups land in `/var/backups/neoxify/neoxify-backup-<timestamp>.tar.gz`.
 
+The ad-hoc `pg_dump` copies taken before admin steps (`/root/db-backups/*.sql.gz`)
+are separate and are thinned by `infra/scripts/prune-db-backups.sh`, installed
+on the production panel host as `/usr/local/sbin/neoxify-prune-db-backups` and
+run daily at 03:40 UTC from `/etc/cron.d/neoxify-db-backups-prune` (one summary
+line per run in `/var/log/neoxify-db-backups-prune.log`). It keeps the newest
+dump of each of the last 7 days, the newest of each of the 8 ISO weeks before
+that, and always the newest overall; the rest is deleted. `--dry-run` shows
+what would go. The installer does not set this up; copy it by hand on a new box.
+
 ## Manual backup
 
 From the panel management menu (`sudo ./install.sh` on an already-installed
