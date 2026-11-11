@@ -18,7 +18,9 @@
 #
 # Keeps the newest copy of each of the last 7 days that have one, plus the
 # newest of each of the 4 ISO weeks before those. Writes a log next to the
-# copies. Exits 0 on success, 1 on any failure (nothing is rotated then).
+# copies. Exits 0 on success, 1 on any failure (nothing is rotated then),
+# and 1 when the host's newest backup is older than -MaxAgeHours (a dead
+# nightly; the verified copy is kept and rotated as usual).
 #
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File pull-offbox-backup.ps1
@@ -33,7 +35,11 @@ param(
   [string]$Dest,
   [int]$KeepDaily = 7,
   [int]$KeepWeekly = 4,
-  [int]$MinAgeMinutes = 10
+  [int]$MinAgeMinutes = 10,
+  # The host's newest finished backup older than this means its nightly has
+  # stopped: the copy is still pulled and kept, but the run exits 1, so a
+  # dead nightly cannot hide behind "already have it".
+  [int]$MaxAgeHours = 30
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,8 +70,17 @@ function Read-Config([string]$path) {
 # PowerShell 5.1's native-argument handling.
 function Invoke-Remote([string[]]$sshBase, [string]$body) {
   $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($body -replace "`r", '')))
-  $out = & ssh.exe @sshBase "echo $b64 | base64 -d | bash -s"
-  if ($LASTEXITCODE -ne 0) { throw "remote step failed (ssh exit $LASTEXITCODE)" }
+  # stderr is merged so the script's own `ERR ...` reasons reach the log.
+  # Under 'Stop', PS 5.1 would turn any stderr line into a terminating
+  # NativeCommandError, so this one call runs under 'Continue'. Only ERR
+  # lines are kept: ssh's own errors can name the host.
+  $eap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { $all = @(& ssh.exe @sshBase "echo $b64 | base64 -d | bash -s" 2>&1); $code = $LASTEXITCODE }
+  finally { $ErrorActionPreference = $eap }
+  $out = @($all | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" })
+  $err = @($all | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" } | Where-Object { $_ -like 'ERR *' })
+  if ($code -ne 0) { throw ("remote step failed (ssh exit {0}){1}" -f $code, $(if ($err.Count) { ': ' + ($err -join '; ') } else { '' })) }
   return $out
 }
 
@@ -106,6 +121,7 @@ mv "`$D/database.dump" "`$D/`$B"
 [ "`$(head -c 5 "`$D/`$B")" = PGDMP ] || { echo 'ERR not a pg_dump custom archive' >&2; exit 4; }
 docker exec -i neoxify-postgres-1 pg_restore -f /dev/null < "`$D/`$B"
 echo "NAME `$B"
+echo "AGE `$(( `$(date +%s) - `$(stat -c%Y "`$T") ))"
 echo "SIZE `$(stat -c%s "`$D/`$B")"
 echo "SHA256 `$(sha256sum "`$D/`$B" | cut -c1-64)"
 OK=1
@@ -114,7 +130,7 @@ OK=1
   $info = @{}
   foreach ($l in $lines) { $p = "$l".Split(' ', 2); if ($p.Count -eq 2) { $info[$p[0]] = $p[1].Trim() } }
   if ($info.ContainsKey('STAGE')) { $stage = $info['STAGE'] }
-  foreach ($k in 'STAGE', 'NAME', 'SIZE', 'SHA256') { if (-not $info.ContainsKey($k)) { throw "host did not report $k" } }
+  foreach ($k in 'STAGE', 'NAME', 'SIZE', 'SHA256', 'AGE') { if (-not $info.ContainsKey($k)) { throw "host did not report $k" } }
   if ($stage -notmatch '^/root/offbox-stage\.[A-Za-z0-9]{6}$') { throw "unexpected stage path" }
   if ($info['NAME'] -notmatch '^neoxify-backup-\d{8}-\d{6}\.database\.dump$') { throw "unexpected file name" }
   Write-Log ("host: {0} {1} bytes sha256 {2}; gzip -t and pg_restore full read ok" -f $info['NAME'], $info['SIZE'], $info['SHA256'])
@@ -124,8 +140,10 @@ OK=1
     Write-Log "already have $($info['NAME']) with the same hash; not pulling again"
   } else {
     # 2. Copy to a .partial name, verify, then rename into place.
+    # Leftovers of any earlier interrupted copy (PC shut down mid-scp) go
+    # too; they never count as backups, but each is a full dump's size.
     $partial = "$final.partial"
-    if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
+    Get-ChildItem -LiteralPath $Dest -Filter 'neoxify-backup-*.database.dump.partial' -File | Remove-Item -Force
     $src = '{0}:{1}/{2}' -f $cfg['SshTarget'], $stage, $info['NAME']
     & scp.exe -q @sshOpts $src $partial
     if ($LASTEXITCODE -ne 0) { throw "scp failed (exit $LASTEXITCODE)" }
@@ -161,6 +179,8 @@ OK=1
     }
   }
   Write-Log ("done: {0} copies kept" -f $keep.Count)
+  $ageH = [math]::Round([double]$info['AGE'] / 3600, 1)
+  if ($ageH -gt $MaxAgeHours) { throw "host's newest finished backup is $ageH h old (limit $MaxAgeHours h): its nightly backup has stopped" }
   $exit = 0
 } catch {
   Write-Log "FAILED: $($_.Exception.Message)"
