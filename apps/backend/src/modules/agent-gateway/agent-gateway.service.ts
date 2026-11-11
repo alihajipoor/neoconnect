@@ -1094,6 +1094,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     // Before anything else, so a re-assert that checks after writing its
     // own create always sees an off that was on its way.
     this.noteUserCommand(nodeId, type, payload);
+    if (!this.registry.get(nodeId) && (await this.needlessForRetiredNode(nodeId, type, payload))) return null;
     const command = await this.prisma.agentCommand.create({
       data: { nodeId, type, payloadJson: payload, status: "QUEUED" },
     });
@@ -1104,6 +1105,84 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     }
     return command;
   }
+
+  /** Whether a command for a node that is not connected need not be
+   * stored, because the node is retired (DISABLED) and storing it changes
+   * nothing it will ever be told.
+   *
+   * Retired nodes collected hundreds of rows a day that no stream would
+   * deliver until the agent came back, if ever. Only two kinds are
+   * dropped, and only for DISABLED nodes:
+   *
+   * * Commands that put something ON (CREATE_USER, ENABLE_USER,
+   *   CONFIGURE_ROUTE). An agent that comes back is sent every live
+   *   credential and every enabled relay route after its Hello
+   *   (syncAfterHello), and the agent runs ENABLE_USER as CREATE_USER, so
+   *   the current state reaches it without the stored copy. A route's
+   *   uplink on a returning exit comes back with the next route sweep of
+   *   its entry. UPDATE_USER is not dropped: a re-assert does not replace
+   *   credentials a user already has.
+   * * An OFF command (DELETE_USER, DISABLE_USER) identical to the newest
+   *   one still pending for that credential. Offs are NOT dropped
+   *   otherwise: nothing reconciles a node against the database, and a
+   *   retired node's engines keep running with the agent stopped, so a
+   *   revocation it is not told about stays valid there when it returns.
+   *   A second identical off after the first changes nothing -- with ons
+   *   no longer stored, nothing can come between them -- so it is the
+   *   repeat (a device-limit hold each time) that is dropped, never the
+   *   first.
+   *
+   * A node coming back reads ONLINE before its re-assert reads anything
+   * (handleAgentSync), so a command dropped here on a DISABLED read is
+   * always covered by that re-assert. */
+  private async needlessForRetiredNode(nodeId: string, type: AgentCommandType, payload: object): Promise<boolean> {
+    const covered = SKIPPABLE_ON_RETIRED.has(type);
+    const off = OFF_COMMANDS.has(type);
+    if (!covered && !off) return false;
+    const node = await this.prisma.node.findUnique({ where: { id: nodeId }, select: { status: true } });
+    if (node?.status !== "DISABLED") return false;
+    if (covered) return true;
+
+    const { protocol, externalUserId } = payload as { protocol?: unknown; externalUserId?: unknown };
+    if (typeof protocol !== "string" || typeof externalUserId !== "string") return false;
+    const newest = await this.prisma.agentCommand.findFirst({
+      where: {
+        nodeId,
+        status: { in: ["QUEUED", "SENT"] },
+        AND: [
+          { payloadJson: { path: ["protocol"], equals: protocol } },
+          { payloadJson: { path: ["externalUserId"], equals: externalUserId } },
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+      select: { type: true, payloadJson: true },
+    });
+    return newest?.type === type && canonicalJson(newest.payloadJson) === canonicalJson(payload);
+  }
+}
+
+/** What a retired node is not sent while away, because its Hello's
+ * re-assert sends the current state anyway (see needlessForRetiredNode). */
+const SKIPPABLE_ON_RETIRED: ReadonlySet<AgentCommandType> = new Set<AgentCommandType>([
+  "CREATE_USER",
+  "ENABLE_USER",
+  "CONFIGURE_ROUTE",
+]);
+
+/** JSON with object keys sorted, so a payload compares equal to its
+ * stored jsonb copy, whose key order Postgres does not keep. */
+function canonicalJson(value: unknown): string {
+  const sort = (v: unknown): unknown =>
+    Array.isArray(v)
+      ? v.map(sort)
+      : v !== null && typeof v === "object"
+        ? Object.fromEntries(
+            Object.keys(v)
+              .sort()
+              .map((k) => [k, sort((v as Record<string, unknown>)[k])]),
+          )
+        : v;
+  return JSON.stringify(sort(value));
 }
 
 function userCommandKey(nodeId: string, protocol: string, externalUserId: string): string {
