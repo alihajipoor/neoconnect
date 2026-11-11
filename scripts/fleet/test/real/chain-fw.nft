@@ -1,0 +1,27 @@
+#!/usr/sbin/nft -f
+# (a line of history a person wrote here)
+# (a line of history a person wrote here)
+# (a line of history a person wrote here)
+# (a line of history a person wrote here)
+# (a line of history a person wrote here)
+# (a line of history a person wrote here)
+# (a line of history a person wrote here)
+table ip neoxify_chain
+delete table ip neoxify_chain
+table ip neoxify_chain {
+  set relays {
+    type ipv4_addr
+    elements = { 198.51.100.20 }
+  }
+  chain prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+    ip saddr @relays tcp dport 47131 counter dnat to 203.0.113.10:443 comment "turkey-1"
+    ip saddr @relays tcp dport 47132 counter dnat to 203.0.113.20:443 comment "netherlands-1"
+    ip saddr @relays tcp dport 47133 counter dnat to 203.0.113.30:443 comment "uk-1"
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    ip saddr @relays ip daddr { 203.0.113.10, 203.0.113.20 } tcp dport 443 counter masquerade
+    ip saddr @relays ip daddr 203.0.113.30 tcp dport 443 counter masquerade comment "uk-1"
+  }
+}

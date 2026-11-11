@@ -23,7 +23,9 @@ individual decisions as they're revisited.
   — see `installer/lib/panel.sh`) or **VPN Agent Node** (downloads the
   compiled `agentd` binary and enrolls — see `installer/lib/agent.sh`).
   The chosen role persists in `/etc/neoxify/role`; re-running the script
-  shows that role's management menu instead of re-prompting.
+  shows that role's management menu instead of re-prompting. Which
+  releases it accepts, what each changed, and what it repairs on a
+  provider's image: `docs/installer-os-support.md`.
 
 ## Two requirements that drive every protocol decision
 
