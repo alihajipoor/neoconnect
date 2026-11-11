@@ -65,6 +65,11 @@ export const MAX_PAGE_ATTEMPTS = 3;
 const PROBE_LOOKBACK_MS = 12 * 3_600_000;
 const CONTROL_TIMEOUT_MS = 5_000;
 const MAX_SNOOZE_HOURS = 7 * 24;
+/** For the incidents a message may be about. A retired (DISABLED) server
+ * is no longer evaluated, so an incident left open on it stays as it last
+ * read: it is kept, shown in the panel and still answerable there, and
+ * nobody is paged, reminded or sent a digest line about it. */
+const NOT_RETIRED = { node: { status: { not: NodeStatus.DISABLED } } } as const;
 
 export type BlockAction = "replaced" | "retired" | "keep" | "snooze";
 
@@ -186,7 +191,11 @@ export class BlockWatchService {
     const t = now.getTime();
 
     const nodes = await this.prisma.node.findMany({
-      where: { status: { not: NodeStatus.PENDING } },
+      // Servers in service, or meant to be. A PENDING one was never
+      // provisioned. A DISABLED one is retired and kept only for its
+      // history: its agent is stopped for good, so reading that as "its
+      // agent is offline" reported an outage for it at every evaluation.
+      where: { status: { in: [NodeStatus.ONLINE, NodeStatus.OFFLINE] } },
       select: { id: true, name: true, status: true, publicIp: true, realityDestReachable: true },
       orderBy: { name: "asc" },
     });
@@ -414,6 +423,7 @@ export class BlockWatchService {
           pagedAt: null,
           pageAttempts: { lt: MAX_PAGE_ATTEMPTS },
           country: this.country,
+          ...NOT_RETIRED,
         },
         include,
         orderBy: { openedAt: "asc" },
@@ -448,6 +458,7 @@ export class BlockWatchService {
           country: this.country,
           pagedAt: { lte: new Date(t - REMIND_AFTER_MS) },
           remindedAt: null,
+          ...NOT_RETIRED,
         },
         include,
         orderBy: { openedAt: "asc" },
@@ -531,7 +542,7 @@ export class BlockWatchService {
 
     const include = { node: { select: { name: true } } } as const;
     const allOpen = await this.prisma.blockIncident.findMany({
-      where: { status: BlockIncidentStatus.OPEN, country: this.country },
+      where: { status: BlockIncidentStatus.OPEN, country: this.country, ...NOT_RETIRED },
       include,
       orderBy: { openedAt: "asc" },
     });

@@ -34,6 +34,12 @@ not a block, and is never reported as one. The port is checked whenever
 anything fires, so a crashed engine behind a healthy agent is an outage
 too. Heartbeat gaps are paged separately (below).
 
+A retired server -- one set `DISABLED`, kept in the database for its
+usage history -- is not evaluated at all: it is neither an outage nor a
+block. An incident still open on it stays in the panel as it last read
+and can be answered there, and no page, reminder or digest line is sent
+about it.
+
 ## Verdicts
 
 - **Suspect** -- one signal. Panel and daily digest only.
