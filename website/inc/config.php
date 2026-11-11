@@ -215,7 +215,7 @@ return array(
 
     // Dismissal is remembered per version. Bump this string when the message
     // changes and everyone who already dismissed it sees the new one once.
-    'announcement_version' => '1',
+    'announcement_version' => '2',
 
     // ---------------------------------------------------------------
     // Referral programme
