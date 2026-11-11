@@ -9159,3 +9159,29 @@ must-revalidate`), so every visitor gets the new page now.
 
 Not changed, by the owner's decision: the three feature-level Beta
 labels inside the apps stay.
+
+## 2026-11-11 (night) — account fonts 404, and the download line waits
+
+**Status:** fonts fixed live (Inter, Inter Tight); one Vazirmatn 404 left; download line waiting for the owner
+**Touches:** apps/web-portal, scripts/deploy-portal.sh (main `59879aa5`); website/inc/lang (branch `claude/website-download-line` `43edd992`)
+
+Cause: the portal's `index.css` imports the apps' `theme.css`, whose
+font URLs are relative to its own folder (`./assets/X.woff2`). Vite does
+not rebase URLs inside an imported stylesheet, so the built CSS asked for
+`/account/assets/assets/X.woff2` (404). Those rules come later, so they
+won. Source fix on main: `vite.config.ts` points them at the shared fonts,
+and `deploy-portal.sh` refuses a build whose CSS `url()` names a missing file.
+
+Live fix, no rebuild (live build differs from main): byte-identical copies
+of the build's own Inter and Inter Tight files in `account/assets/assets/`.
+Nothing replaced; undo is removing that folder. Checked independently in
+headless Chrome: English sign-in has no failed request, Inter and Inter
+Tight load. **Persian still requests
+`/account/assets/assets/Vazirmatn-variable.woff2` and gets 404**; text
+still renders in Vazirmatn from the hashed copy. The next portal deploy
+from main (or one more copied file) clears it.
+
+The shortened unsigned-installer line ("We plan to get a signing
+certificate.", drops "before the public launch", en+fa, one sentence
+each) is on `claude/website-download-line`, not merged, not live. The
+owner asked to see it before it goes up.
