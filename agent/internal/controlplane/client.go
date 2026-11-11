@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -456,7 +457,58 @@ func sessionsToPB(sessions []dispatch.SessionCount) []*pb.SessionCount {
 	return out
 }
 
+// routineReassert reports whether a command id is one of the control
+// plane's periodic re-checks: every credential, uplink and route, sent
+// again every 60 seconds whether or not anything changed. They are the
+// `reassert:`, `reassert-uplink:` and `reassert-route:` ids of
+// agent-gateway.service.ts.
+//
+// `reassert-confirm:` is deliberately not one of them. It is sent for a
+// credential the node has not acknowledged yet, so its line is the one
+// place a node's log says that a new device's credential arrived.
+func routineReassert(id string) bool {
+	for _, prefix := range []string{"reassert:", "reassert-uplink:", "reassert-route:"} {
+		if strings.HasPrefix(id, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// reassertTally counts the routine re-checks that succeeded instead of
+// logging each one. A node with 51 customers logged 500 to 1,000 "executed
+// command reassert..." lines a minute, 12% of everything it wrote, and not
+// one of them said anything the one before had not (measured 2026-11-11).
+// A failure is still logged in full, by the caller.
+//
+// Used from receiveLoop's goroutine only, so it needs no lock.
+type reassertTally struct {
+	count int
+	since time.Time
+}
+
+// reassertSummaryEvery is how often the tally becomes a log line.
+const reassertSummaryEvery = time.Minute
+
+// add counts one success and returns the summary line to log when a
+// minute's worth has gathered, "" otherwise. The re-checks arrive as one
+// burst a minute, so the line for a burst is written when the next begins.
+func (t *reassertTally) add(now time.Time) string {
+	if t.since.IsZero() {
+		t.since = now
+	}
+	line := ""
+	if now.Sub(t.since) >= reassertSummaryEvery {
+		line = fmt.Sprintf("re-assert: %d routine commands ok since %s", t.count, t.since.UTC().Format("15:04:05"))
+		t.count = 0
+		t.since = now
+	}
+	t.count++
+	return line
+}
+
 func receiveLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, snd *sender, dispatcher *dispatch.Dispatcher) error {
+	var tally reassertTally
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
@@ -469,7 +521,13 @@ func receiveLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, sn
 
 		success, errMsg := dispatcher.Execute(ctx, cmd)
 		if success {
-			log.Printf("executed command %s (%s)", cmd.GetId(), cmd.GetType())
+			if routineReassert(cmd.GetId()) {
+				if line := tally.add(time.Now()); line != "" {
+					log.Print(line)
+				}
+			} else {
+				log.Printf("executed command %s (%s)", cmd.GetId(), cmd.GetType())
+			}
 		} else {
 			log.Printf("command %s (%s) failed: %s", cmd.GetId(), cmd.GetType(), errMsg)
 		}

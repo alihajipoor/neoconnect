@@ -73,6 +73,27 @@ type fakeSwanctl struct {
 	// Makes --terminate fail; onTerminate runs first, if set.
 	terminateErr error
 	onTerminate  func(f *fakeSwanctl)
+
+	// What --stats prints, and what --load-creds and --load-all fail with.
+	stats      string
+	loadErr    error
+	loadAllErr error
+	// The file --load-creds reads, as the real one reads the node's. It
+	// prints a line per secret it loaded and exits 0 even when one did
+	// not load; dropLoaded leaves that many out, from the end.
+	secretsPath string
+	dropLoaded  int
+}
+
+// count is how many times swanctl was run with this first argument.
+func (f *fakeSwanctl) count(command string) int {
+	n := 0
+	for _, call := range f.calls {
+		if len(call) > 0 && call[0] == command {
+			n++
+		}
+	}
+	return n
 }
 
 // terminateOptions is every option swanctl's terminate command registers
@@ -95,6 +116,33 @@ func (f *fakeSwanctl) run(_ context.Context, args ...string) (string, string, er
 			return "", f.listErr.Error(), f.listErr
 		}
 		return f.listSAs, "", nil
+	case "--stats":
+		return f.stats, "", nil
+	case "--load-creds":
+		if f.loadErr != nil {
+			return "", f.loadErr.Error(), f.loadErr
+		}
+		var names []string
+		if onDisk, err := os.ReadFile(f.secretsPath); err == nil {
+			for _, line := range strings.Split(string(onDisk), "\n") {
+				if name, ok := strings.CutSuffix(strings.TrimSpace(line), " {"); ok && strings.HasPrefix(name, "eap-") {
+					names = append(names, name)
+				}
+			}
+		}
+		if f.dropLoaded > 0 && f.dropLoaded <= len(names) {
+			names = names[:len(names)-f.dropLoaded]
+		}
+		out := "loaded certificate from '/etc/swanctl/x509/server.pem'\n"
+		for _, name := range names {
+			out += "loaded eap secret '" + name + "'\n"
+		}
+		return out, "", nil
+	case "--load-all":
+		if f.loadAllErr != nil {
+			return "", f.loadAllErr.Error(), f.loadAllErr
+		}
+		return "", "", nil
 	case "--terminate":
 		var ikeID, ikeName string
 		for i := 1; i < len(args); i++ {
@@ -140,6 +188,7 @@ func withFake(t *testing.T, output string) (*Provisioner, *fakeSwanctl) {
 	f := &fakeSwanctl{listSAs: output}
 	p := New(filepath.Join(t.TempDir(), "users.conf"), missingSwanctl)
 	p.runSwanctl = f.run
+	f.secretsPath = p.secretsPath
 	p.users["nx-user1"] = "secret-1"
 	p.users["nx-user2"] = "secret-2"
 	return p, f

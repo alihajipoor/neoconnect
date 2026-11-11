@@ -148,6 +148,10 @@ jobs:
         run: go build ./...
       - working-directory: agent
         run: go test ./...
+      # The IKEv2 credential list is shared by concurrent commands and the
+      # stats poll; a race there is a customer who cannot connect.
+      - working-directory: agent
+        run: go test -race ./internal/protocols/ikev2/ ./internal/controlplane/
 
   installer-lint:
     name: Shellcheck installer

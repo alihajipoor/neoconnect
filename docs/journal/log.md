@@ -8676,3 +8676,109 @@ OpenSSL 4.0.
 - `fleet status` takes close to four minutes for eight servers: two
   connections for every query.
 - It leaves an empty scratch directory on the panel host.
+
+**After the merge (15:30Z):** the first CI run on main failed in the
+tool's own tests, with the same code that had passed on the branch
+twenty minutes earlier. Two things in the tool depended on timing, and
+neither had to do with a server:
+- A run's directory is named to the second. A run started in the same
+  second as one that had just finished was handed that run's directory,
+  every step in it marked done. The engine's tests run their passes a
+  tenth of a second apart and met it. A new run now never takes a
+  directory that is already there.
+- Under `--dry-run`, the two ends of a pipe between two hosts each
+  printed their line when they happened to start, so the order of a dry
+  run's output changed from run to run. They are said one after the
+  other now.
+
+Both are fixed with a test that meets the case every time (a clock that
+stands still), not one time in three. The other three jobs of that run
+passed: the agent, the backend with the tool's queries against the
+migrated schema, the desktop client.
+
+## 2026-11-11 (evening) — the signed endpoint lists, re-signed and published (offline v8, server v101)
+
+The re-sign that earlier entries list as "not done" is done. Both lists
+the apps read for the panel's addresses went from 16 entries to 14, the
+same 14 in both.
+
+**What changed in the lists.**
+- Out: seven mirrors of retired servers. None answered any more.
+- In: the dedicated mirror of each of the five live servers that had
+  none in the lists.
+- Unchanged, in the same order: the four panel names, the two mirrors
+  already listed for servers still live, the one mirror that builds from
+  before 2026-10-11 can use, and the two last-resort doors with the same
+  pins.
+- Not added: a second mirror per server on its TLS port. Signed-in apps
+  already reach those through the server doors, and each extra entry
+  lengthens the walk older builds do one by one.
+
+**How.** Signed on the Mac over ssh from the Windows PC, with the Mac
+checkout's own `scripts/endpoints/bundle.mjs` (`sign --previous`, then
+`verify`). The keys were named as arguments and never left the Mac. The
+signed files and the plan were checked independently before anything
+was published. Published after a database dump by two guarded updates
+of the single `endpoint_bundle_state` row, the offline list first and
+the server list a minute later: each update names the versions and
+checksums it expects to replace, and checks the row before it commits.
+Nothing was restarted; the backend reads the row on every request. The
+public copies were updated with `publish-copies.mjs` afterwards.
+
+**Proven.**
+- Bytes: after each step, both list paths fetched through every one of
+  the 12 ordinary entries, identical to the signed files.
+- The apps' own code (`endpoint-bundle-store.ts` from main, bundled
+  with a stand-in store, and the store code of the oldest build still
+  reporting), through each of the 12 entries: a current app ends with
+  v101 in force and v8 as its offline fallback; the oldest build ends
+  with v8.
+- The real Windows app, 0.9.61, on the test VM. Its store held v100 and
+  v7 before. Ten seconds after a page reload it held v101 and v8, with
+  the signed files' checksums. On the next load it handed v101 to the
+  Rust scope grant, which checks the signature itself and accepted it,
+  and its own fetches of both paths returned the signed bytes. It stayed
+  signed in and listed its 56 routes. A connect on Automatic landed in
+  15 seconds with the exit address matching the engine's server, then
+  disconnected; the selection was Automatic before and after.
+- From inside the restricted country, on two datacenter networks: the
+  two panel names that answered before still answer, with the new
+  lists. Both doors present a listed pin on both networks; on one, both
+  answer and serve the new lists.
+- The next builds: the build-time seed fetch, run as the release
+  workflows run it, returns v8. Nothing in the repository had to change.
+
+**Not proven, and not to be read as proven.**
+- Phones. Only the shared list code ran, on a PC.
+- Home and mobile operators inside the restricted country.
+- On the second inside network both doors answer 403, as they did
+  before the publish: the door's region check reads a network's
+  registered country (already filed).
+- The five new mirrors add nothing inside: every name on their domain
+  is rewritten there, as before. They help everywhere else.
+
+**Gotchas.**
+- The desktop app fetches the lists with the page's own `fetch`, not
+  the HTTP plugin, once per page load after its first answered request.
+  A hook that only watches the plugin's IPC does not see it. A page
+  reload is enough to make it refetch, which matters on a machine where
+  an update is waiting to install: the process need not restart.
+- A stand-in for the store plugin must read its backing map on every
+  call. `endpoint-bundle-store.ts` keeps the store object for the life
+  of the module, so a stand-in that captured the map at `load` kept
+  writing to the first case's map, and every later case read as "not
+  stored".
+- Both lists go out in one sitting. Apps from desktop 0.9.51 and mobile
+  0.2.29 hold the server list and never take a lower number, so the
+  offline list alone would never reach them. Putting the old row back
+  only helps apps that have not fetched yet; a real rollback is a new
+  signature with a higher number.
+- `pg_dump | gzip` without `pipefail` leaves a small file and exit 0
+  when the dump fails. The dump step sets it and runs `gzip -t`.
+
+**Open.**
+- Builds seeded before 2026-10-11 (four customers seen in the last two
+  weeks) can use 3 of the 12 ordinary entries, as before. They need an
+  app update to gain the rest.
+- Unreachable reports from the apps were 123 in the 24 hours before the
+  publish, 89 a day over the week. Read again after a day.
