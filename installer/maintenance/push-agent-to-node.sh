@@ -75,6 +75,11 @@ if [[ -x /usr/local/bin/agentd ]]; then
   cp -a /usr/local/bin/agentd \
     "/var/lib/neoxify/agentd-rollback/agentd-prev-$(sha256sum /usr/local/bin/agentd | cut -c1-12)"
 fi
+# Keep the two newest and remove the rest: each is about 32 MB and one was
+# left behind by every upgrade, for good. `|| true` because on a node with
+# nothing to list the pipeline fails, and under `set -e` that would stop
+# this script before the new binary is installed.
+ls -1t /var/lib/neoxify/agentd-rollback/agentd-prev-* 2>/dev/null | tail -n +3 | xargs -r rm -f || true
 install -m 755 "$ASSET" /usr/local/bin/agentd
 systemctl restart neoxify-agentd
 rm -f "/tmp/$ASSET" /tmp/sha256sums.txt
