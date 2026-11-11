@@ -8342,3 +8342,182 @@ stopped because the box was gone.
 The fleet is now five exits (Finland, Germany, the Netherlands, the UK,
 Türkiye) and the Iranian relay. The website's location list drops
 Singapore in code; not deployed until the owner has seen it.
+
+## 2026-11-11 — france-2 and sweden-1 added
+
+**Status:** both are live in every plan: eight direct routes each in
+Trial, Starter, Pro and Ultimate Max, and four relay routes each in
+Ultimate. Every protocol was proven on both before a public plan got
+them. No customer bytes yet at 09:51Z (see *Open*). Names, addresses
+and ids are redacted per docs/node-address-hygiene.md.
+
+**Why.** india-1 and singapore-2 were retired this morning (the two
+entries above), which left five exits. The owner supplied two new
+servers, in France (france-1 was retired on 11-07) and in Sweden, and
+asked for them to be added so that no customer can fail to connect,
+direct or through the relay, because a step was missed or done wrong.
+
+**Built.** Two boxes of the fleet's small size (1 vCPU, under 1 GB RAM,
+2 GB swap), by the hand runbook of 11-07; the fleet tool on
+`claude/fleet-tool` has not run against a server yet. Each has the
+fleet's eight protocols with key sets compared one for one with
+germany-3's, Xray pinned to 26.3.27 as `User=nobody`, the IPv4-only
+egress shape, the no-self-loop guard and agent v0.2.11. france-2 reuses
+france-1's region and REALITY dest. The bare boxes were tested from
+inside the restricted country before anything was installed: from the
+relay, 256 KB both ways in about 0.4 s on three ports; from the sign-in
+box the upload stops at 64 KB, the hold finland-3 and germany-3 also
+have. The relay reaches both directly, so neither needs the hop. Each
+box was rebooted three times in all, and every check was repeated after
+the last one.
+
+**What Ubuntu 26.10 and the provider's image changed.** The boxes came
+with 26.10; the rest of the fleet is 26.04.
+- The installer refuses 26.10 (its OS check stops at 26.04). The check
+  was widened on the box copy only.
+- OpenSSL 4.0, certbot 5.5, nginx 1.30, strongSwan 6.0.7, OpenVPN 2.7.7
+  and kernel 7.3 changed nothing that matters: every unit, config, hook
+  and rule equals germany-3's once names, ports, keys and the interface
+  are normalised. charon loads the same plugins and algorithms (MD4 and
+  DES for EAP-MSCHAPv2 are still there under OpenSSL 4). OpenVPN now
+  uses the kernel's data-channel offload and writes its status file in
+  the version-2 layout; the agent reads the management port and counted
+  right.
+- The upstream Xray installer again gave the newest Xray under its own
+  user, which cannot read the certificate key. Re-pinned by hand, as on
+  germany-2 and germany-3.
+- The image ships a host firewall, on, with a default drop: it would
+  have blocked every engine port and all forwarding. It was disabled and
+  removed and its leftover chains flushed. The final posture equals
+  germany-3's line for line: every policy ACCEPT, the same 17 forward
+  rules (tunnel clients kept apart), the 2 self-loop rules, the 3
+  masquerade rules and the 2 IPv6 rejects for the Xray user. No rule
+  from the pre-build test is left.
+- The interface is not `eth0`, and the boxes have no global IPv6.
+- The server's dashboard label carries the brand, and cloud-init writes
+  it into the hostname and the hosts file at every boot. The first
+  reboot found that; a cloud-init drop-in pins a generic name and the
+  second reboot proved it.
+- Smaller: the provider's swapfile replaced by the fleet's, a
+  firmware-update timer that fails in a VM masked, three unused daemons
+  switched off, systemd-timesyncd instead of chrony (left, in sync).
+
+**The REALITY dest defect the proof caught.** sweden-1's first dest, a
+Swedish university site, passed the installer's dest audit, and REALITY
+then failed on the first scripted tunnel: the client "received real
+certificate". That site negotiates P-256 only and refuses X25519, which
+REALITY needs. Every REALITY customer and all four relay routes to
+Sweden would have failed, with the server looking healthy. The dest was
+changed to another Swedish site that is not behind a CDN and completes
+an X25519-only TLS 1.3 handshake three times out of three; Xray was
+restarted on sweden-1 only (no customer was on it) and the panel's copy
+of the config patched. For the installer: its audit reads the
+key-exchange group from a line OpenSSL 3 prints and OpenSSL 4 does not,
+and it treated X25519 as advice rather than a requirement. The audit
+has to force an X25519-only handshake and fail hard. That is written on
+`claude/fleet-tool`, with the 26.10 and provider-image fixes, CI green,
+never run on a server. Until it is merged, check every new dest by hand.
+
+**The independent audit** (read-only, a second agent) compared every
+unit, config, hook, firewall rule and key with germany-3 and with the
+panel by hash and found no defect in either server. What it raised, and
+what was done:
+- WireGuard, OpenVPN and IKEv2 had never carried a session on this OS.
+  Closed by the app proof below.
+- The canary plan was not empty. The new routes had first gone into
+  Ultimate Max, which is inactive, as a canary; it has one real, active
+  customer. The routes were pulled 85 minutes later (that customer made
+  no attempt and moved no bytes on the new servers) and a plan named
+  "Internal test" now holds test access: inactive, not purchasable, for
+  test accounts only. It was active, still not purchasable, for 67
+  minutes for the app proof and is inactive again with no subscription.
+  A canary must never be a plan a customer is on.
+- DNS on both boxes was a plain file naming the provider's resolvers,
+  two of them IPv6 addresses the box cannot reach. It now goes through
+  the systemd-resolved stub, as on the peers.
+- `/var/log/syslog` grows with the square of the IKEv2 user count
+  (strongSwan logs every credential on each reload). An rsyslog rule
+  drops those lines and syslog rotates daily on the two new servers.
+  **Not applied to the five older servers**, which need the owner's OK;
+  one of them fills its disk in early December at today's rate. The
+  proper fix is in the agent.
+- Both boxes were rebooted once more and passed every check.
+
+**Plans.** After a dump (`pre-fr2-se1-plans-20261111T092615Z`), one
+PATCH per plan, smallest real step first: Ultimate Max, Pro, Starter,
+Trial (each 40 to 56 routes), then Ultimate for the relay routes (20 to
+28). They took 1, 5, 42, 15 and under 1 second. After each one, before
+the next: every node's heartbeat under 20 s, the route count as
+expected, no command unacknowledged, the backend's database pool idle
+and no error in its log. Plan defaults are unchanged. All 48 active
+subscriptions on the four direct plans hold their eight credentials on
+each server (384 per server, every CREATE_USER acknowledged), the two
+on Ultimate hold the eight new relay routes, and each server's own user
+counts equal the panel's for all eight protocols. The backend was not
+restarted and no engine on any other server was touched; the relay's
+Xray has the same PID as on 11-07.
+
+**Proven, on both servers:**
+- Direct, scripted from outside, with credentials the panel issued to a
+  test subscription after the plan edits: REALITY, VLESS-TLS, WS, Trojan
+  and Shadowsocks exit on the server's own address, 256 KB both ways.
+  Shadowsocks' UDP DNS (UoT) answers.
+- From the relay, straight to each server: REALITY and Shadowsocks, exit
+  address matching, 256 KB each way in about a second. The inside probe
+  has said `moves` from the relay on every round since the build.
+- Through the relay, with the relay test account: all eight new relay
+  routes (REALITY, VLESS-TLS, Trojan and Shadowsocks entries) exit on
+  the new server, 256 KB both ways in 1.0 to 1.4 s. One relay route per
+  older exit was run again: Finland, Germany, the Netherlands and
+  Türkiye pass.
+- From the real Windows app (0.9.61, in the VM, on a home line outside
+  the restricted country): all eight protocols, each picked by hand.
+  Each landed with the exit address matching, passed the app's own data
+  check, and moved the server's own counters in both directions: the
+  first WireGuard, OpenVPN and IKEv2 sessions on this OS. The agent's
+  usage rows carried bytes up and down for all eight. Automatic, with
+  nothing chosen, landed on France at the first try.
+- One miss: Shadowsocks on france-2 failed its first try from the VM and
+  passed its second. The guest's clock was about 34 s off at that
+  moment, Shadowsocks 2022 refuses a handshake more than 30 s off, and
+  the server saw no stream. Ten of ten scripted dials passed afterwards.
+  Read as the VM's clock, not shown beyond that.
+- Monitoring: each server has a verified API door, and a request
+  through it with the stored pin answers from outside and from the
+  relay, while a wrong pin is refused. The reachability sweep and block
+  watch (in notify mode) cover both; nothing is open and nothing paged.
+
+**Not proven:**
+- Mobile and home operators in the restricted country. Both inside
+  vantages are datacenters. From the sign-in box's network both servers
+  connect and then move 0 bytes, as finland-3 and germany-3 do.
+- WireGuard, OpenVPN and IKEv2 from inside the restricted country: the
+  probe cannot see a handshake block.
+- Any IPv6 path. The boxes have no global IPv6 and this PC has none.
+- Phones: neither the Android nor the iOS app has run on these servers.
+- The relay routes from a real app (scripted only).
+
+**Open:**
+- The zone the node names live under (`{node-domain}`) is rewritten
+  inside the restricted country, so the protocols that need a name
+  (VLESS-TLS, WS, Trojan, the IKEv2 name, the mirrors) fail from inside
+  on every server, these two included. REALITY, Shadowsocks, the relay
+  entries and the doors do not depend on it. A new zone is the owner's
+  decision.
+- The older relay route to the UK exit stalls on upload (the exit
+  address matches). Not caused by this work; a fix task is filed.
+- Real customer bytes: none on either server at 09:51Z,
+  20 minutes after the Trial edit, and no app report yet;
+  three customer devices had fetched their credentials for them.
+  The 24 h and 48 h readings, per operator, are still to come.
+- The website's location list: France and Sweden are prepared on a
+  branch and not deployed until the servers carry customer traffic and
+  the owner has seen it.
+- The app has no flag for Sweden: it shows a globe, lists the server and
+  connects. The flag, name and map light are on a branch for the next
+  client release.
+- The signed endpoint lists carry neither the two new servers' mirrors
+  nor germany-3's (the Mac re-sign is still pending).
+- For the owner: rename the two servers' dashboard labels, which carry
+  the brand. 26.10 is an interim release, not an LTS like the peers'.
+  The panel host's disk is 87 % full (5 GB free), mostly database dumps.
