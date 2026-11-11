@@ -288,6 +288,11 @@ function nx_flag_svg($code)
               . '<rect y=".667" width="3" height=".666" fill="#fff"/>'
               . '<rect y="1.333" width="3" height=".667" fill="#21468b"/>',
 
+        // Finland's cross in gold on blue, a little finer, as the flag has it.
+        'SE' => '<rect width="3" height="2" fill="#006aa7"/>'
+              . '<rect y=".8" width="3" height=".4" fill="#fecc00"/>'
+              . '<rect x=".94" width=".4" height="2" fill="#fecc00"/>',
+
         // The wheel is a ring and a hub: its spokes are a smudge at 30px.
         'IN' => '<rect width="3" height=".667" fill="#ff9933"/>'
               . '<rect y=".667" width="3" height=".666" fill="#fff"/>'

@@ -62,7 +62,7 @@ return array(
     // the product can least substantiate. This one leads with what it
     // actually is and what it actually carries.
     'meta.home.title' => 'Neoxify VPN for networks that block VPNs',
-    'meta.home.description' => 'A VPN app for Windows and Android that finds a way to connect on networks that block VPNs. Servers in Europe and Asia. Free trial, no config files.',
+    'meta.home.description' => 'A VPN app for Windows and Android that finds a way to connect on networks that block VPNs. Servers in Europe and Türkiye. Free trial, no config files.',
 
     'meta.download.title' => 'Download Neoxify VPN for Windows and Android',
     'meta.download.description' => 'Download the Neoxify VPN app for Windows or Android. The link always gets the latest version. There is no macOS or iOS app yet.',
@@ -503,7 +503,7 @@ return array(
     // -----------------------------------------------------------------
 
     'schema.org.description' => 'Neoxify is a paid VPN service for people on networks that block VPNs. Its apps have several ways to connect and pick one that works.',
-    'schema.product.description' => 'A VPN plan with several ways to connect, servers in Europe and Asia, and apps for Windows and Android.',
+    'schema.product.description' => 'A VPN plan with several ways to connect, servers in Europe and Türkiye, and apps for Windows and Android.',
     'schema.app.windows.name' => 'Neoxify for Windows',
     'schema.app.android.name' => 'Neoxify for Android',
     'schema.app.trial' => 'Free trial for new accounts. No payment details needed.',
@@ -635,7 +635,7 @@ return array(
     // =================================================================
 
     'meta.features.title' => 'Neoxify features | Staying connected, split tunnelling',
-    'meta.features.description' => 'The app has several ways to connect and picks one that works on your network. Choose which apps use the VPN. Servers in Europe and Asia.',
+    'meta.features.description' => 'The app has several ways to connect and picks one that works on your network. Choose which apps use the VPN. Servers in Europe and Türkiye.',
 
     'features.title' => 'What the app does',
     'features.subtitle' => 'Everything on this page works today. If a feature is only on some platforms, we say so.',
@@ -791,7 +791,7 @@ return array(
 
     'rail.tagline' => 'A VPN for filtered networks',
     'home.hero.chip_noconfig' => 'No config files or subscription links',
-    'home.hero.chip_locations' => 'Servers in Europe and Asia',
+    'home.hero.chip_locations' => 'Servers in Europe and Türkiye',
     'home.mockup.disconnect' => 'Disconnect',
     'home.mockup.note' => 'Illustration of the app. The time shown is an example.',
     'home.answers.eyebrow' => 'Fine print',

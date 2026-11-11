@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# fleet: add, retire, replace and inspect VPN servers, as a checklist.
+#
+#   fleet precheck <ip>                         is this empty box worth building on?
+#   fleet add <name> <ip> --region <r> [--dest <host:port>]
+#   fleet retire <name>
+#   fleet replace <old-name> <ip>
+#   fleet status [<name>]                       read-only
+#   fleet steps <precheck|add|retire|replace>   the checklist, ids and titles
+#   fleet dns <list|get|create-a|delete|...>    Cloudflare helper, output masked
+#
+# Options for every checklist:
+#   --dry-run            print every step and command, touch nothing
+#   --from <step>        start at that step (and run it again if it was done)
+#   --only <step>        run that one step
+#   --yes                do not ask before steps that change a live host
+#   --done <step>        the owner did that step (for runs with no terminal to wait at)
+#   --waive <step,...>   the owner decided to go on although that step did not pass;
+#                        written to the run log, and the run ends "complete EXCEPT" it
+#   --env <file>         the local address file (default ~/.neoxify/fleet.env)
+#   --run <dir>          continue that run directory; --new-run starts a fresh one
+# add / replace:
+#   --peer <name>        the server whose protocol set the new one must equal
+#   --relay-set <set>    which free entry set on the relay box to use
+#   --hop auto|yes|no    reach the new exit from the relay through the hop
+#   --plans "A,B"        only these plans (default: every plan)
+#   --no-relay, --no-plans
+#   --accept-held        the owner decided to build on a box the inside test holds
+#   --accept-blocked-zone, --accept-weak-dest
+# retire:
+#   --default-to <name>  where a plan's default route goes when it is on this server
+#
+# Run it from Git Bash on the operator's PC. Addresses, key paths and
+# names of ours come only from the local file (see fleet.env.example) or
+# from the database through the panel host; nothing address-like is in
+# this repository, and everything printed is masked.
+#
+# The human runbook is docs/runbooks/fleet.md.
+#
+# Most of what is set here is read by the files under lib/, and the
+# linter does not follow them; hence, for the whole file:
+# shellcheck disable=SC2034,SC1090,SC1091
+set -uo pipefail
+
+FLEET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$FLEET_DIR/../.." && pwd)"
+FLEET_HOME="${FLEET_HOME:-$HOME/.neoxify}"
+
+OPT_DRY=0 OPT_YES=0 OPT_NEW_RUN=0 OPT_FROM="" OPT_ONLY="" OPT_RUN="" OPT_ENV="" OPT_FLAGS="" OPT_DONE="" OPT_WAIVE=""
+OPT_PEER="" OPT_RELAY_SET="" OPT_HOP=auto OPT_PLANS="" OPT_NO_RELAY=0 OPT_NO_PLANS=0
+OPT_ACCEPT_HELD=0 OPT_ACCEPT_ZONE=0 OPT_ACCEPT_DEST=0 OPT_DEFAULT_TO="" OPT_NAME=""
+REGION="" DEST="" NAME="" OLD="" NEW_IP=""
+
+usage() {
+  sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit "${1:-2}"
+}
+
+CMD="${1:-}"
+[[ -n "$CMD" ]] || usage
+shift
+POS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) OPT_DRY=1 ;;
+    --yes) OPT_YES=1 ;;
+    --new-run) OPT_NEW_RUN=1 ;;
+    --no-relay) OPT_NO_RELAY=1 ;;
+    --no-plans) OPT_NO_PLANS=1 ;;
+    --accept-held) OPT_ACCEPT_HELD=1 ;;
+    --accept-blocked-zone) OPT_ACCEPT_ZONE=1 ;;
+    --accept-weak-dest) OPT_ACCEPT_DEST=1 ;;
+    --delete)
+      # Only `fleet dns sweep ... --delete` takes it: it goes on to the DNS helper.
+      [[ "$CMD" == dns ]] || { echo "fleet: unknown option $1" >&2; exit 2; }
+      POS+=("$1")
+      ;;
+    --from | --only | --done | --waive | --run | --env | --region | --dest | --peer | --relay-set | --hop | --plans | --default-to | --name)
+      [[ $# -ge 2 ]] || { echo "fleet: $1 needs a value" >&2; exit 2; }
+      case "$1" in
+        --from) OPT_FROM="$2" ;;
+        --only) OPT_ONLY="$2" ;;
+        --done) OPT_DONE="$2" ;;
+        --waive) OPT_WAIVE="${OPT_WAIVE:+$OPT_WAIVE,}$2" ;;
+        --run) OPT_RUN="$2" ;;
+        --env) OPT_ENV="$2" ;;
+        --region) REGION="$2" ;;
+        --dest) DEST="$2" ;;
+        --peer) OPT_PEER="$2" ;;
+        --relay-set) OPT_RELAY_SET="$2" ;;
+        --hop) OPT_HOP="$2" ;;
+        --plans) OPT_PLANS="$2" ;;
+        --default-to) OPT_DEFAULT_TO="$2" ;;
+        --name) OPT_NAME="$2" ;;
+      esac
+      # A waiver goes into the run log with what it waives.
+      case "$1" in --waive) OPT_FLAGS+="$1 $2 " ;; *) OPT_FLAGS+="$1 " ;; esac
+      shift
+      ;;
+    -h | --help) usage 0 ;;
+    --*) echo "fleet: unknown option $1" >&2; exit 2 ;;
+    *) POS+=("$1") ;;
+  esac
+  case "${1:-}" in --accept-* | --no-* | --yes) OPT_FLAGS+="$1 " ;; esac
+  shift
+done
+export OPT_DRY OPT_YES
+
+# shellcheck source=lib/engine.sh
+source "$FLEET_DIR/lib/engine.sh"
+
+name_ok() { [[ "$1" =~ ^[a-z]+(-[a-z]+)*-[0-9]+$ ]] || die "'$1' is not a server name (expected like country-3)"; }
+ip_ok() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "'$1' is not an IPv4 address"; }
+
+# ---------------------------------------------------------------- local file
+
+load_env() {
+  local f="${OPT_ENV:-${FLEET_ENV:-$FLEET_HOME/fleet.env}}" k
+  [[ -f "$f" ]] || die "no address file at $f. Copy scripts/fleet/fleet.env.example there and fill it in (it never goes into the repository)."
+  case "$(cd "$(dirname "$f")" && pwd)/" in
+    "$REPO_ROOT"/scripts/fleet/test/*) ;;
+    "$REPO_ROOT"/*) die "the address file is inside the repository ($f). Move it out: this repository is public." ;;
+  esac
+  # shellcheck disable=SC1090
+  source "$f"
+  for k in PANEL_HOST PANEL_KEY NODE_KEY INSIDE_KEY RELAY_HOST RELAY_NODE_NAME SIGNIN_HOST PANEL_ORIGIN_NAME PANEL_API_URL NODE_DNS_ZONE CF_ZONES CF_TOKEN_FILE; do
+    [[ -n "${!k:-}" ]] || die "$k is not set in $f"
+  done
+  for k in PANEL_KEY NODE_KEY INSIDE_KEY CF_TOKEN_FILE EXTRA_AUTHORIZED_KEY_FILE; do
+    [[ -n "${!k:-}" ]] && printf -v "$k" '%s' "${!k/#\~/$HOME}"
+  done
+  PANEL_GRPC_PORT="${PANEL_GRPC_PORT:-50051}"
+  XRAY_VERSION="${XRAY_VERSION:-v26.3.27}"
+  HOP_PORT_BASE="${HOP_PORT_BASE:-47131}"
+  [[ "$INSIDE_KEY" != "$NODE_KEY" ]] || die "INSIDE_KEY and NODE_KEY are the same key. The boxes inside the country get their own: a seized box's authorized_keys would otherwise identify every server."
+}
+
+# The names a step works on. For `replace` the new name is decided by the
+# first step and lives in the run's state, so steps ask for it here.
+nn() { if [[ -n "$NAME" ]]; then echo "$NAME"; else state_get name; fi; }
+st() { state_get "$@"; }
+
+load_checklists() {
+  source "$FLEET_DIR/lib/remote.sh"
+  source "$FLEET_DIR/lib/checklist-precheck.sh"
+  source "$FLEET_DIR/lib/checklist-add.sh"
+  source "$FLEET_DIR/lib/checklist-retire.sh"
+  source "$FLEET_DIR/lib/checklist-replace.sh"
+  source "$FLEET_DIR/lib/checklist-status.sh"
+}
+
+# A run ends as complete only when every step of it passed, or was
+# waived on the record (lib/engine.sh conclude_run). --only is one step
+# and concludes nothing.
+run_and_finish() {
+  build_mask
+  run_checklist || return 1
+  if [[ -n "$OPT_ONLY" ]] || dry; then return 0; fi
+  conclude_run || return 1
+  echo "Run log: $RUN_DIR/run.log"
+}
+
+case "$CMD" in
+  steps)
+    what="${POS[0]:-}"
+    OPT_DRY=1 NEW_IP=203.0.113.1 NAME=example-1 OLD=example-0
+    PANEL_HOST="" RELAY_HOST="" SIGNIN_HOST="" RELAY_NODE_NAME=relay NODE_DNS_ZONE="" CF_ZONES=""
+    load_checklists
+    case "$what" in
+      precheck) checklist_precheck ;;
+      add) checklist_add ;;
+      retire) checklist_retire ;;
+      replace) checklist_replace ;;
+      *) die "steps of what? precheck, add, retire or replace" ;;
+    esac
+    list_steps
+    ;;
+
+  precheck)
+    [[ ${#POS[@]} -eq 1 ]] || usage
+    NEW_IP="${POS[0]}"
+    ip_ok "$NEW_IP"
+    NAME="candidate-0"
+    load_env
+    load_checklists
+    checklist_precheck
+    open_run precheck "$(tr . - <<<"$NEW_IP")"
+    run_and_finish
+    ;;
+
+  add)
+    [[ ${#POS[@]} -eq 2 ]] || usage
+    NAME="${POS[0]}" NEW_IP="${POS[1]}"
+    name_ok "$NAME"
+    ip_ok "$NEW_IP"
+    [[ -n "$REGION" ]] || die "add needs --region (like de-germany; it must match the form its peers use)"
+    load_env
+    load_checklists
+    checklist_add
+    open_run add "$NAME"
+    run_and_finish
+    ;;
+
+  retire)
+    [[ ${#POS[@]} -eq 1 ]] || usage
+    OLD="${POS[0]}"
+    name_ok "$OLD"
+    load_env
+    load_checklists
+    checklist_retire
+    open_run retire "$OLD"
+    run_and_finish
+    ;;
+
+  replace)
+    [[ ${#POS[@]} -eq 2 ]] || usage
+    OLD="${POS[0]}" NEW_IP="${POS[1]}" NAME="$OPT_NAME"
+    name_ok "$OLD"
+    ip_ok "$NEW_IP"
+    [[ -z "$NAME" ]] || name_ok "$NAME"
+    load_env
+    load_checklists
+    checklist_replace
+    open_run replace "$OLD"
+    run_and_finish
+    ;;
+
+  status)
+    load_env
+    load_checklists
+    RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fleet-status.XXXXXX")"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$RUN_DIR'" EXIT
+    build_mask
+    fleet_status "${POS[0]:-}" 2>&1 | mask
+    exit "${PIPESTATUS[0]}"
+    ;;
+
+  dns)
+    load_env
+    build_mask
+    if dry; then
+      # Like every other command under --dry-run: say what would be
+      # asked of Cloudflare, and ask nothing.
+      echo "cloudflare ${POS[*]}" | mask
+      exit 0
+    fi
+    CF_TOKEN_FILE="$CF_TOKEN_FILE" node "$FLEET_DIR/lib/cf.mjs" "${POS[@]}" 2>&1 | mask
+    exit "${PIPESTATUS[0]}"
+    ;;
+
+  -h | --help | help) usage 0 ;;
+  *) usage ;;
+esac
