@@ -8,10 +8,26 @@ name: neoxify
 #
 # Run from the repo root: docker compose -f infra/docker-compose.prod.yml --env-file infra/.env up -d
 
+# Container logs, capped. Docker's json-file driver keeps every line forever
+# by default. Each service rotates its own: at most max-size x max-file on
+# disk, about 0.5 GB for the whole stack. A change here recreates the
+# container at the next `up -d`.
+x-logs-small: &logs-small
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+x-logs-medium: &logs-medium
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *logs-medium
     environment:
       POSTGRES_USER: neoxify
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
@@ -27,6 +43,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *logs-small
     volumes:
       - redis-data:/data
     healthcheck:
@@ -40,6 +57,12 @@ services:
       context: ..
       dockerfile: apps/backend/Dockerfile
     restart: unless-stopped
+    # The busiest log, and the one read after an incident: more of it kept.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     depends_on:
       postgres:
         condition: service_healthy
@@ -230,6 +253,7 @@ services:
       context: ..
       dockerfile: apps/panel/Dockerfile
     restart: unless-stopped
+    logging: *logs-medium
     depends_on:
       - backend
     environment:
@@ -249,6 +273,7 @@ services:
       context: ..
       dockerfile: apps/discord-bot/Dockerfile
     restart: unless-stopped
+    logging: *logs-small
     depends_on:
       - backend
     environment:
