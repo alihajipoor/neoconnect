@@ -1,9 +1,11 @@
 "use client";
 
-import { useTransition } from "react";
+import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import { sendAnnouncementAction } from "./actions";
-import type { Route, SubscriptionPlan, SubscriptionStatus } from "@/lib/types";
+import type { Node, ProtocolConfig, Route, SubscriptionPlan, SubscriptionStatus } from "@/lib/types";
+import { isRetiredRoute, routeServers } from "@/lib/retired";
+import { RetiredSwitch } from "@/components/dashboard/retired-switch";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -13,8 +15,24 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 const STATUSES: SubscriptionStatus[] = ["ACTIVE", "SUSPENDED", "EXPIRED", "CANCELLED"];
 
-export function AnnouncementForm({ plans, routes }: { plans: SubscriptionPlan[]; routes: Route[] }) {
+export function AnnouncementForm({
+  plans,
+  routes,
+  protocolConfigs,
+  nodes,
+}: {
+  plans: SubscriptionPlan[];
+  routes: Route[];
+  protocolConfigs: ProtocolConfig[];
+  nodes: Node[];
+}) {
   const [pending, startTransition] = useTransition();
+  // Retired servers' routes are hidden with CSS, not removed, so a box
+  // ticked before hiding them is still sent.
+  const [showRetired, setShowRetired] = useState(false);
+  const retiredIds = new Set(
+    routes.filter((r) => isRetiredRoute(routeServers(r, protocolConfigs, nodes))).map((r) => r.id),
+  );
 
   function handleSubmit(formData: FormData) {
     const subject = String(formData.get("subject") ?? "").trim();
@@ -93,9 +111,20 @@ export function AnnouncementForm({ plans, routes }: { plans: SubscriptionPlan[];
           {routes.length > 0 && (
             <fieldset className="flex flex-col gap-2">
               <legend className="text-sm font-medium">Route / server</legend>
+              <RetiredSwitch
+                count={retiredIds.size}
+                noun="servers' routes"
+                checked={showRetired}
+                onCheckedChange={setShowRetired}
+              />
               <div className="flex flex-wrap gap-4">
                 {routes.map((route) => (
-                  <label key={route.id} className="flex items-center gap-2 text-sm">
+                  <label
+                    key={route.id}
+                    className={
+                      retiredIds.has(route.id) && !showRetired ? "hidden" : "flex items-center gap-2 text-sm"
+                    }
+                  >
                     <Checkbox name="routeIds" value={route.id} />
                     {route.name}
                   </label>

@@ -5,6 +5,8 @@ import { toast } from "sonner";
 import { createRoute } from "./actions";
 import type { Node, ProtocolConfig } from "@/lib/types";
 import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
+import { retiredNodeIds } from "@/lib/retired";
+import { RetiredSwitch } from "@/components/dashboard/retired-switch";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -41,6 +43,10 @@ export function RouteFormDialog({
   const [name, setName] = useState("");
 
   const nodeById = (id: string) => nodes.find((n) => n.id === id);
+  // Retired servers are left out of both pickers unless asked for.
+  const [showRetired, setShowRetired] = useState(false);
+  const retired = retiredNodeIds(nodes);
+  const pickable = showRetired ? protocolConfigs : protocolConfigs.filter((pc) => !retired.has(pc.nodeId));
   const label = (pc: ProtocolConfig) => {
     const node = nodeById(pc.nodeId);
     return `${node?.name ?? pc.nodeId} — ${PROTOCOL_LABELS[pc.protocol]} — :${pc.listenPort}`;
@@ -53,7 +59,7 @@ export function RouteFormDialog({
   // always empty and relay routes could only be made through the API.
   // Client-side filtering here is just a usability nicety; the backend
   // re-validates this regardless.
-  const exitCandidates = protocolConfigs.filter((pc) => {
+  const exitCandidates = pickable.filter((pc) => {
     const role = nodeById(pc.nodeId)?.role;
     return pc.protocol === "XRAY_VLESS_REALITY" && role !== undefined && role !== "RELAY";
   });
@@ -126,6 +132,7 @@ export function RouteFormDialog({
               Shown to customers in the app&apos;s location picker.
             </p>
           </div>
+          <RetiredSwitch count={retired.size} checked={showRetired} onCheckedChange={setShowRetired} />
           <div className="flex flex-col gap-2">
             <Label htmlFor="entryProtocolConfigId">Entry (client-facing)</Label>
             <Select
@@ -147,7 +154,7 @@ export function RouteFormDialog({
                 <SelectValue placeholder="Select a protocol config" />
               </SelectTrigger>
               <SelectContent>
-                {protocolConfigs.map((pc) => (
+                {pickable.map((pc) => (
                   <SelectItem key={pc.id} value={pc.id}>
                     {label(pc)}
                   </SelectItem>

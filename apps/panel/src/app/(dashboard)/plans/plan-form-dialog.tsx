@@ -3,8 +3,9 @@
 import { useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 import { createPlan, updatePlan } from "./actions";
-import type { Protocol, Route, SubscriptionPlan } from "@/lib/types";
-import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
+import type { Node, Protocol, ProtocolConfig, Route, SubscriptionPlan } from "@/lib/types";
+import { isRetiredRoute, routeServers } from "@/lib/retired";
+import { RoutePicker } from "./route-picker";
 import { formatBytes, parseBytesInput } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,10 +26,14 @@ const NO_DEFAULT_ROUTE = "none";
 export function PlanFormDialog({
   plan,
   routes,
+  protocolConfigs,
+  nodes,
   trigger,
 }: {
   plan?: SubscriptionPlan;
   routes: Route[];
+  protocolConfigs: ProtocolConfig[];
+  nodes: Node[];
   trigger: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -54,10 +59,22 @@ export function PlanFormDialog({
   // Every route is offered on every plan, relay or direct. The plan is
   // whatever an operator ticked and nothing else -- there is no longer a
   // relay/direct rule deciding what may appear here.
-  const [selectedRoutes, setSelectedRoutes] = useState<string[]>(
-    plan?.allowedRoutes.map((r) => r.id) ?? [],
+  const [selectedRoutes, setSelectedRoutes] = useState<Set<string>>(
+    () => new Set(plan?.allowedRoutes.map((r) => r.id) ?? []),
   );
-  const eligibleRoutes = routes;
+  // Closing without saving throws the edits away, so the next opening
+  // starts from what the plan really has.
+  const onOpenChange = (next: boolean) => {
+    if (next) setSelectedRoutes(new Set(plan?.allowedRoutes.map((r) => r.id) ?? []));
+    setOpen(next);
+  };
+  // The default-route list leaves retired servers out, but keeps the
+  // plan's current default whatever it is, marked, so it is not changed
+  // by opening and saving.
+  const defaultRouteChoices = routes.filter(
+    (route) =>
+      route.id === plan?.defaultRouteId || !isRetiredRoute(routeServers(route, protocolConfigs, nodes)),
+  );
 
   function handleSubmit(formData: FormData) {
     // Null, not a very large number. An unlimited plan and a plan with
@@ -96,7 +113,9 @@ export function PlanFormDialog({
         // clears a restriction back to "every eligible route". Omitting
         // it would mean "leave unchanged", so an admin unticking the
         // last box would see nothing happen.
-        allowedRouteIds: formData.getAll("allowedRouteIds") as string[],
+        // From state, not from the form: rows in a collapsed group or
+        // hidden by the filter are not rendered, and must not be lost.
+        allowedRouteIds: [...selectedRoutes],
       };
 
       const result = isEdit ? await updatePlan(plan!.id, input) : await createPlan(input);
@@ -111,9 +130,9 @@ export function PlanFormDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogTrigger asChild>{trigger}</DialogTrigger>
-      <DialogContent>
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{isEdit ? "Edit plan" : "New plan"}</DialogTitle>
         </DialogHeader>
@@ -228,34 +247,17 @@ export function PlanFormDialog({
           <div className="flex flex-col gap-2">
             <Label>Routes</Label>
             <p className="text-xs text-muted-foreground">
-              {selectedRoutes.length === 0
+              {selectedRoutes.size === 0
                 ? "None selected -- this plan serves nothing. Tick the routes customers on it should get."
-                : `Served by ${selectedRoutes.length} route${selectedRoutes.length === 1 ? "" : "s"}. Routes added later won't be included until you tick them here.`}
+                : `Served by ${selectedRoutes.size} route${selectedRoutes.size === 1 ? "" : "s"}. Routes added later won't be included until you tick them here.`}
             </p>
-            <div className="flex flex-col gap-2">
-              {eligibleRoutes.length === 0 ? (
-                <p className="text-xs text-muted-foreground">No routes exist yet.</p>
-              ) : (
-                eligibleRoutes.map((route) => (
-                  <label key={route.id} className="flex items-center gap-2 text-sm">
-                    <Checkbox
-                      name="allowedRouteIds"
-                      value={route.id}
-                      defaultChecked={plan?.allowedRoutes.some((r) => r.id === route.id)}
-                      onCheckedChange={(checked) =>
-                        setSelectedRoutes((current) =>
-                          checked ? [...current, route.id] : current.filter((id) => id !== route.id),
-                        )
-                      }
-                    />
-                    <span>{route.name}</span>
-                    {!route.isEnabled ? (
-                      <span className="text-xs text-muted-foreground">(disabled)</span>
-                    ) : null}
-                  </label>
-                ))
-              )}
-            </div>
+            <RoutePicker
+              routes={routes}
+              protocolConfigs={protocolConfigs}
+              nodes={nodes}
+              selected={selectedRoutes}
+              onChange={setSelectedRoutes}
+            />
           </div>
           <div className="flex flex-col gap-2">
             <Label htmlFor="defaultRouteId">Default route (for purchases)</Label>
@@ -265,9 +267,10 @@ export function PlanFormDialog({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={NO_DEFAULT_ROUTE}>None -- no preferred first server</SelectItem>
-                {routes.map((route) => (
+                {defaultRouteChoices.map((route) => (
                   <SelectItem key={route.id} value={route.id}>
                     {route.name}
+                    {isRetiredRoute(routeServers(route, protocolConfigs, nodes)) ? " (retired server)" : ""}
                   </SelectItem>
                 ))}
               </SelectContent>

@@ -1,8 +1,8 @@
 import { redirect } from "next/navigation";
 import { apiFetch } from "@/lib/api";
 import { getSession } from "@/lib/session";
-import { fetchRoutes } from "@/lib/infra";
-import type { SubscriptionPlan } from "@/lib/types";
+import { fetchProtocolConfigs, fetchRoutes } from "@/lib/infra";
+import type { Node, SubscriptionPlan } from "@/lib/types";
 import { AnnouncementForm } from "./announcement-form";
 
 // SUPERADMIN-only, same gating as the backend's POST /announcements/send
@@ -12,9 +12,11 @@ export default async function AnnouncementsPage() {
   const session = await getSession();
   if (session?.role !== "SUPERADMIN") redirect("/overview");
 
-  const [plans, routes] = await Promise.all([
+  const [plans, routes, protocolConfigs, nodes] = await Promise.all([
     apiFetch<SubscriptionPlan[]>("/plans"),
     fetchRoutes(),
+    fetchProtocolConfigs(),
+    apiFetch<Node[]>("/nodes"),
   ]);
 
   return (
@@ -26,7 +28,7 @@ export default async function AnnouncementsPage() {
           empty to reach every subscriber, regardless of status.
         </p>
       </div>
-      <AnnouncementForm plans={plans} routes={routes} />
+      <AnnouncementForm plans={plans} routes={routes} protocolConfigs={protocolConfigs} nodes={nodes} />
     </div>
   );
 }

@@ -18,6 +18,8 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { isRetiredNode } from "@/lib/retired";
+import { RetiredSwitch } from "@/components/dashboard/retired-switch";
 
 export function ResolverFormDialog({
   resolver,
@@ -30,6 +32,7 @@ export function ResolverFormDialog({
 }) {
   const [open, setOpen] = useState(false);
   const [pending, startTransition] = useTransition();
+  const [showRetired, setShowRetired] = useState(false);
   const isEdit = Boolean(resolver);
 
   function handleSubmit(formData: FormData) {
@@ -102,13 +105,22 @@ export function ResolverFormDialog({
                 <SelectValue placeholder="Select a node" />
               </SelectTrigger>
               <SelectContent>
-                {nodes.map((node) => (
-                  <SelectItem key={node.id} value={node.id}>
-                    {node.name} ({node.region})
-                  </SelectItem>
-                ))}
+                {/* The resolver's own node stays listed even if retired,
+                    so opening and saving never changes it. */}
+                {nodes
+                  .filter((node) => showRetired || !isRetiredNode(node) || node.id === resolver?.nodeId)
+                  .map((node) => (
+                    <SelectItem key={node.id} value={node.id}>
+                      {node.name} ({node.region}){isRetiredNode(node) ? " -- retired" : ""}
+                    </SelectItem>
+                  ))}
               </SelectContent>
             </Select>
+            <RetiredSwitch
+              count={nodes.filter(isRetiredNode).length}
+              checked={showRetired}
+              onCheckedChange={setShowRetired}
+            />
           </div>
 
           <div className="grid grid-cols-[1fr_7rem] gap-4">

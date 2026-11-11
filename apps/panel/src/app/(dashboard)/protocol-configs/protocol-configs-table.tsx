@@ -1,9 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import { MoreHorizontal, Plus } from "lucide-react";
 import type { Node, ProtocolConfig } from "@/lib/types";
 import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
 import { defaultInboundTag } from "@/lib/inbound-tags";
+import { retiredNodeIds } from "@/lib/retired";
+import { RetiredSwitch } from "@/components/dashboard/retired-switch";
 import { deleteProtocolConfig } from "./actions";
 import { ProtocolConfigFormDialog } from "./protocol-config-form-dialog";
 import { ProtocolConfigEditDialog } from "./protocol-config-edit-dialog";
@@ -28,6 +31,11 @@ export function ProtocolConfigsTable({
   canManage: boolean;
 }) {
   const nodeName = (nodeId: string) => nodes.find((n) => n.id === nodeId)?.name ?? nodeId;
+  // Configs on retired servers are hidden unless asked for.
+  const [showRetired, setShowRetired] = useState(false);
+  const retired = retiredNodeIds(nodes);
+  const retiredCount = protocolConfigs.filter((pc) => retired.has(pc.nodeId)).length;
+  const shown = showRetired ? protocolConfigs : protocolConfigs.filter((pc) => !retired.has(pc.nodeId));
 
   return (
     <div className="flex flex-col gap-4">
@@ -35,6 +43,14 @@ export function ProtocolConfigsTable({
         <div>
           <h1 className="text-xl font-semibold">Protocol Configs</h1>
           <p className="text-sm text-muted-foreground">VPN protocol engines registered on each node.</p>
+          <div className="mt-2">
+            <RetiredSwitch
+              count={retiredCount}
+              noun="servers' configs"
+              checked={showRetired}
+              onCheckedChange={setShowRetired}
+            />
+          </div>
         </div>
         {canManage && (
           <ProtocolConfigFormDialog
@@ -65,16 +81,21 @@ export function ProtocolConfigsTable({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {protocolConfigs.length === 0 ? (
+            {shown.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={6} className="py-8 text-center text-muted-foreground">
                   No protocol configs yet.
                 </TableCell>
               </TableRow>
             ) : (
-              protocolConfigs.map((pc) => (
-                <TableRow key={pc.id}>
-                  <TableCell className="font-medium">{nodeName(pc.nodeId)}</TableCell>
+              shown.map((pc) => (
+                <TableRow key={pc.id} className={retired.has(pc.nodeId) ? "opacity-60" : undefined}>
+                  <TableCell className="font-medium">
+                    {nodeName(pc.nodeId)}
+                    {retired.has(pc.nodeId) ? (
+                      <span className="ml-2 text-xs font-normal text-warning">retired</span>
+                    ) : null}
+                  </TableCell>
                   <TableCell>{PROTOCOL_LABELS[pc.protocol]}</TableCell>
                   <TableCell className="font-mono text-xs">{pc.listenPort}</TableCell>
                   <TableCell className="font-mono text-xs">

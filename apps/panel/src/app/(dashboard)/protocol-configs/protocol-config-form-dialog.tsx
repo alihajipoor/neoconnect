@@ -20,6 +20,8 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { isRetiredNode } from "@/lib/retired";
+import { RetiredSwitch } from "@/components/dashboard/retired-switch";
 
 // Create-only; editing an existing config lives in
 // ProtocolConfigEditDialog, which deliberately can't change node or
@@ -29,6 +31,10 @@ export function ProtocolConfigFormDialog({ nodes, trigger }: { nodes: Node[]; tr
   const [pending, startTransition] = useTransition();
   const [protocol, setProtocol] = useState<Protocol>("XRAY_VLESS_REALITY");
   const [listenPort, setListenPort] = useState(DEFAULT_PROTOCOL_PORT.XRAY_VLESS_REALITY);
+  // Retired servers are left out of the node list unless asked for.
+  const [showRetired, setShowRetired] = useState(false);
+  const retiredCount = nodes.filter(isRetiredNode).length;
+  const pickable = showRetired ? nodes : nodes.filter((n) => !isRetiredNode(n));
 
   function handleSubmit(formData: FormData) {
     const rawParams = String(formData.get("publicParamsJson") ?? "").trim();
@@ -80,13 +86,14 @@ export function ProtocolConfigFormDialog({ nodes, trigger }: { nodes: Node[]; tr
                 <SelectValue placeholder="Select a node" />
               </SelectTrigger>
               <SelectContent>
-                {nodes.map((node) => (
+                {pickable.map((node) => (
                   <SelectItem key={node.id} value={node.id}>
                     {node.name} ({node.region})
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
+            <RetiredSwitch count={retiredCount} checked={showRetired} onCheckedChange={setShowRetired} />
           </div>
           <div className="flex flex-col gap-2">
             <Label htmlFor="protocol">Protocol</Label>
