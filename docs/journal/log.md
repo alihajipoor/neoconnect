@@ -9065,6 +9065,14 @@ address for a second trial, Trial allows more devices than paid Starter,
 and a backup-route account that later confirms its email also gets a
 trial.
 
+**Applied at 22:22 UTC, on the owner's word.** He asked for it in his
+own words ("it should give out the trial"). `PATCH /free-trial-settings`
+set `trialPlanId` from Starter to Trial (read back by GET and from the
+database; the save also cleared the unused `trialRouteId`). New accounts
+now get Trial: 50 GB, 30 days, 2 devices, instead of Starter's no cap,
+30 days, 1 device. Existing accounts are unchanged. No sign-up had
+happened by the time of writing, so the first real one is **unverified**.
+
 **The two inactive plans the owner asked about.** Internal test has 0
 subscribers and is where new servers are tried first (the canary rule).
 Ultimate Max has 1 active subscriber, so the panel will not delete it
