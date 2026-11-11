@@ -59,9 +59,20 @@ added to (`ON CONFLICT ... DO UPDATE` with `+`), never overwritten,
 because one hour can be filled by more than one batch.
 
 Each batch sets `lock_timeout = 2s` and `statement_timeout = 120s` and
-takes a transaction-level advisory lock, so two runs never work at the
-same time. If a batch cannot get a lock in time, that node is left for
-the next run and the run moves on.
+takes a transaction-level advisory lock. That lock is released at every
+commit, so it keeps two runs from running a batch at the same instant,
+not from taking turns between batches (a nightly run and a run by hand,
+say). That does no harm: each batch is one statement over rows it has
+locked, so no row is counted by both. Rows another transaction holds,
+such as a credential being deleted, are skipped rather than waited on
+(`FOR UPDATE SKIP LOCKED`) and go in a later batch, so a customer-facing
+change is never the one Postgres aborts. If a batch cannot get a lock in
+time, that node is left for the next run and the run moves on.
+
+A run first compares the backend's clock with the database's `now()`
+and refuses, changing nothing, if they differ by more than five
+minutes. Every cutoff comes from the backend's clock, and one running
+ahead would delete detail early.
 
 ## The first run, by hand
 
@@ -124,7 +135,12 @@ was deleted during the run. Stop and look before anything else runs.
 
 ### 4. Plain VACUUM
 
-This takes no exclusive lock. Run it once the delete is done:
+This takes no exclusive lock. Run it once the delete is done. It does
+not make `usage_records` itself smaller on disk: the deleted rows are
+the oldest, at the front of the file, so their space is marked free and
+reused by new rows. `df` shows only what the REINDEXes of step 5 free.
+An unchanged table size here is expected, not a failure, and is never a
+reason for `VACUUM FULL`.
 
 ```sh
 docker exec -i neoxify-postgres-1 sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
@@ -153,8 +169,12 @@ Then do the same with each of these:
 - `"agent_commands_nodeId_status_idx"`
 
 If one fails (a lock timeout, a cancel, or not enough disk), Postgres
-leaves an invalid index named `<name>_ccnew`. Drop it with
-`DROP INDEX CONCURRENTLY "<name>_ccnew";` and run the REINDEX again.
+leaves an invalid index behind: `<name>_ccnew` (or `_ccnew1` and so on
+after repeated failures), or `<name>_ccold` if it failed after the swap.
+Run the index query of step 6. Drop every index it shows with
+`indisvalid = false`, one at a time, with
+`DROP INDEX CONCURRENTLY "<that name>";`, then run the REINDEX again if
+the original index is not valid.
 
 ### 6. Check the result
 
@@ -177,6 +197,11 @@ so). The old commands left are QUEUED or SENT only. Run the dry run once
 more: it should find nothing to do. In the panel, open a customer who
 has been idle for more than 35 days: their last-seen time should be the
 same as before the run.
+
+One ranking changes, by design: when a customer is over their device
+limit, a device idle for more than 35 days is ranked by its last use
+only (`lastUsedAt`), since its traffic rows are rolled up. Only stale
+devices are affected, and the 30-day idle sweep removes those anyway.
 
 ### 7. Turn the nightly run on
 

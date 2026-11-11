@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { DEFAULT_TUNING } from "../block-watch/block-signals";
-import { floorToHour, pruneCommands, rollUpUsage, usageCutoff, USAGE_KEEP_DAYS } from "./retention";
+import { assertClock, floorToHour, pruneCommands, rollUpUsage, usageCutoff, USAGE_KEEP_DAYS } from "./retention";
 import { lastUpstreamAt, upstreamGroups } from "./usage-reads";
 
 /** The retention's SQL against a real, migrated Postgres: the DELETE ...
@@ -205,5 +205,36 @@ const MIN = 60_000;
 
     const again = await pruneCommands(prisma, { cutoff: commandCut, nodeIds: [ids.node], pauseMs: 0 });
     expect(again.total).toBe(0);
+  });
+
+  it("skips a row another transaction holds instead of waiting on it", async () => {
+    const held = await prisma.usageRecord.create({ data: usage(ids.node, ids.sub, C - 5 * HOUR, 4n, 4n), select: { id: true } });
+    await prisma.usageRecord.create({ data: usage(ids.node, ids.sub, C - 5 * HOUR + MIN, 6n, 6n) });
+    const started = Date.now();
+    const during = await prisma.$transaction(
+      async (tx) => {
+        // What a credential's delete does to its old rows (ON DELETE SET NULL).
+        await tx.$executeRaw`UPDATE "usage_records" SET "protocolUserId" = NULL WHERE "id" = ${held.id}`;
+        return rollUpUsage(prisma, { cutoff, nodeIds: [ids.node], pauseMs: 0, skipTotals: true });
+      },
+      { timeout: 30_000 },
+    );
+    expect(during.rows).toBe(1);
+    expect(during.nodes[0].stopped).toBeUndefined();
+    // No lock wait: lock_timeout is 2 s.
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(await prisma.usageRecord.count({ where: { id: held.id } })).toBe(1);
+
+    const after = await rollUpUsage(prisma, { cutoff, nodeIds: [ids.node], pauseMs: 0 });
+    expect(after.rows).toBe(1);
+    expect(after.totals?.equal).toBe(true);
+    const hour = await prisma.usageHourly.findFirst({ where: { nodeId: ids.node, subscriptionId: ids.sub, hourStart: new Date(C - 5 * HOUR) } });
+    expect(hour).toMatchObject({ bytesUp: 10n, bytesDown: 10n, records: 2 });
+  });
+
+  it("refuses to run when the clock is far from the database's", async () => {
+    await expect(assertClock(prisma, new Date())).resolves.toBeUndefined();
+    await expect(assertClock(prisma, new Date(Date.now() + 10 * MIN))).rejects.toThrow(/nothing done/);
+    await expect(assertClock(prisma, new Date(Date.now() - 10 * MIN))).rejects.toThrow(/nothing done/);
   });
 });

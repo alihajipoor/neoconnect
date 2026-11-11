@@ -2,7 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../../prisma/prisma.service";
 import { parseTuning } from "../block-watch/block-signals";
-import { commandCutoff, pruneCommands, rollUpUsage, usageCutoff, type CommandRunResult, type UsageRunResult } from "./retention";
+import { assertClock, commandCutoff, pruneCommands, rollUpUsage, usageCutoff, type CommandRunResult, type UsageRunResult } from "./retention";
 
 /** DATA_RETENTION: off (the default) | dry | on.
  *
@@ -56,6 +56,7 @@ export class DataRetentionService {
 
   async run({ dryRun, now = new Date() }: { dryRun: boolean; now?: Date }): Promise<RetentionRun> {
     const { tuning } = parseTuning(this.config.get<string>("blockWatch.tuning"));
+    await assertClock(this.prisma, now);
     const usage = await usageCutoff(this.prisma, now, tuning);
     const log = (m: string) => this.logger.log(m);
     const usageResult = await rollUpUsage(this.prisma, { cutoff: usage.cutoff, dryRun, log });

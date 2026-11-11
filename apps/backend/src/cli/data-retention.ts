@@ -12,6 +12,7 @@
 import { PrismaClient } from "@prisma/client";
 import { parseTuning } from "../modules/block-watch/block-signals";
 import {
+  assertClock,
   commandCutoff,
   pruneCommands,
   rollUpUsage,
@@ -64,6 +65,7 @@ async function main() {
   let code = 0;
   try {
     const now = new Date();
+    await assertClock(prisma, now);
     const nodes = await prisma.node.findMany({ select: { id: true, name: true } });
     const nameOf = new Map(nodes.map((n) => [n.id, n.name]));
     let nodeIds: string[] | undefined;

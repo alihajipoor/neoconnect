@@ -6,7 +6,9 @@ import {
   COMMAND_KEEP_DAYS,
   FINISHED_COMMAND_STATUSES,
   PENDING_COMMAND_STATUSES,
+  MAX_CLOCK_SKEW_MS,
   USAGE_KEEP_DAYS,
+  assertClock,
   commandBatchSql,
   commandCutoff,
   floorToHour,
@@ -105,6 +107,10 @@ describe("which commands are finished", () => {
     expect(sql.values).not.toContain("QUEUED");
     expect(sql.values).not.toContain("SENT");
   });
+
+  it("skips commands another transaction holds", () => {
+    expect(commandBatchSql("node-1", NOW, 10).strings.join("?")).toMatch(/LIMIT \?\s+FOR UPDATE SKIP LOCKED\s+\)/);
+  });
 });
 
 describe("the roll-up statement", () => {
@@ -114,6 +120,30 @@ describe("the roll-up statement", () => {
     expect(text).toContain(`"bytesUp" = "usage_hourly"."bytesUp" + EXCLUDED."bytesUp"`);
     expect(text).toContain(`MAX("reportedAt") FILTER (WHERE "bytesUp" > 0)`);
     expect(text).toContain(`date_trunc('hour', "reportedAt")`);
+  });
+
+  it("skips rows another transaction holds, so a credential's delete never deadlocks with it", () => {
+    const text = rollUpBatchSql("node-1", NOW, 10).strings.join("?");
+    expect(text).toMatch(/WITH doomed AS \([\s\S]*LIMIT \?\s+FOR UPDATE SKIP LOCKED\s+\), gone AS/);
+  });
+});
+
+describe("the clock check", () => {
+  const prismaAt = (db: unknown) => ({ $queryRaw: jest.fn().mockResolvedValue(db === undefined ? [] : [{ now: db }]) }) as never;
+
+  it("passes within the allowed skew either way", async () => {
+    await expect(assertClock(prismaAt(new Date(NOW.getTime() + MAX_CLOCK_SKEW_MS)), NOW)).resolves.toBeUndefined();
+    await expect(assertClock(prismaAt(new Date(NOW.getTime() - MAX_CLOCK_SKEW_MS)), NOW)).resolves.toBeUndefined();
+  });
+
+  it("refuses when the backend clock runs ahead or behind the database", async () => {
+    await expect(assertClock(prismaAt(new Date(NOW.getTime() - MAX_CLOCK_SKEW_MS - 1)), NOW)).rejects.toThrow(/nothing done/);
+    await expect(assertClock(prismaAt(new Date(NOW.getTime() + 3_600_000)), NOW)).rejects.toThrow(/nothing done/);
+  });
+
+  it("refuses when the database clock cannot be read", async () => {
+    await expect(assertClock(prismaAt(undefined), NOW)).rejects.toThrow(/could not read/);
+    await expect(assertClock(prismaAt("2026-11-11"), NOW)).rejects.toThrow(/could not read/);
   });
 });
 

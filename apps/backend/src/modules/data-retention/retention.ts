@@ -114,6 +114,24 @@ export async function usageCutoff(prisma: PrismaClient, now: Date, tuning: Block
   return { cutoff: new Date(floorToHour(t - top.ms)), keepMs: top.ms, reason: top.reader };
 }
 
+/** How far the backend's clock may be from the database's before a run
+ * refuses. Every cutoff is taken from the backend's clock, and a clock
+ * running ahead would delete detail early, which cannot be undone. */
+export const MAX_CLOCK_SKEW_MS = 5 * 60_000;
+
+/** Throws unless `now` is within MAX_CLOCK_SKEW_MS of Postgres's now(). */
+export async function assertClock(prisma: PrismaClient, now: Date): Promise<void> {
+  const [row] = await prisma.$queryRaw<{ now: Date }[]>(Prisma.sql`SELECT now() AS "now"`);
+  const db = row?.now instanceof Date ? row.now.getTime() : Number.NaN;
+  if (!Number.isFinite(db)) throw new Error("data retention: could not read the database clock; nothing done");
+  const skew = Math.abs(now.getTime() - db);
+  if (skew > MAX_CLOCK_SKEW_MS) {
+    throw new Error(
+      `data retention: the clock is ${Math.round(skew / 1000)} s from the database's; nothing done`,
+    );
+  }
+}
+
 export function commandCutoff(now: Date): Date {
   return new Date(now.getTime() - COMMAND_KEEP_DAYS * DAY_MS);
 }
@@ -169,7 +187,10 @@ const cutoffSql = (cutoff: Date) => Prisma.sql`(${cutoff.toISOString()}::timesta
  * in usage_records, not yet counted, or deleted and counted by the same
  * statement -- so a run stopped anywhere, or run twice, can neither lose
  * a row nor count one twice. The ON CONFLICT adds rather than replaces
- * because an hour can be filled by more than one batch. */
+ * because an hour can be filled by more than one batch. Rows another
+ * transaction holds (a credential's delete setting protocolUserId to
+ * NULL) are skipped, not waited on, so the two never deadlock and a
+ * customer's revoke is never the one aborted; they go in a later batch. */
 export function rollUpBatchSql(nodeId: string, cutoff: Date, batch: number): Prisma.Sql {
   return Prisma.sql`
     WITH doomed AS (
@@ -177,6 +198,7 @@ export function rollUpBatchSql(nodeId: string, cutoff: Date, batch: number): Pri
       WHERE "nodeId" = ${nodeId} AND "reportedAt" < ${cutoffSql(cutoff)}
       ORDER BY "reportedAt"
       LIMIT ${batch}
+      FOR UPDATE SKIP LOCKED
     ), gone AS (
       DELETE FROM "usage_records" u USING doomed d
       WHERE u."id" = d."id"
@@ -211,7 +233,11 @@ interface BatchRow {
 }
 
 /** Runs `work` in a transaction with a lock timeout, a statement timeout
- * and the job's advisory lock. Null when another run holds the lock. */
+ * and the job's advisory lock. Null when another run holds the lock. The
+ * lock is the transaction's, so it keeps two runs' batches from running
+ * at the same instant, not two runs from taking turns between batches;
+ * that is harmless, since each batch is one statement over rows it has
+ * locked, and no row can be counted by both. */
 async function guarded<T>(
   prisma: PrismaClient,
   lockKey: number,
@@ -387,6 +413,7 @@ export function commandBatchSql(nodeId: string, cutoff: Date, batch: number): Pr
       SELECT "id" FROM "agent_commands"
       WHERE "nodeId" = ${nodeId} AND "status" IN (${finishedSql}) AND "createdAt" < ${cutoffSql(cutoff)}
       LIMIT ${batch}
+      FOR UPDATE SKIP LOCKED
     )
     DELETE FROM "agent_commands" a USING doomed d
     WHERE a."id" = d."id" AND a."status" IN (${finishedSql})
