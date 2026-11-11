@@ -30,7 +30,7 @@ import {
   type SuspicionEvent,
   type TrafficCounts,
 } from "./relay-policy";
-import { relayOperatorMail } from "./relay-alerts";
+import { RELAY_PANEL, relayOperatorMail, relayReadingFacts } from "./relay-alerts";
 
 const SETTINGS_TTL_MS = 15_000;
 const HOUR_MS = 3_600_000;
@@ -514,30 +514,78 @@ export class RelayAuthService implements OnModuleInit, OnModuleDestroy {
         `${numbers} This has held for 30 minutes. It can also mean only our domains are blocked in Iran. ` +
           "Nothing customers see has changed. If Iran's international links are cut, declare the intranet in " +
           "Panel -> Settings -> Relay sign-up. If it holds another 30 minutes, relay sign-up caps rise to the intranet tier.",
+        {
+          severity: "warning",
+          facts: [
+            { label: "What", value: "Requests from Iran have dropped while everyone else's have not" },
+            ...relayReadingFacts(reading),
+            { label: "Held for", value: "30 minutes" },
+            {
+              label: "How sure",
+              value: "Unsure. It can be a national intranet, or only our domains being blocked in Iran.",
+            },
+            {
+              label: "What to do",
+              value:
+                "If Iran's international links are cut, declare the intranet under Settings, Relay sign-up. " +
+                "If the drop holds another 30 minutes, relay sign-up caps rise to the intranet tier on their own.",
+            },
+          ],
+          body: "",
+          panel: RELAY_PANEL,
+          note: "Nothing customers see has changed.",
+        },
       );
     } else if (event === "raise") {
       await this.notifyOwner(
         "Relay sign-up caps raised to the intranet tier",
         `${numbers} The drop has held for an hour, so relay sign-ups now run at the intranet caps ` +
           `(${GLOBAL_DAILY_CAP.intranet} a day). Customer wording and sweeps are unchanged until you declare the intranet.`,
+        {
+          severity: "warning",
+          facts: [
+            { label: "What", value: `Relay sign-ups now run at the intranet caps (${GLOBAL_DAILY_CAP.intranet} a day)` },
+            ...relayReadingFacts(reading),
+            { label: "Held for", value: "1 hour" },
+            { label: "What to do", value: "Declare the intranet under Settings, Relay sign-up, if Iran's international links are cut." },
+          ],
+          body: "",
+          panel: RELAY_PANEL,
+          note: "Customer wording and sweeps are unchanged until you declare the intranet.",
+        },
       );
     } else {
       await this.notifyOwner(
         "Iranian traffic has recovered",
         `${numbers} The drop is over; relay sign-up caps are back to normal.`,
+        {
+          severity: "info",
+          chip: "Resolved",
+          facts: [
+            { label: "What", value: "The drop is over; relay sign-up caps are back to normal" },
+            ...relayReadingFacts(reading),
+            { label: "What to do", value: "Nothing." },
+          ],
+          body: "",
+          panel: RELAY_PANEL,
+        },
       );
     }
   }
 
-  private async notifyOwner(subject: string, text: string): Promise<void> {
+  private async notifyOwner(
+    subject: string,
+    text: string,
+    mail?: Parameters<typeof relayOperatorMail>[2],
+  ): Promise<void> {
     await this.alerting.send(`[relay] ${subject}. ${text}`);
     try {
       const admins = await this.prisma.adminUser.findMany({
         where: { role: AdminRole.SUPERADMIN },
         select: { email: true },
       });
-      const mail = relayOperatorMail(subject, text);
-      for (const admin of admins) await this.email.sendMail({ to: admin.email, ...mail });
+      const message = relayOperatorMail(subject, text, mail);
+      for (const admin of admins) await this.email.sendMail({ to: admin.email, ...message });
     } catch (err) {
       this.logger.warn(`Could not mail the relay alert: ${(err as Error).message}`);
     }

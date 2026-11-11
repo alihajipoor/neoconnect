@@ -1,6 +1,7 @@
-import { Controller, Get, Header, Res } from "@nestjs/common";
+import { Controller, Get, Header, Req, Res } from "@nestjs/common";
 import { ApiExcludeController } from "@nestjs/swagger";
-import type { Response } from "express";
+import type { Request, Response } from "express";
+import { EMAIL_LOGOS, type EmailLogoFile } from "./email-logo";
 import { BRAND_LOGO_PNG, BRAND_LOGO_PNG_MONO, BRAND_LOGO_SVG } from "./logo";
 
 /** Serves the Neoxify mark over plain HTTP.
@@ -25,13 +26,30 @@ export class BrandController {
     res.send(BRAND_LOGO_PNG);
   }
 
-  /** The white variant, for the violet header the emails use -- the
-   * gradient's violet half is invisible against it. */
+  /** The white variant, for the violet header the emails had until
+   * 2026-11. Nothing sends it any more, and it stays: mail already in
+   * people's inboxes still asks for it, and an email is never re-sent
+   * with a corrected image address. */
   @Get("logo-mono.png")
   @Header("Content-Type", "image/png")
   @Header("Cache-Control", "public, max-age=31536000, immutable")
   mono(@Res() res: Response) {
     res.send(BRAND_LOGO_PNG_MONO);
+  }
+
+  /** What the emails show now: the glass mark on its plate, pearl and
+   * smoked, at 1x and 2x (email-logo.ts).
+   *
+   * Cached for a month, not for ever like the marks above. Those are
+   * drawn from fixed geometry; these are pictures of a logo that may be
+   * redrawn, and a mailbox should pick the new one up without the
+   * address having to change. */
+  @Get(["email-logo-light.png", "email-logo-light-2x.png", "email-logo-dark.png", "email-logo-dark-2x.png"])
+  @Header("Content-Type", "image/png")
+  @Header("Cache-Control", "public, max-age=2592000")
+  emailLogo(@Req() req: Request, @Res() res: Response) {
+    const file = req.path.slice(req.path.lastIndexOf("/") + 1) as EmailLogoFile;
+    res.send(EMAIL_LOGOS[file]);
   }
 
   @Get("logo.svg")

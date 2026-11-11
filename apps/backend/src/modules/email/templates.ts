@@ -1,29 +1,80 @@
-/** Branded HTML email bodies -- matches the panel's dark violet/cyan
- * visual language (see the panel's Tailwind theme + [[feedback_ui_design_quality]]),
- * translated into an email-safe layout: table-based structure, inline
- * styles only (no <style> block, no flexbox/grid), web-safe font stack --
- * this is what actually survives Outlook/Gmail's aggressive CSS
- * stripping, not a fully modern stylesheet. Each template returns both an
- * html and a text body (nodemailer sends both; text is the fallback for
- * clients that can't/won't render html).
+/** Every email this backend sends, in one design.
+ *
+ * The look is the apps' own -- "Pearl Glass": a pearl page, a white card
+ * with a soft edge and a generous radius, near-black type, and the glass
+ * mark carrying the brand's violet-to-cyan. The values are the tokens in
+ * apps/desktop-windows/src/theme.css, flattened: a mail client cannot blur
+ * what is behind a surface, so the glass is drawn as the solid it settles
+ * to, and a translucent hairline as the colour it makes over white.
+ *
+ * Built the way mail has to be built: tables for layout, every style that
+ * matters written inline, no script, no external stylesheet, no webfont.
+ * There is one small <style> block, for the two things an inline style
+ * cannot say -- "on a narrow screen" and "in dark mode". A client that
+ * strips it (several do) shows the light design at desktop padding, which
+ * is still a complete, readable email. Nothing depends on that block.
+ *
+ * Two shells share the frame. Customers get the roomy one, in their own
+ * language. Staff get a compact "operations" one (`operationsEmail`),
+ * always in English: a severity chip, the facts as a table, the detail
+ * under it. Each template returns an html and a text body; the text is
+ * what a client shows when it cannot or will not render html.
  *
  * Bilingual since 2026-09-28. The clients have been English/Persian from
  * launch (apps/desktop-windows/src/lib/i18n.tsx) while every email here
- * was English-only -- and the largest single market for this product is
- * Iran, so the message that actually asks somebody to do something (type
- * a code, renew, pay) was the one part of the product they could not
- * read. Nothing was broken, which is why it went unnoticed. Every
- * template now takes the recipient's `locale` as its first argument:
- * required rather than defaulted, so a new call site cannot quietly send
- * English to a Persian customer. */
+ * was English-only, so the message that actually asks somebody to do
+ * something (type a code, renew, pay) was the one part of the product a
+ * Persian reader could not read. Every customer template takes the
+ * recipient's `locale` as its first argument: required rather than
+ * defaulted, so a new call site cannot quietly send English to a Persian
+ * customer. */
 
-const PRIMARY = "#8b5cf6"; // violet, matches the panel's primary accent
-const PRIMARY_DARK = "#7c3aed";
-const ACCENT = "#22d3ee"; // cyan, matches the panel's secondary/highlight accent
-const INK = "#1e1b2e";
-const MUTED = "#6b7280";
-const BORDER = "#eceaf5";
-const BG = "#f4f4fa";
+// ---------------------------------------------------------------------------
+// Tokens
+// ---------------------------------------------------------------------------
+
+/** theme.css, light ("Pearl"). */
+const BASE = "#f1f3f6"; // --base, the page
+const CARD = "#ffffff"; // --glass-strong, settled
+const PEARL = "#f8f9fc"; // --pearl, a surface set into the card
+const INK = "#090b10"; // --ink
+const INK_2 = "#4a5264"; // --ink-2
+const MUTED = "#6b7385"; // --muted
+const EDGE = "#dee0e5"; // --hairline-2 over white, the card's edge
+const RULE = "#e8eaef"; // between --hairline and --hairline-2, inside the card
+const COBALT = "#1045ff"; // --cobalt, the apps' one action colour
+/** The mark's own two colours (--logo-violet, --logo-cyan). Decoration
+ * only: white text on the cyan end is 1.8:1. */
+const LOGO_VIOLET = "#8b5cf6";
+const LOGO_CYAN = "#22d3ee";
+/** Where the button's gradient starts: the mark's violet, deepened until
+ * white text on it passes 4.5:1 (5.7:1; on cobalt 6.3:1). */
+const BUTTON_VIOLET = "#7c3aed";
+
+/** theme.css, dark ("Smoked"). Only ever applied through the <style>
+ * block's prefers-color-scheme rule. */
+const DARK = {
+  base: "#0b0e15",
+  card: "#131721",
+  head: "#161b27",
+  well: "#1a1f2b",
+  rule: "#262b36",
+  wellEdge: "#2a303c",
+  ink: "#eef1f7",
+  ink2: "#a9b2c4",
+  muted: "#8a93a6",
+  link: "#93b0ff",
+};
+
+/** --r-panel for the card, the apps' pill for a button, and the rounder
+ * of the inner radii for anything set into the card. */
+const R_CARD = 22;
+const R_WELL = 14;
+
+/** --drop. */
+const SHADOW = "0 1px 2px rgba(20,30,60,0.05),0 22px 44px -22px rgba(20,40,90,0.28)";
+
+const MONO = "'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace";
 
 /** Filled in by EmailBrandService just before the message is sent.
  *
@@ -38,6 +89,13 @@ const BG = "#f4f4fa";
  * keeps the templates synchronous and testable. */
 export const BRAND_LOGO_SLOT = "<!--neoxify:logo-->";
 export const BRAND_LINKS_SLOT = "<!--neoxify:links-->";
+
+/** A third slot, for staff mail only: a button to a page of the admin
+ * panel. A slot for the same reason as the two above -- where the panel
+ * lives is known only at send time -- and it carries the page and the
+ * label, so `fillBrandSlots` can draw the button or, when the panel's
+ * address is not known, leave nothing where it would have been. */
+const PANEL_SLOT = /<!--neoxify:panel:([a-z0-9/_-]+)\|([A-Za-z0-9 ]+)-->/g;
 
 // ---------------------------------------------------------------------------
 // Locale
@@ -97,6 +155,7 @@ function ltr(value: string): string {
 interface Style {
   locale: Locale;
   dir: "ltr" | "rtl";
+  rtl: boolean;
   /** Where text is set flush. Written out on every text element rather
    * than left to inherit from `<html dir>`: Outlook renders through
    * Word, which honours `dir` inconsistently on nested table cells, and
@@ -105,32 +164,37 @@ interface Style {
   align: "left" | "right";
   font: string;
   lineHeight: string;
+  /** Headings sit tighter than running text, in either script. */
+  headingLineHeight: string;
+  /** The apps' display tracking (-0.02em), for Latin only. Any
+   * letter-spacing pulls joined Arabic-script letters apart or into each
+   * other, so Persian gets none, anywhere. */
+  tight: string;
 }
 
-/** English keeps the original web-safe stack.
+/** The faces the apps use, named first, then what is on the reader's
+ * machine.
  *
- * Persian cannot: the clients bundle Vazirmatn precisely because Windows
- * otherwise falls back to Tahoma, which sets Persian poorly (see the
- * @font-face comment in apps/desktop-windows/src/theme.css). An email
- * cannot bundle anything, and a linked webfont needs an @font-face rule
- * in a <style> block -- which this layout deliberately does not have,
- * and which Gmail strips from a message body regardless. So Persian gets
- * the faces that are already on the reader's machine, worst-first-avoided
- * rather than best-hoped-for:
+ * The apps bundle Inter and Vazirmatn. An email cannot bundle anything,
+ * and a linked webfont is a network fetch most mail clients refuse, so
+ * neither is loaded -- only named. A reader who has the face installed
+ * (Vazirmatn is a common install among Persian readers) gets the app's
+ * own type; everyone else gets the next one in the list:
  *
- *   Tahoma       -- on every Windows install since XP and the de facto
- *                   Persian UI face there; plain, but it always exists.
- *   Iranian Sans -- the system Persian face on Samsung/Android, where a
- *                   large share of this audience reads mail.
- *   Geneva       -- macOS/iOS fall back to Geeza Pro for Arabic script
- *                   from any of these anyway; named so the Latin runs in
- *                   a mixed line don't land on Times.
+ *   Latin    the system UI face on each platform -- San Francisco, Segoe
+ *            UI, Roboto -- which is what Inter was drawn to sit beside.
+ *   Persian  Tahoma, on every Windows install since XP and the de facto
+ *            Persian UI face there; Iranian Sans, the system Persian face
+ *            on Samsung/Android, where a large share of this audience
+ *            reads mail; Geneva so the Latin runs in a mixed line on
+ *            macOS/iOS don't land on Times (Arabic script falls back to
+ *            Geeza Pro there from any of these).
  *
- * Arial and sans-serif close it out so a machine with none of the above
- * still gets a sans face rather than the client's serif default. */
+ * Arial and sans-serif close each list so a machine with none of the
+ * above still gets a sans face rather than the client's serif default. */
 const FONT_STACK: Record<Locale, string> = {
-  en: "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif",
-  fa: "Tahoma,'Iranian Sans','IRANSans',Geneva,Arial,sans-serif",
+  en: "Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif",
+  fa: "Vazirmatn,Tahoma,'Iranian Sans','IRANSans',Geneva,Arial,sans-serif",
 };
 
 /** Persian ascenders and diacritics need more vertical room than Latin
@@ -139,26 +203,138 @@ const FONT_STACK: Record<Locale, string> = {
  * apps/desktop-windows/src/theme.css. Scaled from 1.65 by the ratio that
  * file uses (1.5 -> 1.75). */
 const LINE_HEIGHT: Record<Locale, string> = { en: "1.65", fa: "1.9" };
+const HEADING_LINE_HEIGHT: Record<Locale, string> = { en: "1.25", fa: "1.6" };
 
 function styleFor(locale: Locale): Style {
   const rtl = locale === "fa";
   return {
     locale,
     dir: rtl ? "rtl" : "ltr",
+    rtl,
     align: rtl ? "right" : "left",
     font: FONT_STACK[locale],
     lineHeight: LINE_HEIGHT[locale],
+    headingLineHeight: HEADING_LINE_HEIGHT[locale],
+    tight: rtl ? "" : "letter-spacing:-0.02em;",
   };
 }
 
 // ---------------------------------------------------------------------------
-// Shell and building blocks
+// The frame both shells share
 // ---------------------------------------------------------------------------
 
-/** Wraps a template's body content in the shared branded shell: a
- * gradient header with the Neoxify mark, a white card, and a muted
- * footer. `preheader` is the short hidden preview text most mail clients
- * show next to the subject line in the inbox list. */
+/** The only stylesheet. Everything in it is an override of an inline
+ * style, hung on a class, and the email is whole without any of it.
+ *
+ * Narrow screens: tighter padding, so a 380px phone keeps a readable
+ * measure instead of a card with a third of its width spent on margins.
+ *
+ * Dark mode: the Smoked tokens. Declared as supported (the two metas and
+ * `color-scheme` below) so a client that can follow the reader's theme
+ * does it by these rules rather than by inverting colours on its own --
+ * the automatic inversions are what turned the old violet-on-violet code
+ * block illegible. A client that ignores all of it shows the light
+ * design, whose near-black on white survives any inversion. */
+const HEAD_CSS = [
+  ":root{color-scheme:light dark;supported-color-schemes:light dark;}",
+  "@media only screen and (max-width:620px){",
+  ".nx-outer{padding:14px 8px!important;}",
+  ".nx-pad{padding-left:22px!important;padding-right:22px!important;}",
+  ".nx-h1{font-size:22px!important;}",
+  "}",
+  "@media (prefers-color-scheme:dark){",
+  `.nx-bg{background:${DARK.base}!important;}`,
+  `.nx-card{background:${DARK.card}!important;border-color:${DARK.rule}!important;box-shadow:none!important;}`,
+  `.nx-head{background:${DARK.head}!important;border-color:${DARK.rule}!important;}`,
+  `.nx-rule{border-color:${DARK.rule}!important;}`,
+  `.nx-ink{color:${DARK.ink}!important;}`,
+  `.nx-ink2{color:${DARK.ink2}!important;}`,
+  `.nx-muted{color:${DARK.muted}!important;}`,
+  `.nx-well{background:${DARK.well}!important;border-color:${DARK.wellEdge}!important;}`,
+  `.nx-link{color:${DARK.link}!important;}`,
+  ".nx-logo-l{display:none!important;}",
+  ".nx-logo-d{display:inline-block!important;}",
+  ".nx-chip-info{background:#1c2542!important;color:#a7beff!important;}",
+  ".nx-chip-warning{background:#33270f!important;color:#f7c46f!important;}",
+  ".nx-chip-urgent{background:#3a1c19!important;color:#f79a90!important;}",
+  "}",
+].join("");
+
+/** Pushes the body's first words out of the inbox preview line. Without
+ * it a client fills the space after a short preheader with whatever
+ * comes next in the markup -- here, the word "Neoxify" and the heading
+ * again. Zero-width and non-breaking, so it takes up preview room and
+ * shows nothing. */
+const PREHEADER_PAD = "&#847;&zwnj;&nbsp;".repeat(40);
+
+function frame(o: {
+  s: Style;
+  /** Already html: a Persian preheader carries `ltr()` spans. */
+  preheader: string;
+  headerHtml: string;
+  bodyHtml: string;
+  footerHtml: string;
+}): string {
+  const { s } = o;
+  // The card's own corners, less its border, for the header's fill.
+  const inner = R_CARD - 1;
+
+  return `<!doctype html>
+<html dir="${s.dir}" lang="${s.locale}">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="x-apple-disable-message-reformatting">
+    <meta name="format-detection" content="telephone=no,date=no,address=no,email=no">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
+    <style>${HEAD_CSS}</style>
+  </head>
+  <body dir="${s.dir}" class="nx-bg" style="margin:0;padding:0;background:${BASE};font-family:${s.font};-webkit-text-size-adjust:100%;">
+    <div style="display:none;max-height:0;max-width:0;overflow:hidden;opacity:0;font-size:1px;line-height:1px;mso-hide:all;">${o.preheader}${PREHEADER_PAD}</div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" dir="${s.dir}" class="nx-bg" bgcolor="${BASE}" style="background:${BASE};">
+      <tr>
+        <td align="center" class="nx-outer" style="padding:28px 12px;">
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" dir="${s.dir}" class="nx-card" bgcolor="${CARD}" style="width:100%;max-width:600px;background:${CARD};border:1px solid ${EDGE};border-radius:${R_CARD}px;border-collapse:separate;box-shadow:${SHADOW};">
+            <tr>
+              <td align="${s.align}" class="nx-head nx-pad" bgcolor="${PEARL}" style="padding:20px 32px;background-color:${PEARL};background-image:linear-gradient(120deg,rgba(139,92,246,0.07),rgba(34,211,238,0.06));border-bottom:1px solid ${RULE};border-radius:${inner}px ${inner}px 0 0;text-align:${s.align};">
+                ${o.headerHtml}
+              </td>
+            </tr>
+            <tr>
+              <td align="${s.align}" class="nx-pad nx-ink" style="padding:32px 32px 14px 32px;color:${INK};font-family:${s.font};font-size:15px;line-height:${s.lineHeight};text-align:${s.align};">
+                ${o.bodyHtml}
+              </td>
+            </tr>
+          </table>
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" dir="${s.dir}" style="width:100%;max-width:600px;">
+            <tr>
+              <td align="${s.align}" class="nx-pad" style="padding:18px 32px 8px 32px;font-family:${s.font};text-align:${s.align};">
+                ${o.footerHtml}
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
+
+/** The mark as an image, with the name beside it as real text. Images
+ * are blocked by default in a good number of clients, and a header that
+ * is entirely an image becomes a blank bar when that happens -- the text
+ * means the brand always survives.
+ *
+ * The wordmark stays Latin in both languages, the same way the Persian
+ * client's dictionary leaves "Neoxify" untransliterated: it is what is
+ * written on the app the reader is being asked to open. */
+function wordmark(size: number): string {
+  return `${BRAND_LOGO_SLOT}<span dir="ltr" class="nx-ink" style="font-size:${size}px;font-weight:600;color:${INK};letter-spacing:-0.02em;vertical-align:middle;">Neoxify</span>`;
+}
+
+/** The customer shell. `preheader` is the short hidden preview text most
+ * mail clients show next to the subject line in the inbox list. */
 function shell({
   locale,
   preheader,
@@ -176,61 +352,22 @@ function shell({
   const s = styleFor(locale);
   const chrome = STRINGS[locale].chrome;
 
-  return `<!doctype html>
-<html dir="${s.dir}" lang="${locale}">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <!-- Declares this design as light-only. Without it, clients that
-         auto-invert for dark mode (Outlook and Gmail both do) recolour
-         the card and the code block by their own rules, and the violet
-         text on the pale violet panel is exactly the combination that
-         comes out illegible. Better to render as designed in both modes
-         than to be re-interpreted in one. -->
-    <meta name="color-scheme" content="light">
-    <meta name="supported-color-schemes" content="light">
-  </head>
-  <body dir="${s.dir}" style="margin:0;padding:0;background:${BG};font-family:${s.font};">
-    <div style="display:none;max-height:0;overflow:hidden;opacity:0;">${preheader}</div>
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" dir="${s.dir}" style="background:${BG};padding:32px 16px;">
-      <tr>
-        <td align="center">
-          <table role="presentation" width="560" cellpadding="0" cellspacing="0" dir="${s.dir}" style="max-width:560px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(139,92,246,0.12);">
-            <tr>
-              <td align="${s.align}" style="background-color:${PRIMARY};background-image:linear-gradient(135deg,${PRIMARY} 0%,${PRIMARY_DARK} 60%,#5b21b6 100%);padding:28px 32px;">
-                <!-- The mark as an image, with the name beside it as
-                     real text. Images are blocked by default in a good
-                     number of clients, and a header that is entirely an
-                     image becomes a blank bar when that happens -- the
-                     text means the brand always survives.
-                     The wordmark stays Latin in both languages, the same
-                     way the Persian client's dictionary leaves "Neoxify"
-                     untransliterated: it is what is written on the app
-                     the reader is being asked to open. -->
-                ${BRAND_LOGO_SLOT}<span dir="ltr" style="font-size:19px;font-weight:700;color:#ffffff;letter-spacing:0.2px;vertical-align:middle;">Neoxify</span>
-              </td>
-            </tr>
-            <tr>
-              <td align="${s.align}" style="padding:36px 32px 32px 32px;color:${INK};font-size:15px;line-height:${s.lineHeight};text-align:${s.align};">
-                ${bodyHtml}
-              </td>
-            </tr>
-            <tr>
-              <td align="${s.align}" style="padding:20px 32px;border-top:1px solid ${BORDER};background:#fbfaff;text-align:${s.align};">
-                ${BRAND_LINKS_SLOT}
-                <p style="margin:0;font-size:12px;color:${MUTED};line-height:${s.lineHeight};text-align:${s.align};">
+  return frame({
+    s,
+    preheader,
+    headerHtml: wordmark(20),
+    bodyHtml,
+    footerHtml: `${BRAND_LINKS_SLOT}
+                <p class="nx-muted" style="margin:0;font-size:12px;color:${MUTED};line-height:${s.lineHeight};text-align:${s.align};">
                   ${chrome.accountNotice}
                   ${footerHtml ?? chrome.ignoreNotice}
-                </p>
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </table>
-  </body>
-</html>`;
+                </p>`,
+  });
 }
+
+// ---------------------------------------------------------------------------
+// Building blocks
+// ---------------------------------------------------------------------------
 
 function escapeHtml(value: string): string {
   return value
@@ -239,15 +376,32 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
+/** For a value going into an attribute as well as into text. */
+function escapeAttribute(value: string): string {
+  return escapeHtml(value).replace(/"/g, "&quot;");
+}
+
 function heading(s: Style, text: string): string {
-  return `<h1 style="margin:0 0 16px 0;font-size:20px;font-weight:700;color:${INK};text-align:${s.align};line-height:${s.lineHeight};">${text}</h1>`;
+  return `<h1 class="nx-ink nx-h1" style="margin:0 0 14px 0;font-size:24px;font-weight:600;color:${INK};${s.tight}text-align:${s.align};line-height:${s.headingLineHeight};">${text}</h1>`;
 }
 
 function paragraph(s: Style, text: string): string {
-  return `<p style="margin:0 0 16px 0;color:${INK};text-align:${s.align};line-height:${s.lineHeight};">${text}</p>`;
+  return `<p class="nx-ink" style="margin:0 0 18px 0;font-size:15px;color:${INK};text-align:${s.align};line-height:${s.lineHeight};">${text}</p>`;
 }
 
-/** No `align` attribute, deliberately -- on a table that is `float`, not
+/** The one action. A pill in the apps' cobalt, with the mark's violet
+ * running into it.
+ *
+ * "Bulletproof" in the mail sense: the colour is on the cell, three
+ * ways. `bgcolor` is all Outlook's Word engine reads; `background-color`
+ * is the solid every other client falls back to; the gradient is for the
+ * ones that draw it. Whichever of the three a client stops at, the label
+ * is white on a colour dark enough to read it on. Word also ignores
+ * padding on a link, which would shrink the button to its text, so the
+ * cell carries the same padding again under the one name only Word
+ * reads (`mso-padding-alt`).
+ *
+ * No `align` attribute, deliberately -- on a table that is `float`, not
  * alignment, and the paragraph after it then wraps up alongside the
  * button instead of starting below it. Caught by rendering the Persian
  * set: the expiry line came up beside the button rather than under it,
@@ -255,38 +409,48 @@ function paragraph(s: Style, text: string): string {
  * already sits at the start edge of its containing block, which `dir`
  * on the cell has already flipped to the right for Persian. */
 function button(s: Style, url: string, label: string): string {
-  return `<table role="presentation" cellpadding="0" cellspacing="0" dir="${s.dir}" style="margin:8px 0 20px 0;">
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" dir="${s.dir}" style="margin:6px 0 22px 0;">
     <tr>
-      <td style="border-radius:10px;background-color:${PRIMARY};background-image:linear-gradient(135deg,${PRIMARY},${PRIMARY_DARK});">
-        <a href="${url}" style="display:inline-block;padding:12px 24px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:10px;">${label}</a>
+      <td bgcolor="${COBALT}" style="border-radius:999px;background-color:${COBALT};background-image:linear-gradient(135deg,${BUTTON_VIOLET} 0%,${COBALT} 100%);mso-padding-alt:13px 28px;">
+        <a href="${url}" style="display:inline-block;padding:13px 28px;font-family:${s.font};font-size:15px;font-weight:600;line-height:1.3;color:#ffffff;text-decoration:none;border-radius:999px;">${label}</a>
       </td>
     </tr>
   </table>`;
 }
 
-/** A prominent, letter-spaced token/code display -- used for the
- * password-reset link's token. `overflow-wrap`/`word-break` together
- * (not just one) plus `max-width:100%` is deliberate: a real bug found
- * live had a raw JWT overflow past the email's visible width in Gmail's
- * web UI with only `word-break` set -- some renderers need both
- * properties, and the containing element also needs to be told it's
- * allowed to shrink rather than grow to fit unbreakable content.
+/** A quiet label over a code, so a bare identifier says what it is. */
+function wellLabel(s: Style, text: string): string {
+  return `<p class="nx-ink2" style="margin:0 0 6px 0;font-size:12px;font-weight:600;color:${INK_2};text-align:${s.align};line-height:${s.lineHeight};">${text}</p>`;
+}
+
+/** An identifier the reader copies or quotes back to us -- an invoice
+ * number, a token. `overflow-wrap`/`word-break` together (not just one)
+ * plus `max-width:100%` is deliberate: a real bug found live had a raw
+ * JWT overflow past the email's visible width in Gmail's web UI with
+ * only `word-break` set -- some renderers need both properties, and the
+ * containing element also needs to be told it's allowed to shrink
+ * rather than grow to fit unbreakable content.
  *
- * Always `dir="ltr"`, in both languages. What goes in here is an
- * identifier the reader copies or quotes back to us -- an invoice
- * number, a token -- and bidi reordering it inside a Persian paragraph
- * would print a value that is not the value we issued. */
+ * Always `dir="ltr"`, in both languages: bidi reordering an identifier
+ * inside a Persian paragraph would print a value that is not the value
+ * we issued. */
 function codeBlock(value: string): string {
-  return `<div dir="ltr" style="margin:4px 0 20px 0;padding:14px 18px;max-width:100%;background:#f6f3ff;border:1px solid #e4dcfb;border-radius:10px;font-family:'SFMono-Regular',Consolas,Menlo,monospace;font-size:14px;font-weight:600;color:${PRIMARY_DARK};word-break:break-all;overflow-wrap:anywhere;white-space:normal;text-align:left;">${value}</div>`;
+  return `<div dir="ltr" class="nx-well nx-ink" style="margin:0 0 20px 0;padding:13px 18px;max-width:100%;background:${PEARL};border:1px solid ${RULE};border-radius:${R_WELL}px;font-family:${MONO};font-size:14px;font-weight:600;color:${INK};word-break:break-all;overflow-wrap:anywhere;white-space:normal;text-align:left;">${value}</div>`;
 }
 
 /** A large, widely-spaced short code for the actual human to type by
  * hand -- added 2026-07-24 after live testing showed a raw JWT (what
  * codeBlock() above was originally used for here) is both unusable to
- * type and prone to overflowing the email's layout. Real digits are
+ * type and prone to overflowing the email's layout. The characters are
  * separated by literal spaces, not just CSS letter-spacing, since some
  * email clients strip letter-spacing -- this is the standard OTP-email
  * technique for a reason.
+ *
+ * A six-digit code is spaced digit by digit. A voucher code is twelve
+ * characters, which spaced that way is twenty-three and wraps on every
+ * phone, so it is set in fours instead -- the grouping people use when
+ * they read a code out, and one the redeem path already ignores
+ * (`normalise` in vouchers/voucher-code.ts strips spaces).
  *
  * The digits stay Latin and `dir="ltr"` for a Persian reader too, unlike
  * every other number in these emails. They are not a quantity being
@@ -295,17 +459,23 @@ function codeBlock(value: string): string {
  * stored is `randomInt().toString()`, i.e. `0-9`. Printing `۴۹۲۰۱۷` here
  * would be asking somebody to type a code that cannot match. */
 function bigCode(value: string): string {
-  const spaced = value.split("").join(" ");
-  return `<div dir="ltr" style="margin:4px 0 20px 0;padding:18px 12px;max-width:100%;background:#f6f3ff;border:1px solid #e4dcfb;border-radius:12px;text-align:center;font-family:'SFMono-Regular',Consolas,Menlo,monospace;font-size:30px;font-weight:800;letter-spacing:4px;color:${PRIMARY_DARK};word-break:break-all;">${spaced}</div>`;
+  const short = value.length <= 8;
+  const spaced = short ? value.split("").join(" ") : (value.match(/.{1,4}/g) ?? [value]).join(" ");
+  const size = short ? 30 : 22;
+  return `<div dir="ltr" class="nx-well nx-ink" style="margin:0 0 20px 0;padding:18px 12px;max-width:100%;background:${PEARL};border:1px solid ${RULE};border-radius:${R_WELL}px;text-align:center;font-family:${MONO};font-size:${size}px;font-weight:600;letter-spacing:2px;color:${INK};word-break:break-all;">${spaced}</div>`;
 }
 
 function fineprint(s: Style, text: string): string {
-  return `<p style="margin:0;font-size:13px;color:${MUTED};text-align:${s.align};line-height:${s.lineHeight};">${text}</p>`;
+  return `<p class="nx-ink2" style="margin:0 0 18px 0;font-size:13px;color:${INK_2};text-align:${s.align};line-height:${s.lineHeight};">${text}</p>`;
 }
 
-/** A small colored stat pill -- used to make a number (GB remaining,
- * days remaining) the visual focal point rather than burying it in a
- * sentence.
+/** A number made the focal point -- GB remaining, days remaining --
+ * rather than buried in a sentence. A pearl tile with the mark's
+ * gradient down its leading edge, the one place outside the logo the
+ * brand's two colours appear together.
+ *
+ * `compact` is for a value that is not a number: a masked email address
+ * at the number's size runs off a phone.
  *
  * The label's `text-transform:uppercase` and `letter-spacing` are
  * English-only. Uppercase does nothing to Persian, which has no letter
@@ -313,15 +483,18 @@ function fineprint(s: Style, text: string): string {
  * join, and pushing them apart severs the joins into disconnected
  * shapes. The one rule that looks like harmless polish in English is the
  * one that would make the Persian label read as broken text. */
-function statPill(s: Style, value: string, label: string): string {
-  const labelStyle =
-    s.locale === "fa" ? "" : "text-transform:uppercase;letter-spacing:0.6px;";
+function statPill(s: Style, value: string, label: string, compact = false): string {
+  const labelStyle = s.rtl ? "" : "text-transform:uppercase;letter-spacing:0.6px;";
+  // The bar takes the tile's corners on whichever side the text starts.
+  const barRadius = s.rtl ? `0 ${R_WELL - 1}px ${R_WELL - 1}px 0` : `${R_WELL - 1}px 0 0 ${R_WELL - 1}px`;
+  const valueSize = compact ? 17 : 28;
   // Not `align` -- see the note on button() above.
-  return `<table role="presentation" cellpadding="0" cellspacing="0" dir="${s.dir}" style="margin:4px 0 20px 0;">
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" dir="${s.dir}" class="nx-well" style="margin:0 0 20px 0;max-width:100%;background:${PEARL};border:1px solid ${RULE};border-radius:${R_WELL}px;border-collapse:separate;">
     <tr>
-      <td style="padding:16px 22px;background:linear-gradient(135deg,#f6f3ff,#ecfeff);border:1px solid ${BORDER};border-radius:12px;text-align:${s.align};">
-        <div style="font-size:26px;font-weight:800;color:${PRIMARY_DARK};line-height:1.1;">${value}</div>
-        <div style="font-size:12px;font-weight:600;color:${ACCENT === "#22d3ee" ? "#0891b2" : MUTED};${labelStyle}margin-top:2px;">${label}</div>
+      <td width="5" bgcolor="${LOGO_VIOLET}" style="width:5px;font-size:0;line-height:0;background-color:${LOGO_VIOLET};background-image:linear-gradient(180deg,${LOGO_VIOLET},${LOGO_CYAN});border-radius:${barRadius};">&nbsp;</td>
+      <td style="padding:14px 22px 14px 18px;text-align:${s.align};">
+        <div class="nx-ink" style="font-size:${valueSize}px;font-weight:600;color:${INK};${s.tight}line-height:1.25;word-break:break-word;overflow-wrap:anywhere;">${value}</div>
+        <div class="nx-ink2" style="font-size:12px;font-weight:600;color:${INK_2};${labelStyle}margin-top:3px;line-height:1.5;">${label}</div>
       </td>
     </tr>
   </table>`;
@@ -331,7 +504,7 @@ function statPill(s: Style, value: string, label: string): string {
 // Strings
 // ---------------------------------------------------------------------------
 
-/** Every piece of copy these templates emit, in both languages.
+/** Every piece of copy the customer templates emit, in both languages.
  *
  * A plain typed dictionary rather than an i18n library, for the same
  * reason the clients use one (see the comment above `const en` in
@@ -354,8 +527,8 @@ const EN = {
     subject: "Confirm your Neoxify email",
     preheader: (code: string) => `Your confirmation code is ${code}.`,
     heading: "Welcome to Neoxify",
-    intro: "Your Neoxify account is ready. Enter this code in the app to activate it:",
-    orClick: "Or use this button:",
+    intro: "Your account is ready. Enter this code in the app to activate it:",
+    orClick: "Or confirm with this button:",
     button: "Confirm my email",
     expiry: "This code expires in 24 hours. If you didn't create a Neoxify account, you can ignore this email.",
     text: (code: string, link: string) =>
@@ -393,7 +566,7 @@ const EN = {
     pillLabel: "left",
     body: "Renew before then so your VPN keeps working without a break.",
     text: (days: number) =>
-      `Your plan ends in about ${days} day(s). Renew before then so your VPN keeps working without a break.`,
+      `Your plan ends in about ${days} ${days === 1 ? "day" : "days"}. Renew before then so your VPN keeps working without a break.`,
   },
 
   referralJoined: {
@@ -406,7 +579,9 @@ const EN = {
       `You're ${months} paid ${months === 1 ? "month" : "months"} away from your next free month.`,
     text: (masked: string, months: number | null) =>
       `${masked} just activated their Neoxify account using your invite.${
-        months === null ? "" : ` You are ${months} paid month(s) away from your next free month.`
+        months === null
+          ? ""
+          : ` You're ${months} paid ${months === 1 ? "month" : "months"} away from your next free month.`
       }`,
   },
 
@@ -423,7 +598,7 @@ const EN = {
     fallbackPlanName: "your plan",
     body: "Thanks for inviting your friends. The free time is already on your account. Open Neoxify and connect as usual.",
     text: (days: number, planName: string) =>
-      `You have earned ${days} free days of Neoxify on ${planName}, thanks to the friends you invited. It is already active on your account.`,
+      `You've earned ${days} free days of Neoxify on ${planName}, thanks to the friends you invited. It's already on your account.`,
   },
 
   announcement: {
@@ -442,6 +617,7 @@ const EN = {
     heading: "Thanks for your payment",
     body: (amount: string, planName: string) =>
       `We received ${amount} for your ${planName} plan. It's active now.`,
+    numberLabel: "Invoice number",
     button: "View invoice",
     keep: "Keep this for your records. You can view or print your invoices any time from the app.",
     text: (amount: string, planName: string, invoiceNumber: string, documentUrl?: string) =>
@@ -469,6 +645,7 @@ const EN = {
     heading: "Your plan is ready",
     body: (planName: string) =>
       `You've been given a <strong>${planName}</strong> plan on Neoxify. Activate it with the code below. No payment is needed.`,
+    codeLabel: "Activation code",
     button: "Activate my plan",
     thenInstall: "Then install the app and sign in with the same email:",
     noLinks: "Download the app from neoxify.net to get started.",
@@ -515,8 +692,8 @@ const FA: Strings = {
     subject: "ایمیل نئوکسیفای خود را تأیید کنید",
     preheader: (code: string) => `کد تأیید شما ${ltr(code)} است.`,
     heading: "به نئوکسیفای خوش آمدید",
-    intro: "حساب نئوکسیفای شما آماده است. برای فعال کردنش، این کد را در برنامه وارد کنید:",
-    orClick: "یا از این دکمه استفاده کنید:",
+    intro: "حساب شما آماده است. برای فعال کردنش، این کد را در برنامه وارد کنید:",
+    orClick: "یا با این دکمه تأیید کنید:",
     button: "تأیید ایمیل",
     expiry: "این کد تا ۲۴ ساعت اعتبار دارد. اگر شما حساب نئوکسیفای نساخته‌اید، این ایمیل را نادیده بگیرید.",
     text: (code: string, link: string) =>
@@ -606,6 +783,7 @@ const FA: Strings = {
     heading: "ممنون از پرداخت شما",
     body: (amount: string, planName: string) =>
       `${ltr(amount)} بابت پلن ${planName} شما دریافت شد و پلن همین حالا فعال است.`,
+    numberLabel: "شمارهٔ فاکتور",
     button: "دیدن فاکتور",
     keep: "این ایمیل را برای سوابق خود نگه دارید. هر وقت بخواهید می‌توانید فاکتورها را در برنامه ببینید یا چاپ کنید.",
     text: (amount: string, planName: string, invoiceNumber: string, documentUrl?: string) =>
@@ -636,6 +814,7 @@ const FA: Strings = {
     heading: "پلن شما آماده است",
     body: (planName: string) =>
       `یک پلن <strong>${planName}</strong> در نئوکسیفای به شما داده شده است. با کد زیر فعالش کنید. نیازی به پرداخت نیست.`,
+    codeLabel: "کد فعال‌سازی",
     button: "فعال کردن پلن",
     thenInstall: "بعد برنامه را نصب کنید و با همین ایمیل وارد شوید:",
     noLinks: "برای شروع، برنامه را از neoxify.net دانلود کنید.",
@@ -655,7 +834,7 @@ const FA: Strings = {
 const STRINGS: Record<Locale, Strings> = { en: EN, fa: FA };
 
 // ---------------------------------------------------------------------------
-// Templates
+// Customer templates
 // ---------------------------------------------------------------------------
 
 /** `publicApiUrl` is where this API answers from a customer's browser.
@@ -794,7 +973,7 @@ export function referralFriendJoinedEmail(
       // order they were written.
       bodyHtml: `
         ${heading(s, t.heading)}
-        ${statPill(s, ltr(maskedEmail), t.pillLabel)}
+        ${statPill(s, ltr(maskedEmail), t.pillLabel, true)}
         ${progress}
       `,
     }),
@@ -835,8 +1014,8 @@ export function referralRewardEmail(locale: Locale, days: number, planName: stri
  * `locale` styles the shell around the message, not the message: the
  * body is whatever one admin typed into one box, and there is no
  * translation of it to reach for. What the locale still buys is real --
- * an announcement written in Persian, sent to a Persian customer, is
- * currently laid out left-to-right in a Latin face, and this is the
+ * an announcement written in Persian, sent to a Persian customer, would
+ * otherwise be laid out left-to-right in a Latin face, and this is the
  * template most likely to be composed in Persian in the first place. */
 export function announcementEmail(locale: Locale, body: string) {
   const s = styleFor(locale);
@@ -874,7 +1053,8 @@ export function announcementText(locale: Locale, body: string): string {
  *
  * Escaped, unlike the announcement body above -- an operator typing
  * "if x < y" into a reply box should not be able to produce broken
- * markup in their own customer's inbox.
+ * markup in their own customer's inbox. The preheader is the same words
+ * and is escaped the same way.
  *
  * As with the announcement, the reply body is the operator's words and
  * is not translated; the locale sets the direction and the chrome. The
@@ -890,7 +1070,7 @@ export function supportReplyEmail(locale: Locale, subject: string, body: string)
     subject: `Re: ${subject}`,
     html: shell({
       locale,
-      preheader: body.slice(0, 120),
+      preheader: escapeHtml(body.slice(0, 120)),
       bodyHtml: `
         ${heading(s, t.heading)}
         ${escaped
@@ -937,6 +1117,7 @@ export function invoiceIssuedEmail(params: {
       bodyHtml: `
         ${heading(s, t.heading)}
         ${paragraph(s, t.body(amount, params.planName))}
+        ${wellLabel(s, t.numberLabel)}
         ${codeBlock(params.invoiceNumber)}
         ${params.documentUrl ? button(s, params.documentUrl, t.button) : ""}
         ${fineprint(s, t.keep)}
@@ -1002,18 +1183,21 @@ function downloadRow(s: Style, publicApiUrl?: string): string {
     return paragraph(s, t.noLinks);
   }
 
-  const cell = (label: string, sub: string, href: string) =>
-    `<td style="padding:0 6px 10px 0;text-align:${s.align};" valign="top">
-      <a href="${href}" style="display:block;padding:12px 14px;border:1px solid #e4dcfb;border-radius:10px;text-decoration:none;background:#faf8ff;">
-        <span dir="ltr" style="display:block;font-size:14px;font-weight:700;color:${PRIMARY_DARK};text-align:${s.align};">${label}</span>
-        <span style="display:block;font-size:12px;color:${MUTED};text-align:${s.align};">${sub}</span>
+  // The gap between the two tiles is on the first one's trailing side,
+  // whichever side that is.
+  const gap = (first: boolean) => (first ? (s.rtl ? "0 0 0 10px" : "0 10px 0 0") : "0");
+  const cell = (first: boolean, label: string, sub: string, href: string) =>
+    `<td width="50%" style="width:50%;padding:${gap(first)};text-align:${s.align};" valign="top">
+      <a href="${href}" class="nx-well" style="display:block;padding:12px 16px;border:1px solid ${RULE};border-radius:${R_WELL}px;text-decoration:none;background:${PEARL};">
+        <span dir="ltr" class="nx-ink" style="display:block;font-size:15px;font-weight:600;color:${INK};text-align:${s.align};">${label}</span>
+        <span class="nx-ink2" style="display:block;font-size:12px;color:${INK_2};text-align:${s.align};">${sub}</span>
       </a>
     </td>`;
 
-  return `<table role="presentation" cellpadding="0" cellspacing="0" dir="${s.dir}" style="margin:4px 0 18px 0;width:100%;">
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" dir="${s.dir}" style="margin:0 0 20px 0;width:100%;">
     <tr>
-      ${cell("Windows", t.installerSub, `${base}/updates/installer/windows`)}
-      ${cell("Android", t.apkSub, `${base}/updates/installer/android`)}
+      ${cell(true, "Windows", t.installerSub, `${base}/updates/installer/windows`)}
+      ${cell(false, "Android", t.apkSub, `${base}/updates/installer/android`)}
     </tr>
   </table>`;
 }
@@ -1067,6 +1251,7 @@ export function resellerVoucherEmail(params: {
       bodyHtml: `
         ${heading(s, t.heading)}
         ${paragraph(s, t.body(params.planName))}
+        ${wellLabel(s, t.codeLabel)}
         ${bigCode(params.code)}
         ${button(s, params.activationUrl, t.button)}
         ${paragraph(s, t.thenInstall)}
@@ -1076,4 +1261,254 @@ export function resellerVoucherEmail(params: {
     }),
     text: t.text(params.planName, params.code, params.activationUrl, expiryText),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Operations mail
+// ---------------------------------------------------------------------------
+
+/** How loudly a staff mail speaks. The colours are the apps' state
+ * colours (theme.css: --ok, --warn, --danger), each as its tint, its ink
+ * and its dot -- calm on purpose. An inbox of red banners teaches its
+ * owner to stop reading them. */
+export type OpsSeverity = "info" | "warning" | "urgent";
+
+const SEVERITY: Record<OpsSeverity, { label: string; tint: string; ink: string; dot: string }> = {
+  info: { label: "Info", tint: "#e6edff", ink: "#0b3be0", dot: "#1045ff" },
+  warning: { label: "Warning", tint: "#faeede", ink: "#8f4a00", dot: "#d97a00" },
+  urgent: { label: "Urgent", tint: "#faeae9", ink: "#a8231a", dot: "#d02c1f" },
+};
+
+/** One row of the facts table: what it is, and its value. Both plain
+ * text; a newline in the value is a line break. */
+export interface OpsFact {
+  label: string;
+  value: string;
+}
+
+export interface OperationsEmailInput {
+  severity: OpsSeverity;
+  /** What the chip says, when the severity's own name is not the word:
+   * a recovery is "info", and reads better as "Resolved". */
+  chip?: string;
+  /** The headline. The subject, without its "[Neoxify]" tag. */
+  title: string;
+  /** What, where, since when, how sure, what to do. */
+  facts?: OpsFact[];
+  /** The detail under the table. Plain text, paragraphs separated by a
+   * blank line; a line starting "- " is a list item. */
+  body?: string;
+  /** The page of the admin panel that answers this mail. */
+  panel?: { path: string; label: string };
+  /** A closing line in small type. */
+  note?: string;
+}
+
+function chip(severity: OpsSeverity, label: string | undefined): string {
+  const tone = SEVERITY[severity];
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 14px 0;">
+    <tr>
+      <td class="nx-chip-${severity}" bgcolor="${tone.tint}" style="padding:4px 12px 4px 10px;border-radius:999px;background:${tone.tint};color:${tone.ink};font-size:12px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;line-height:1.5;"><span style="color:${tone.dot};">&#9679;</span>&nbsp;${escapeAttribute(label ?? tone.label)}</td>
+    </tr>
+  </table>`;
+}
+
+function factsTable(facts: OpsFact[]): string {
+  const rows = facts
+    .map((fact, index) => {
+      const rule = index === facts.length - 1 ? "" : `border-bottom:1px solid ${RULE};`;
+      return `<tr>
+      <td class="nx-ink2 nx-rule" width="30%" valign="top" style="width:30%;padding:10px 12px 10px 16px;${rule}font-size:13px;line-height:1.5;color:${INK_2};text-align:left;">${escapeAttribute(fact.label)}</td>
+      <td class="nx-ink nx-rule" valign="top" style="padding:10px 16px 10px 0;${rule}font-size:14px;line-height:1.5;color:${INK};text-align:left;word-break:break-word;overflow-wrap:anywhere;">${escapeAttribute(fact.value).replace(/\n/g, "<br>")}</td>
+    </tr>`;
+    })
+    .join("");
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="nx-well" style="margin:0 0 20px 0;width:100%;background:${PEARL};border:1px solid ${RULE};border-radius:${R_WELL}px;border-collapse:separate;">
+    ${rows}
+  </table>`;
+}
+
+/** Plain text to paragraphs. "- " at the start of a line becomes a
+ * bullet: the pages are written as text first, for the webhook and the
+ * plain part, and their lists should not arrive as hyphens, nor their
+ * section headings ("Evidence:") in the same weight as what is under
+ * them. */
+function opsBody(text: string): string {
+  return text
+    .split(/\n{2,}/)
+    .filter((para) => para.trim().length > 0)
+    .map((para) => {
+      const lines = escapeAttribute(para)
+        .split("\n")
+        .map((line) => {
+          if (line.startsWith("- ")) return `&bull;&nbsp;${line.slice(2)}`;
+          // A line that ends in a colon heads what follows it.
+          return line.endsWith(":") ? `<span style="font-weight:600;">${line}</span>` : line;
+        })
+        .join("<br>");
+      return `<p class="nx-ink" style="margin:0 0 16px 0;font-size:14px;line-height:1.6;color:${INK};text-align:left;word-break:break-word;overflow-wrap:anywhere;">${lines}</p>`;
+    })
+    .join("");
+}
+
+/** A button to an address. Exported for `fillBrandSlots`, which is the
+ * only place that knows where the panel is. Staff mail is English, so
+ * it is always left-to-right. */
+function panelButton(url: string, label: string): string {
+  return button(styleFor("en"), escapeAttribute(url), escapeAttribute(label));
+}
+
+/** The staff shell: the same card, compact, and always English.
+ *
+ * Not the customer shell with different words. It carries no account
+ * notice and no way to unsubscribe -- an operator who unsubscribes from
+ * their own outage alerts has silently turned monitoring off -- and no
+ * community links, which are for customers.
+ *
+ * Reads top to bottom as: how serious, what happened, the facts, the
+ * evidence, where to go. Everything passed in is plain text and escaped
+ * here; a server name or an email address with a `<` in it cannot become
+ * markup in the owner's inbox. */
+export function operationsEmail(input: OperationsEmailInput): string {
+  const s = styleFor("en");
+  const title = escapeAttribute(input.title);
+  // The inbox line under the subject: the first facts, since they are
+  // the answer to "do I need to open this", or else the opening words.
+  const lead = input.facts?.length
+    ? input.facts
+        .slice(0, 3)
+        .map((fact) => `${fact.label}: ${fact.value}`)
+        .join(" · ")
+    : input.body || input.title;
+  const preheader = escapeAttribute(lead.replace(/\s+/g, " ").slice(0, 160));
+  const panel =
+    input.panel && /^[a-z0-9/_-]+$/.test(input.panel.path) && /^[A-Za-z0-9 ]+$/.test(input.panel.label)
+      ? `<!--neoxify:panel:${input.panel.path}|${input.panel.label}-->`
+      : "";
+
+  return frame({
+    s,
+    preheader,
+    headerHtml: `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;">
+                  <tr>
+                    <td style="text-align:left;">${wordmark(18)}</td>
+                    <td class="nx-muted" style="text-align:right;font-size:11px;font-weight:600;letter-spacing:0.8px;text-transform:uppercase;color:${MUTED};">Operations</td>
+                  </tr>
+                </table>`,
+    bodyHtml: `
+        ${chip(input.severity, input.chip)}
+        <h1 class="nx-ink nx-h1" style="margin:0 0 16px 0;font-size:20px;font-weight:600;color:${INK};letter-spacing:-0.02em;text-align:left;line-height:1.3;">${title}</h1>
+        ${input.facts?.length ? factsTable(input.facts) : ""}
+        ${input.body ? opsBody(input.body) : ""}
+        ${panel}
+        ${input.note ? fineprint(s, escapeAttribute(input.note)) : ""}
+      `,
+    footerHtml: `<p class="nx-muted" style="margin:0;font-size:12px;color:${MUTED};line-height:1.6;text-align:left;">Operations mail for the owners of this Neoxify panel.</p>`,
+  });
+}
+
+/** A moment, as a person reads it: "2026-11-10 06:30 UTC". The text
+ * part and the webhook keep the full ISO form, which is what gets
+ * pasted into a query; the table is for reading, and there the seconds,
+ * the T and the Z are noise that also wraps badly on a phone. Always
+ * UTC, and says so. */
+export function opsTime(at: Date | string): string {
+  const iso = (typeof at === "string" ? new Date(at) : at).toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+}
+
+/** A staff mail's subject, as its headline: the "[Neoxify]" tag is for
+ * the inbox list, and the header already says whose mail this is. */
+export function opsTitle(subject: string): string {
+  return subject.replace(/^\[Neoxify\]\s*/, "");
+}
+
+// ---------------------------------------------------------------------------
+// Filling the slots
+// ---------------------------------------------------------------------------
+
+export interface BrandChrome {
+  /** Where the logo images are served, no trailing slash. Absent when
+   * the API has no public address: there is then nowhere to fetch the
+   * mark from, and the header falls back to the wordmark alone -- a
+   * broken-image icon next to the product name looks worse than no
+   * image at all. */
+  logoBaseUrl?: string;
+  /** The admin panel's address, no trailing slash. Absent when it is
+   * not known; staff mail then carries no button. */
+  panelUrl?: string;
+  /** Community links that are set, in the order shown. */
+  links: { kind: BrandLinkKind; url: string }[];
+}
+
+export type BrandLinkKind = "website" | "discord" | "instagram" | "telegram";
+
+/** The footer's link names. In Persian mail they are written in Persian:
+ * three Latin words in a row at the foot of a Persian email read as a
+ * part that was left untranslated, and they also lay out backwards --
+ * Latin runs joined by dots keep their left-to-right order inside a
+ * right-to-left line, so the first link lands last. */
+const LINK_LABELS: Record<Locale, Record<BrandLinkKind, string>> = {
+  en: { website: "Website", discord: "Discord", instagram: "Instagram", telegram: "Telegram" },
+  fa: { website: "وب‌سایت", discord: "دیسکورد", instagram: "اینستاگرام", telegram: "تلگرام" },
+};
+
+/** The mark, twice: on its pearl plate, and on its smoked plate for dark
+ * mode. Only one shows. The dark one is `display:none` until the <style>
+ * block's dark rule swaps them, so a client that strips that block shows
+ * the pearl plate -- which, being a plate, looks right on any background
+ * a client's own dark mode produces. Word does not honour `display:none`
+ * on an image, hence the conditional comment that keeps the second one
+ * from Outlook altogether.
+ *
+ * The 2x file at 1x size, so it is sharp on a phone. `width`, `height`
+ * and an empty `alt` hold the layout when images are blocked: the name
+ * is already beside it as text, and saying it twice helps nobody. */
+function logoHtml(base: string, rtl: boolean): string {
+  const gap = rtl ? "margin:0 0 0 10px;" : "margin:0 10px 0 0;";
+  const img = (variant: "light" | "dark", cls: string, display: string) =>
+    `<img class="${cls}" src="${escapeAttribute(base)}/email-logo-${variant}-2x.png" width="40" height="40" alt="" ` +
+    `style="display:${display};width:40px;height:40px;${gap}border:0;outline:none;vertical-align:middle;border-radius:12px;">`;
+  return (
+    img("light", "nx-logo-l", "inline-block") +
+    `<!--[if !mso]><!-->${img("dark", "nx-logo-d", "none")}<!--<![endif]-->`
+  );
+}
+
+function linksHtml(links: BrandChrome["links"], locale: Locale): string {
+  const align = locale === "fa" ? "right" : "left";
+  // Nothing set, nothing rendered -- not an empty row of separators.
+  // Same rule the app's header follows: never show a way to reach us
+  // that goes nowhere.
+  if (links.length === 0) return "";
+  const rendered = links
+    .map(
+      (link) =>
+        `<a href="${escapeAttribute(link.url)}" class="nx-ink2" style="color:${INK_2};text-decoration:none;font-weight:600;">${LINK_LABELS[locale][link.kind]}</a>`,
+    )
+    // A middle dot rather than a table of buttons: this is a footer,
+    // and it should not compete with the message above it.
+    .join(`<span style="color:#b6bcc9;">&nbsp;&nbsp;&middot;&nbsp;&nbsp;</span>`);
+  return `<p style="margin:0 0 8px 0;font-size:12px;line-height:1.6;text-align:${align};">${rendered}</p>`;
+}
+
+/** Fills the slots a template left behind. Pure: EmailBrandService
+ * supplies the runtime facts, and the preview script supplies its own.
+ *
+ * The direction is read back off the document rather than passed in,
+ * because the slots are filled long after the template that knew it has
+ * returned -- and the gap beside the logo has to be on the side the
+ * wordmark is on. */
+export function fillBrandSlots(html: string, chrome: BrandChrome): string {
+  const rtl = html.includes('<html dir="rtl"');
+  const logo = chrome.logoBaseUrl ? logoHtml(chrome.logoBaseUrl, rtl) : "";
+  const links = linksHtml(chrome.links, rtl ? "fa" : "en");
+  // Functions, not strings: a `$&` in an operator-entered link would
+  // otherwise be read as a replacement pattern.
+  return html
+    .replace(BRAND_LOGO_SLOT, () => logo)
+    .replace(BRAND_LINKS_SLOT, () => links)
+    .replace(PANEL_SLOT, (_slot, path: string, label: string) =>
+      chrome.panelUrl ? panelButton(`${chrome.panelUrl}${path}`, label) : "",
+    );
 }

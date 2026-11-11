@@ -2,17 +2,24 @@ import { Injectable, Logger } from "@nestjs/common";
 import { AdminRole } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EmailService } from "../email/email.service";
+import { operationsEmail, opsTitle, type OperationsEmailInput } from "../email/templates";
 import { AlertingService } from "./alerting.service";
 
 export interface Page {
   /** The email subject. */
   subject: string;
-  /** The email body, plain text; paragraphs separated by a blank line. */
+  /** The email body, plain text; paragraphs separated by a blank line.
+   * Complete on its own: it is what a mail client without html shows. */
   text: string;
   /** The one-line form for the webhook. The subject when absent. */
   webhook?: string;
   /** Extra fields for the webhook body. Never addresses. */
   context?: Record<string, unknown>;
+  /** How the html mail lays the page out: how serious, the facts as a
+   * table, the detail under them, and the panel page that answers it.
+   * Without it the mail is the text, marked "info". The headline is
+   * always the subject. */
+  mail?: Omit<OperationsEmailInput, "title">;
 }
 
 export interface PageDelivery {
@@ -53,10 +60,12 @@ export class PagerService {
         where: { role: AdminRole.SUPERADMIN },
         select: { email: true },
       });
-      const html = page.text
-        .split("\n\n")
-        .map((paragraph) => `<p>${escapeHtml(paragraph).replace(/\n/g, "<br>")}</p>`)
-        .join("");
+      const html = operationsEmail({
+        severity: "info",
+        body: page.text,
+        ...page.mail,
+        title: opsTitle(page.subject),
+      });
       for (const { email } of owners) {
         const sent = await this.email.sendMail({ to: email, subject: page.subject, text: page.text, html });
         (sent ? result.mailed : result.failed).push(email);
@@ -95,8 +104,4 @@ export class HourlyBudget {
   left(now: number = Date.now()): number {
     return Math.max(0, this.perHour - this.spent.filter((at) => now - at < 3_600_000).length);
   }
-}
-
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
