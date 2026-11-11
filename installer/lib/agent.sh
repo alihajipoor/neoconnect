@@ -327,6 +327,12 @@ action_install_agent() {
   prepare_provider_image
   install_base_deps
   raise_conntrack_max
+  # Before any engine exists to fill them: see installer/lib/logs.sh.
+  # Skipped where logs.sh was not loaded (a script that sources agent.sh
+  # alone).
+  if declare -F install_log_limits >/dev/null; then
+    install_log_limits
+  fi
   fetch_agent_binary
   install_agentd_unit
 
@@ -2918,6 +2924,7 @@ PY
   cat > /etc/logrotate.d/xray <<'EOF'
 /var/log/xray/*.log {
   daily
+  maxsize 100M
   rotate 1
   compress
   missingok

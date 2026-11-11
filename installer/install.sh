@@ -28,6 +28,8 @@ ROLE_FILE="/etc/neoxify/role"
 . "$SCRIPT_DIR/lib/menu.sh"
 # shellcheck source=lib/image.sh
 . "$SCRIPT_DIR/lib/image.sh"
+# shellcheck source=lib/logs.sh
+. "$SCRIPT_DIR/lib/logs.sh"
 # shellcheck source=lib/agent.sh
 . "$SCRIPT_DIR/lib/agent.sh"
 # shellcheck source=lib/panel.sh
