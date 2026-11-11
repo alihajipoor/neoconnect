@@ -37,7 +37,7 @@ describe("CreateNodeDto: the region label", () => {
     }
   });
 
-  it("accepts all 249 countries and nothing else two letters long", async () => {
+  it("accepts all 249 countries and nothing else two letters long", () => {
     expect(ISO_COUNTRY_CODES.size).toBe(249);
     for (const code of ISO_COUNTRY_CODES) {
       expect(code).toMatch(/^[a-z]{2}$/);
