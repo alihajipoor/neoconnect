@@ -88,6 +88,58 @@ resolve_agent_release_base() {
   echo "https://github.com/$AGENT_REPO/releases/download/$tag"
 }
 
+# Every ISO 3166-1 alpha-2 country code: all 249. The apps carry a flag, a
+# name and a place on the map for exactly these, and the backend holds a
+# new node to the same list (apps/backend/src/common/iso-countries.ts).
+# apps/desktop-windows/src/lib/flags.test.ts fails if the lists differ.
+ISO_COUNTRY_CODES="ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj bl bm bn bo bq br bs bt bv bw by bz ca cc cd cf cg ch ci ck cl cm cn co cr cu cv cw cx cy cz de dj dk dm do dz ec ee eg eh er es et fi fj fk fm fo fr ga gb gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu id ie il im in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz la lb lc li lk lr ls lt lu lv ly ma mc md me mf mg mh mk ml mm mn mo mp mq mr ms mt mu mv mw mx my mz na nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk pl pm pn pr ps pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si sj sk sl sm sn so sr ss st sv sx sy sz tc td tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug um us uy uz va vc ve vg vi vn vu wf ws ye yt za zm zw"
+
+# Prints why a region label cannot be used, and nothing when it can.
+#
+# The apps read a server's country off the first two letters of its
+# label: the flag, the name and the light on the map all come from there.
+# A label that starts with anything else shows customers a globe, in apps
+# they already have and that cannot be told otherwise -- Sweden's did on
+# 2026-11-11 for want of a flag, and uk-london would for want of a code.
+# The backend refuses such a label as well, but by the time it is asked
+# this install has already put packages on the box, so the question is
+# settled here first.
+#
+# What neither can catch is a wrong code that is also a country:
+# la-los-angeles is a well-formed label for a server in Laos.
+node_region_problem() {
+  local region="$1" code
+  local form='^[a-z]{2}-[a-z0-9]+(-[a-z0-9]+)*$'
+  # So that a-z is those twenty-six letters whatever this box's locale.
+  local LC_ALL=C
+  if [[ ! "$region" =~ $form ]]; then
+    echo "write the country's two-letter code, a dash, then a name, like fi-finland or us-new-york"
+    return 0
+  fi
+  code="${region%%-*}"
+  case " $ISO_COUNTRY_CODES " in
+    *" $code "*) ;;
+    *) echo "'$code' is not a country's ISO code (the United Kingdom is gb, Greece is gr)" ;;
+  esac
+}
+
+# Asks for the region label until it names a country, and leaves it in
+# node_region, lower case.
+ask_node_region() {
+  local problem
+  while :; do
+    # The end of the input ends the install: asking again would never stop.
+    read -r -p "Region label -- the country's two-letter code, a dash, a name (e.g. fi-finland): " node_region || return 1
+    node_region="${node_region,,}"
+    problem="$(node_region_problem "$node_region")"
+    if [[ -z "$problem" ]]; then
+      return 0
+    fi
+    echo "  Not usable: $problem." >&2
+    echo "  The code is what gives this server its flag and country name in the apps." >&2
+  done
+}
+
 # Where the binary being replaced is kept, so a bad build has something
 # to go back to.
 #
@@ -326,7 +378,7 @@ EOF
 
   echo
   read -r -p "Name for this node (e.g. finland-1): " node_name
-  read -r -p "Region label (e.g. fi-finland): " node_region
+  ask_node_region || exit 1
   read -r -p "Public IP [$detected_ip]: " node_ip
   node_ip="${node_ip:-$detected_ip}"
 

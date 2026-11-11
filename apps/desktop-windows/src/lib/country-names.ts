@@ -14,7 +14,14 @@ import type { Language } from "./i18n";
  *    people say.
  *
  * This list is also what makes a code a country: `Flag` draws a flag for a
- * code that is here and the globe for one that is not (`zz`, `xx`, `uk`).
+ * code that is here and the globe for one that is not (`zz`, `xx`, `xk`).
+ * `uk` and `el` are read as `gb` and `gr` before they get here
+ * (`countryCode`).
+ *
+ * The backend and the installer each hold the same 249 codes, to refuse a
+ * server whose label names no country (`iso-countries.ts`,
+ * `ISO_COUNTRY_CODES` in `installer/lib/agent.sh`); `flags.test.ts` fails
+ * if the three lists differ.
  *
  * A `Record<Language, ...>` so a language added later is a build error
  * here until it names them too. Written by hand; country names are not

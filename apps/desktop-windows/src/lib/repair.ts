@@ -256,14 +256,22 @@ export async function repairCommandLine(): Promise<string> {
  * nothing private is in it. Everything here is a count, a yes/no, or a
  * name this product chose; nothing is read out of a config, a profile
  * or a credential store.
+ *
+ * `flagSet` is how many flags the app's on-demand flag set held when it
+ * was read just now, or null if it could not be read (`lib/flag-art.ts`).
+ * It is here because nothing else shows it: that set is only ever read for
+ * a server in a country the app does not draw by hand, and until one
+ * opens there is no screen on which to see whether an installed app can
+ * read it. Left out when the caller did not ask.
  */
-export function diagnosticsToText(d: Diagnostics, appVersion: string): string {
+export function diagnosticsToText(d: Diagnostics, appVersion: string, flagSet?: number | null): string {
   const yesNo = (value: boolean) => (value ? "yes" : "no");
   const list = (values: string[]) => (values.length ? values.join(", ") : "none");
 
   const lines = [
     "Neoxify diagnostics",
     `app: ${appVersion}`,
+    ...(flagSet === undefined ? [] : [`flag set: ${flagSet === null ? "could not be read" : `${flagSet} flags`}`]),
     `service: ${d.serviceVersion}`,
     `our adapters: ${list(d.ourAdapters.map((a) => `${a.name}=${yesNo(a.present)}`))}`,
     `other VPNs up: ${list(d.otherVpnsUp)}`,

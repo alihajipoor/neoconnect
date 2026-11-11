@@ -11,16 +11,33 @@ import type { RouteOption } from "./types";
  * customer is choosing, and the one the far end sees.
  */
 
+/** Two codes people write for a country that are not its ISO code: `uk`
+ * for the United Kingdom (`gb`) and `el`, the EU's own, for Greece
+ * (`gr`). Neither is any other country's, so reading them as the country
+ * meant can never show the wrong one -- where leaving `uk-london` unread
+ * drew a globe beside a server in Britain. */
+const WRITTEN_AS = new Map([
+  ["uk", "gb"],
+  ["el", "gr"],
+]);
+
 /** The ISO code out of a region slug.
  *
- * `region` is free text in the database (`fi-finland`, `fr-france`,
- * `sg-singapore`), so this reads the prefix rather than trusting a
- * column that does not exist. Anything that is not two letters before a
- * dash is not a country this can name. */
+ * `region` is a label typed when the server is added (`fi-finland`,
+ * `fr-france`, `sg-singapore`), so this reads the prefix rather than
+ * trusting a column that does not exist. The backend and the installer
+ * hold a new label to that form (`CreateNodeDto`, `node_region_problem`);
+ * this is what the apps make of one that got in some other way.
+ *
+ * Anything that is not two letters before a dash is not a country this
+ * can name. A space does not count as the dash: every country has a flag
+ * now, so "No region" would be drawn as Norway and "St Petersburg" as
+ * São Tomé, where a globe is the honest answer for plain words. */
 export function countryCode(region: string | undefined | null): string | null {
   if (!region) return null;
-  const head = region.trim().toLowerCase().split(/[-_\s]/)[0];
-  return /^[a-z]{2}$/.test(head) ? head : null;
+  const head = region.trim().toLowerCase().split(/[-_]/)[0];
+  if (!/^[a-z]{2}$/.test(head)) return null;
+  return WRITTEN_AS.get(head) ?? head;
 }
 
 /** The country a region slug is in, or the slug as written when this

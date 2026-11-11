@@ -9,6 +9,7 @@ import {
   replyToSupportTicket,
 } from "../lib/customer";
 import { collectDiagnostics, diagnosticsToText } from "../lib/repair";
+import { loadFlagSet } from "../lib/flag-art";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { swapView } from "../lib/view-transition";
@@ -176,11 +177,15 @@ function DiagnosticsCard() {
       // the two are replaced by different mechanisms -- the installer
       // and the updater -- so they can genuinely differ, and a mismatch
       // between them has explained more than one report.
-      const [snapshot, appVersion] = await Promise.all([
+      // And the flag set is read here, on demand like any row that needs
+      // it: the count in the text is the proof that this installed app
+      // can read it (see diagnosticsToText).
+      const [snapshot, appVersion, flags] = await Promise.all([
         collectDiagnostics(),
         getVersion().catch(() => "unknown"),
+        loadFlagSet(),
       ]);
-      setText(diagnosticsToText(snapshot, appVersion));
+      setText(diagnosticsToText(snapshot, appVersion, flags ? Object.keys(flags).length : null));
     } catch {
       // Nothing partial. A snapshot missing the half the service
       // answers is worse than none: it would read as "everything is

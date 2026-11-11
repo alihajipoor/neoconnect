@@ -176,6 +176,12 @@ jobs:
       - name: IPv4-only maintenance script brings an old node to the template
         run: bash scripts/test-xray-ipv4-only.sh
 
+      # The apps read a server's country off the front of its region label.
+      # One that names no country is a globe in apps customers already have
+      # (Sweden's server, 2026-11-11), so the installer asks until it does.
+      - name: Installer refuses a region label that names no country
+        run: bash scripts/test-node-region.sh
+
       # Same class of silence, different pair of files. Shadowsocks and
       # IKEv2 were both live on real nodes while the panel could offer
       # neither, so a plan created there quietly granted a narrower set

@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Flag, HAND_DRAWN, RouteFlag } from "../components/Flag";
 import { COUNTRY_NAMES, isCountry } from "./country-names";
 import { flagSet, loadFlagSet } from "./flag-art";
@@ -13,7 +13,15 @@ import { flagSet, loadFlagSet } from "./flag-art";
 
 const CODES = Object.keys(COUNTRY_NAMES);
 const FLAGS_DIR = fileURLToPath(new URL("../assets/flags/", import.meta.url));
-const flag = (region: string | null) => renderToStaticMarkup(createElement(Flag, { region }));
+const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
+
+// The first test to load the set waits while the runner reads and
+// transforms 237 files one by one, which takes seconds when the whole
+// suite runs beside it. (The app reads one chunk the build already made.)
+// For every test here, so that any one of them can be run alone.
+vi.setConfig({ testTimeout: 120_000 });
+
+const flag =(region: string | null) => renderToStaticMarkup(createElement(Flag, { region }));
 const GLOBE = "lucide-globe";
 
 describe("a flag for every country", () => {
@@ -29,10 +37,6 @@ describe("a flag for every country", () => {
     expect(html).not.toContain("<path");
   });
 
-  // The first load: here the test runner reads and transforms 237 files one
-  // by one, which takes seconds when the whole suite runs beside it. (The
-  // app reads one chunk the build already made.) Every later test awaits
-  // the same, finished promise.
   it("keeps the hand-drawn flags out of the set, and has a file for every other country", async () => {
     const set = (await loadFlagSet())!;
     expect(CODES).toHaveLength(249);
@@ -40,7 +44,7 @@ describe("a flag for every country", () => {
     const fromSet = CODES.filter((code) => !HAND_DRAWN.includes(code));
     expect(Object.keys(set).sort()).toEqual(fromSet.sort());
     expect(readdirSync(FLAGS_DIR).sort()).toEqual(fromSet.map((code) => `${code}.svg`).sort());
-  }, 120_000);
+  });
 
   it("draws a flag, not the globe, for all 249", async () => {
     const set = (await loadFlagSet())!;
@@ -62,7 +66,10 @@ describe("a flag for every country", () => {
 
   it("leaves the globe for a region that names no country", async () => {
     await loadFlagSet();
-    for (const region of ["zz-nowhere", "xx-lab", "uk-london", "frankfurt", "", null]) {
+    // Among them plain words whose first two letters are some country's
+    // code: "No region" is not Norway.
+    const none = ["zz-nowhere", "xx-lab", "xk-pristina", "deu-frankfurt", "frankfurt", "No region", "St Petersburg", "", null];
+    for (const region of none) {
       const html = flag(region);
       expect(html, String(region)).toContain(GLOBE);
       expect(html, String(region)).not.toContain('role="img"');
@@ -71,6 +78,16 @@ describe("a flag for every country", () => {
     expect(isCountry("xx")).toBe(false);
     expect(isCountry(null)).toBe(false);
     expect(isCountry("se")).toBe(true);
+  });
+
+  /** `uk` is what people type for Britain and `el` is the EU's Greece:
+   * each draws the flag of the country meant, not the globe. */
+  it("draws the country meant by uk and by el", async () => {
+    await loadFlagSet();
+    const inner = (html: string) => html.slice(html.indexOf(">") + 1);
+    expect(flag("uk-london")).not.toContain(GLOBE);
+    expect(inner(flag("uk-london"))).toBe(inner(flag("gb-united-kingdom")));
+    expect(inner(flag("el-athens"))).toBe(inner(flag("gr-greece")));
   });
 
   /** Same box, same rounding, same fit as a hand-drawn flag, at every size
@@ -137,5 +154,55 @@ describe("the flag set's files", () => {
   it("stay small enough to load in one piece", () => {
     const total = files.reduce((sum, file) => sum + file.svg.length, 0);
     expect(total).toBeLessThan(200_000);
+  });
+});
+
+/** The set is a chunk of its own only while nothing imports it outright:
+ * one `import ... from "./flag-set"` anywhere moves all 237 flags into the
+ * first load, and every other test here still passes. */
+describe("the flag set stays out of the first load", () => {
+  const sources = (dir: string) =>
+    (readdirSync(dir, { recursive: true }) as string[])
+      .filter((name) => /\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name))
+      .map((name) => ({ name: name.replace(/\\/g, "/"), text: readFileSync(dir + name, "utf8") }));
+  // Any import, export or import() that names the module.
+  const NAMES_IT = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)["'][^"']*\/flag-set(?:\.ts)?["']/g;
+  const TYPE_ONLY = /\bimport\s+type\s[^;]*?from\s*["'][^"']*\/flag-set(?:\.ts)?["']/g;
+
+  it("is imported by flag-art.ts alone, and there only on demand", () => {
+    const files = [...sources(fileURLToPath(new URL("../", import.meta.url))), ...sources(REPO + "apps/mobile/src/")];
+    expect(files.length).toBeGreaterThan(100);
+    const naming = files.filter((file) => file.text.match(NAMES_IT));
+    expect(naming.map((file) => file.name)).toEqual(["lib/flag-art.ts"]);
+
+    const loader = naming[0].text;
+    expect(loader.match(TYPE_ONLY)).toHaveLength(1);
+    // What is left once the type import is set aside is the one import().
+    const rest = loader.replace(TYPE_ONLY, "").match(NAMES_IT) ?? [];
+    expect(rest).toHaveLength(1);
+    expect(rest[0]).toMatch(/^import\s*\(/);
+  });
+});
+
+/** A server's label is held to `<country code>-<name>` where it is typed:
+ * by the backend, for the panel's form and anything else that creates a
+ * node, and by the installer's own prompt. Both must accept exactly the
+ * countries the app can draw and name -- one fewer and a real country is
+ * refused, one more and that country's server is back to a globe. */
+describe("the lists that decide whether a label names a country", () => {
+  const codesIn = (file: string, pattern: RegExp) => {
+    const found = pattern.exec(readFileSync(REPO + file, "utf8"));
+    expect(found, file).not.toBeNull();
+    return found![1].trim().split(/\s+/);
+  };
+
+  it("are the app's 249, in the backend", () => {
+    const backend = codesIn("apps/backend/src/common/iso-countries.ts", /ISO_COUNTRY_CODES[^=]*=\s*new Set\(\s*`([a-z\s]+)`/);
+    expect(backend).toEqual([...CODES].sort());
+  });
+
+  it("are the app's 249, in the installer", () => {
+    const installer = codesIn("installer/lib/agent.sh", /^ISO_COUNTRY_CODES="([a-z\s]+)"$/m);
+    expect(installer).toEqual([...CODES].sort());
   });
 });

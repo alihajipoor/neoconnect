@@ -118,8 +118,33 @@ describe("naming the place", () => {
   it("reads the ISO code off a region slug", () => {
     expect(countryCode("fi-finland")).toBe("fi");
     expect(countryCode(" DE_germany ")).toBe("de");
+    expect(countryCode("se")).toBe("se");
     expect(countryCode("germany")).toBeNull();
+    expect(countryCode("deu-frankfurt")).toBeNull();
+    expect(countryCode("de.frankfurt")).toBeNull();
     expect(countryCode(null)).toBeNull();
+  });
+
+  /** The two codes people write that the standard does not assign. Left
+   * unread, a server typed in as `uk-london` had a globe for a flag. */
+  it("reads uk as the United Kingdom and el as Greece", () => {
+    expect(countryCode("uk-london")).toBe("gb");
+    expect(countryCode("el-athens")).toBe("gr");
+    expect(countryName("uk-london", "en")).toBe(COUNTRY_NAMES.gb.en);
+    expect(countryName("uk-london", "fa")).toBe(COUNTRY_NAMES.gb.fa);
+    expect(countryName("el-athens", "en")).toBe("Greece");
+  });
+
+  /** With a flag for all 249 codes, two letters and a space are a country
+   * far too often: these were Norway and São Tomé. Words are not a slug,
+   * and stay as written. (A slug whose first two letters are another
+   * country's code -- `la-los-angeles` is Laos -- reads as that country
+   * here; that one is stopped where the label is typed.) */
+  it("does not find a country in plain words", () => {
+    for (const words of ["No region", "St Petersburg", "to be decided", "in progress"]) {
+      expect(countryCode(words), words).toBeNull();
+      expect(countryName(words, "en"), words).toBe(words);
+    }
   });
 });
 

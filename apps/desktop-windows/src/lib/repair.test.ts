@@ -221,6 +221,14 @@ describe("the diagnostics text a customer pastes", () => {
     expect(text).not.toContain("cleanup.log");
   });
 
+  /** The one place an installed app shows whether it could read its flag
+   * set: no server is in a country that needs it yet, so no row does. */
+  it("says how many flags the flag set held, or that it could not be read", () => {
+    expect(diagnosticsToText(EMPTY, "0.9.63", 237)).toContain("\nflag set: 237 flags\n");
+    expect(diagnosticsToText(EMPTY, "0.9.63", null)).toContain("\nflag set: could not be read\n");
+    expect(diagnosticsToText(EMPTY, "0.9.63")).not.toContain("flag set");
+  });
+
   /** The privacy boundary, asserted from the outside.
    *
    * The service composes this from named fields and never from a
