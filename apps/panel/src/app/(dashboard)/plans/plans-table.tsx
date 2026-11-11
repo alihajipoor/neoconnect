@@ -1,7 +1,7 @@
 "use client";
 
 import { MoreHorizontal, Plus } from "lucide-react";
-import type { Route, SubscriptionPlan } from "@/lib/types";
+import type { Node, ProtocolConfig, Route, SubscriptionPlan } from "@/lib/types";
 import { formatBytes } from "@/lib/utils";
 import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
 import { deletePlan } from "./actions";
@@ -20,10 +20,14 @@ import {
 export function PlansTable({
   plans,
   routes,
+  protocolConfigs,
+  nodes,
   canManage,
 }: {
   plans: SubscriptionPlan[];
   routes: Route[];
+  protocolConfigs: ProtocolConfig[];
+  nodes: Node[];
   canManage: boolean;
 }) {
   return (
@@ -36,6 +40,8 @@ export function PlansTable({
         {canManage && (
           <PlanFormDialog
             routes={routes}
+            protocolConfigs={protocolConfigs}
+            nodes={nodes}
             trigger={
               <Button size="sm">
                 <Plus /> New Plan
@@ -77,7 +83,10 @@ export function PlansTable({
                   </TableCell>
                   <TableCell>{plan.durationDays}d</TableCell>
                   <TableCell>${plan.priceUsd}</TableCell>
-                  <TableCell>
+                  {/* Wraps, unlike the other cells: eight chips on one line
+                      pushed the row menu off the right edge below about
+                      1900px. */}
+                  <TableCell className="min-w-48 whitespace-normal">
                     <div className="flex flex-wrap gap-1">
                       {plan.protocolsAllowed.map((p) => (
                         <Badge key={p} variant="outline">
@@ -103,6 +112,8 @@ export function PlansTable({
                           <PlanFormDialog
                             plan={plan}
                             routes={routes}
+                            protocolConfigs={protocolConfigs}
+                            nodes={nodes}
                             trigger={
                               <DropdownMenuItem onSelect={(e) => e.preventDefault()}>Edit</DropdownMenuItem>
                             }

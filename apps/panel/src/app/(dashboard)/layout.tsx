@@ -16,7 +16,9 @@ export default async function DashboardLayout({ children }: { children: React.Re
         </div>
         <SidebarNav role={session.role} />
       </aside>
-      <div className="flex flex-1 flex-col">
+      {/* min-w-0: a wide table scrolls inside its own box instead of
+          stretching the page past the window. */}
+      <div className="flex min-w-0 flex-1 flex-col">
         <DashboardHeader session={session} />
         <main className="flex-1 p-6">{children}</main>
       </div>

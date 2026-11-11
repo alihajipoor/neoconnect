@@ -10,6 +10,7 @@ import { Card } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { runReachabilityNow } from "./actions";
+import { RetiredSwitch } from "@/components/dashboard/retired-switch";
 
 /**
  * How each verdict reads to an operator, and how loudly.
@@ -60,13 +61,19 @@ function ago(iso: string | null): string {
 }
 
 export function ReachabilityView({
-  nodes,
+  nodes: allNodes,
   canProbe,
 }: {
   nodes: NodeReachability[];
   canProbe: boolean;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Retired servers (agent status DISABLED) are hidden unless asked for,
+  // and left out of the blocked/degraded summaries either way: a server
+  // nobody is sent to is not news.
+  const [showRetired, setShowRetired] = useState(false);
+  const retiredCount = allNodes.filter((n) => n.agentStatus === "DISABLED").length;
+  const nodes = showRetired ? allNodes : allNodes.filter((n) => n.agentStatus !== "DISABLED");
   const [pending, startTransition] = useTransition();
 
   const probeNow = () =>
@@ -80,8 +87,9 @@ export function ReachabilityView({
   // The condition the page exists for: the agent says the node is fine
   // and Iran cannot reach it. Counted separately so it can be stated in
   // words rather than left for the reader to spot in the table.
-  const blocked = nodes.filter((n) => n.verdict === "UNREACHABLE");
-  const degraded = nodes.filter((n) => n.verdict === "DEGRADED");
+  const live = nodes.filter((n) => n.agentStatus !== "DISABLED");
+  const blocked = live.filter((n) => n.verdict === "UNREACHABLE");
+  const degraded = live.filter((n) => n.verdict === "DEGRADED");
 
   return (
     <div className="space-y-6">
@@ -95,6 +103,9 @@ export function ReachabilityView({
             the agent heartbeats outbound, so it keeps working when inbound connections are dropped.
             This page is the only thing that sees that.
           </p>
+          <div className="mt-2">
+            <RetiredSwitch count={retiredCount} checked={showRetired} onCheckedChange={setShowRetired} />
+          </div>
         </div>
         {canProbe ? (
           <Button onClick={probeNow} disabled={pending} variant="outline">

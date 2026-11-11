@@ -31,6 +31,14 @@ function DialogOverlay({ className, ...props }: React.ComponentProps<typeof Dial
   );
 }
 
+/** Never taller than the screen. The plan editor once grew to four times
+ * the window height with nothing scrolling, so its title and Save button
+ * could not be reached. The content is capped at the viewport; a form
+ * directly inside it is what scrolls, so the title above it stays put and
+ * the DialogFooter inside it sticks to the bottom. Dialogs without a form
+ * scroll as a whole. The form is made relative so that absolutely placed
+ * children (Radix renders a hidden input beside every checkbox in a form)
+ * are clipped with it instead of stretching the dialog itself. */
 function DialogContent({
   className,
   children,
@@ -42,7 +50,7 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "fixed top-[50%] left-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+          "fixed top-[50%] left-[50%] z-50 flex max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-lg translate-x-[-50%] translate-y-[-50%] flex-col gap-4 overflow-y-auto [&>form]:-mx-1 [&>form]:min-h-0 [&>form]:overflow-y-auto [&>form]:relative [&>form]:px-1 rounded-lg border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
           className,
         )}
         {...props}
@@ -71,7 +79,10 @@ function DialogFooter({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="dialog-footer"
-      className={cn("flex flex-col-reverse gap-2 sm:flex-row sm:justify-end", className)}
+      className={cn(
+        "sticky bottom-0 z-10 -mx-1 flex flex-col-reverse gap-2 bg-background px-1 pt-2 sm:flex-row sm:justify-end",
+        className,
+      )}
       {...props}
     />
   );
