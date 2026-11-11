@@ -9181,6 +9181,8 @@ Tight load. **Persian still requests
 still renders in Vazirmatn from the hashed copy. The next portal deploy
 from main (or one more copied file) clears it.
 
+Later the same night: the Vazirmatn copy was added (`account/assets/assets/Vazirmatn-variable.woff2`, sha256-identical to the build's hashed file); every font URL in the CSS now returns 200, and headless Edge shows no failed request on the Persian or the English page.
+
 The shortened unsigned-installer line ("We plan to get a signing
 certificate.", drops "before the public launch", en+fa, one sentence
 each) is on `claude/website-download-line`, not merged, not live. The
