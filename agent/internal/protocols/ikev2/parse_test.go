@@ -78,6 +78,11 @@ type fakeSwanctl struct {
 	stats      string
 	loadErr    error
 	loadAllErr error
+	// The file --load-creds reads, as the real one reads the node's. It
+	// prints a line per secret it loaded and exits 0 even when one did
+	// not load; dropLoaded leaves that many out, from the end.
+	secretsPath string
+	dropLoaded  int
 }
 
 // count is how many times swanctl was run with this first argument.
@@ -117,7 +122,22 @@ func (f *fakeSwanctl) run(_ context.Context, args ...string) (string, string, er
 		if f.loadErr != nil {
 			return "", f.loadErr.Error(), f.loadErr
 		}
-		return "", "", nil
+		var names []string
+		if onDisk, err := os.ReadFile(f.secretsPath); err == nil {
+			for _, line := range strings.Split(string(onDisk), "\n") {
+				if name, ok := strings.CutSuffix(strings.TrimSpace(line), " {"); ok && strings.HasPrefix(name, "eap-") {
+					names = append(names, name)
+				}
+			}
+		}
+		if f.dropLoaded > 0 && f.dropLoaded <= len(names) {
+			names = names[:len(names)-f.dropLoaded]
+		}
+		out := "loaded certificate from '/etc/swanctl/x509/server.pem'\n"
+		for _, name := range names {
+			out += "loaded eap secret '" + name + "'\n"
+		}
+		return out, "", nil
 	case "--load-all":
 		if f.loadAllErr != nil {
 			return "", f.loadAllErr.Error(), f.loadAllErr
@@ -168,6 +188,7 @@ func withFake(t *testing.T, output string) (*Provisioner, *fakeSwanctl) {
 	f := &fakeSwanctl{listSAs: output}
 	p := New(filepath.Join(t.TempDir(), "users.conf"), missingSwanctl)
 	p.runSwanctl = f.run
+	f.secretsPath = p.secretsPath
 	p.users["nx-user1"] = "secret-1"
 	p.users["nx-user2"] = "secret-2"
 	return p, f
