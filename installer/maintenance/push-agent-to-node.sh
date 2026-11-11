@@ -72,8 +72,13 @@ grep "$ASSET" sha256sums.txt | sha256sum -c - || {
 # network fetch, which is the whole problem on this class of node.
 install -d -m 755 /var/lib/neoxify/agentd-rollback
 if [[ -x /usr/local/bin/agentd ]]; then
-  cp -a /usr/local/bin/agentd \
-    "/var/lib/neoxify/agentd-rollback/agentd-prev-$(sha256sum /usr/local/bin/agentd | cut -c1-12)"
+  prev="/var/lib/neoxify/agentd-rollback/agentd-prev-$(sha256sum /usr/local/bin/agentd | cut -c1-12)"
+  cp -a /usr/local/bin/agentd "$prev"
+  # cp -a keeps the binary's own date, and the cleanup below goes by
+  # date: a binary installed with an old one would be saved and removed
+  # in the same run. Stamp the copy with now, so the newest saved is the
+  # newest listed.
+  touch "$prev"
 fi
 # Keep the two newest and remove the rest: each is about 32 MB and one was
 # left behind by every upgrade, for good. `|| true` because on a node with
