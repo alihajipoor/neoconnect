@@ -9036,3 +9036,61 @@ and 55% of them are older than 35 days. `agent_commands` has 8,332 rows
 QUEUED for DISABLED nodes. No production data was changed tonight. The
 keep-rule and the delete plan go to the owner first, with a dump
 before any delete.
+
+## 2026-11-11 (night, later) — new sign-ups get Starter, the plan editor, deploy 2, iOS build 19
+
+**Status:** panel deployed; trial setting change waiting for the owner; iOS build 19 in TestFlight beta review
+**Touches:** apps/panel (plan editor, dialogs, retired servers), the free-trial setting (not changed)
+
+**Why new accounts get Starter, not Trial.** No code picks Starter. The
+setting `free_trial_settings.trialPlanId` does, and it points at
+Starter. It was last saved through the panel's Settings, Trial page on
+2026-10-22 at 20:02 UTC, about 1.5 hours before the owner reported that
+new accounts got no trial at all (fixed by `b0422e20`, a missing
+trial-route setting). Nothing records who saved it or why; setting
+changes write no audit row. Every sign-up of the last two days (9) got
+Starter. `grantFreeTrialUnlocked` in `customer-auth.service.ts` reads
+only this setting, for email, Google/Apple and the sign-in retry; admin,
+reseller, voucher and referral accounts name their own plan.
+
+**Not applied, on purpose.** Switching it to Trial is one panel save
+(Settings, Trial, pick "Trial") or `PATCH /free-trial-settings` as
+SUPERADMIN. It is the owner's call because it is not a like-for-like
+swap: Starter has no data cap and 1 device, Trial is 50 GB, 30 days and
+2 devices (same 56 routes, no Apple product). Until he says yes, new
+trials stay on Starter. After a switch, the first real sign-up landing
+on Trial is still **unverified**. Side findings, not acted on: ordinary
+email sign-up accepts throwaway addresses, a deleted account frees its
+address for a second trial, Trial allows more devices than paid Starter,
+and a backup-route account that later confirms its email also gets a
+trial.
+
+**The two inactive plans the owner asked about.** Internal test has 0
+subscribers and is where new servers are tried first (the canary rule).
+Ultimate Max has 1 active subscriber, so the panel will not delete it
+until that subscription ends or moves.
+
+**Plan editor (`claude/panel-plan-edit`, merged as `4858aa29`).** The
+edit dialog grew to 4,656 px with its title off-screen. Dialogs are now
+capped at the window height with a scrolling body and a fixed footer.
+Routes are grouped per server, collapsible, with tick-all and a filter.
+Retired servers (DISABLED nodes) are hidden behind a "Show retired
+servers" switch here and on Nodes, Routes, Protocol Configs,
+Reachability and the pickers; a retired route a plan still has ticked is
+listed first, marked, and stays on the plan when saved unless unticked.
+No backend change. Proven against a mock API in headless Chrome
+(screenshots in `.claude/reviews/panel-plan-edit/`, not committed);
+saving against the real backend is **unverified**.
+
+**Deploy 2.** The panel host runs `4858aa29`; backend and panel
+containers were recreated at 22:08 UTC, after the merge, with 0
+restarts. No migration, so tonight's earlier dump was reused. All 8
+nodes ONLINE afterwards, ir2 included. Disk 47%.
+
+**iOS build 1.0.1 (19)** = mobile 0.2.40 (`7c4d3520`, per-location
+flags) is on TestFlight only: VALID, in the external and internal
+groups, external beta review WAITING_FOR_REVIEW. Version 1.0.1 still
+carries build 18 and is still WAITING_FOR_REVIEW from its 2026-11-10
+submission; nothing on the store side changed. Next build number 20.
+**Unverified:** nothing has run on an iPhone (connect, flags), no
+sandbox purchase on build 19.
