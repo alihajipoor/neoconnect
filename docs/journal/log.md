@@ -8782,3 +8782,180 @@ public copies were updated with `publish-copies.mjs` afterwards.
   app update to gain the rest.
 - Unreachable reports from the apps were 123 in the 24 hours before the
   publish, 89 a day over the week. Read again after a day.
+
+## 2026-11-11 (evening) — why the disks were filling, and agent v0.2.12
+
+**Status:** fixed on every server and on the panel host. Agent v0.2.12
+runs on all seven exits; the relay box stays on v0.2.11 on purpose.
+Journals are capped at 500 MB everywhere. IKEv2 logins were proven on
+two servers only; see *Not proven* below.
+
+**Why the servers' disks were filling.** Read-only first. 99% of the
+log lines were three messages, repeated:
+- For every routine credential re-assert (every credential, every 60 s)
+  the agent rewrote the IKEv2 secrets file and ran
+  `swanctl --load-creds --clear`. strongSwan logs one line per stored
+  secret per reload. At 50 customers that is about 2,800 lines a minute,
+  it grows with the square of the customer count, and it came to about
+  1 GB a day per server: 87% of all lines.
+- The agent's own "executed command reassert..." line for each routine
+  re-check was another 12%.
+- Ubuntu rotates `/var/log/syslog` weekly with no size limit and keeps
+  a week uncompressed, and the journal may take a tenth of the disk.
+  uk-1 was at 77%, with one 6.6 GB and one 4.1 GB syslog file.
+
+**Why the panel host's disk was filling** (87%, 5 GB free): 9.4 GB in
+78 full database dumps, one taken before every small admin step and
+never cleaned (15 of them today); 7.9 GB of docker build cache, from
+building on the box at every deploy; 0.9 GB of unused images; and a
+`docker compose logs -f` left running since 2026-08-13. The website
+host holds 50 MB of ours; nothing to do there.
+
+**Fixed the same day.**
+- Panel host: the build cache pruned in three steps, three unused
+  images removed, the old log follower stopped. 87% to 64% used, 13 GB
+  free. The five containers kept their start times and process ids,
+  health answered 200, all servers ONLINE. At the end of the day, after
+  the rest below: 36% used, 23 GB free.
+- Servers, as a stopgap: an rsyslog rule, daily rotation with a 100 MB
+  limit, 30 kept, logrotate run hourly; only rsyslog restarted, the
+  engines' process ids compared before and after. netherlands-1, uk-1,
+  finland-3, germany-3 (france-2 and sweden-1 had it from their build;
+  turkey-1 has no rsyslog). Syslog growth afterwards was 0 bytes in
+  30 s on each. uk-1 went from 77% to 50% at its first rotation.
+- Agent v0.2.12 (three commits on main: the IKEv2 change, its review
+  follow-up, the installer's log limits).
+  - A command loads strongSwan only when the list differs from the last
+    load this process saw succeed, the file on disk differs, the last
+    good load is ten minutes old, or strongSwan restarted. A failed
+    write or reload leaves the state unknown. The stats poll never
+    writes or loads.
+  - Routine `reassert:`, `reassert-uplink:` and `reassert-route:`
+    successes are counted and logged as one line a minute. Failures,
+    `reassert-confirm:` and every other command log as before.
+  - An independent review found that strongSwan's reported start time
+    flips between two neighbouring seconds. Confirmed on two servers:
+    40 readings gave two values on both. A text comparison would have
+    read that as a restart on every other poll. It is parsed now, with a
+    three-second tolerance.
+  - The review also led to: a load is remembered only when swanctl's
+    output names every identity; a poll that cannot list SAs marks the
+    state unknown; a failed `--load-all` after a restart is retried once
+    a minute; the start time is read at the first load; the upgrade
+    script keeps the two newest rollback binaries.
+  - Tests are mutation-checked: ten deliberate breakages, each caught.
+    CI runs the two touched packages under the race detector.
+- Installer: `installer/lib/logs.sh` gives every new server the syslog
+  rules, hourly logrotate and a 500 MB journal cap.
+  `installer/maintenance/log-limits.sh` puts them on a live one (a
+  report by default; `--apply`, `--journal`).
+
+**Canary, sweden-1, with the real Windows app on the test VM.**
+- An IKEv2 session that was up across the agent update kept carrying
+  traffic: 2 MB down, 512 KB up, exit address matching.
+- A fresh login worked.
+- The test credential disabled through the admin API: exactly one
+  reload (49 lines), the identity left the file, the session ended, and
+  a real login attempt was refused with an authentication error. The app
+  then fell back to another protocol by itself.
+- Re-enabled: one reload (50 lines), and the login worked with the exit
+  address matching.
+- Steady state: 0 reload lines and 0 per-command lines, about 59
+  journal lines a minute where there had been about 3,000. No false
+  restart was reported in the first ten minutes.
+- netherlands-1, the other kind of strongSwan setup (the starter-run
+  one), passed the same server-side checks and a real IKEv2 login with
+  the exit address matching.
+
+**The rest of the fleet (16:13-16:35Z).** france-2, germany-3,
+finland-3, uk-1 and turkey-1, at least two minutes apart. Each passed on
+its first reading: v0.2.12 and the service active, connected to the
+control plane, every engine's process id and start time as before, the
+credential list's hash unchanged, and 0 reload lines, 0 per-command
+lines and 0 warnings in the next 45 s. No rollback was needed.
+
+**Journal cap (from 16:47Z).** sweden-1 first and alone, then
+netherlands-1, france-2, germany-3, finland-3, uk-1 and turkey-1, one at
+a time. Every run exited 0, engines were unchanged on every server, and
+journald kept receiving lines after its restart. (Xray writes to its own
+file on these servers, never to the journal, so there was no Xray
+journal line to check.) turkey-1 got the cap and the hourly logrotate
+timer only, having no rsyslog; the other six already had the syslog
+rules, and the script left them alone.
+
+| Server | Journal before | after | Disk used | Lines / 10 min |
+|---|---|---|---|---|
+| netherlands-1 | 2.2G | 444M | 39% | 422 (about 57,700 before) |
+| sweden-1 | not read | 456M | 30% | 481 (about 30,600 before) |
+| finland-3 | 3.6G | 422M | 14% | 400 |
+| turkey-1 | 4.0G | 465M | 16% | 487 |
+| uk-1 | 2.4G | 446M | 42% | 496 |
+| germany-3 | 1.8G | 469M | 30% | 406 |
+| france-2 | 586M | 426M | 30% | 433 |
+
+The several-GB `syslog.1` files on uk-1, netherlands-1, finland-3 and
+germany-3 are not compressed yet; that happens at the next daily
+rotation and was not forced. The last ten-minute reading on each server
+shows one burst of 50 to 138 strongSwan reload lines inside one second:
+that is v0.2.12's designed safety reload every ten minutes, not a
+fault. The old rate was 25,000 to 50,000 lines in ten minutes.
+
+**Not proven, and not to be read as proven.**
+- Real IKEv2 logins on france-2, germany-3, finland-3, uk-1 and
+  turkey-1. The evidence there is the unchanged credential list, the
+  unchanged engines and the quiet logs. Logins were tried on sweden-1
+  and netherlands-1 only.
+- Recovery after a strongSwan restart. Proving it needs an engine
+  restart on a live server.
+- `install_log_limits` on a fresh box. It has run only in its
+  already-in-place path on a live server; its steps are the ones the
+  stopgap ran on four.
+
+**Apps, the same day.** All 249 ISO countries now have a flag, a name
+in English and Persian, and a map anchor inside the package: the 12
+hand-drawn flags kept, 237 from an MIT flag set as one lazy chunk. A
+server's region must now be `<iso code>-<name>`, checked by the backend
+and asked that way by the installer. Desktop 0.9.63 and mobile 0.2.40
+are released from main.
+- Desktop: the updater offers 0.9.63 to older builds and nothing to
+  0.9.63; the newest-desktop download link points at it. On the test VM
+  the app updated itself through its own path, in two hops (the VM was
+  on 0.9.61 with 0.9.62 staged), and stayed signed in. Locations shows
+  real flags for all seven countries and no globe; the support details
+  report 237 flags, so the lazy set loads in the packaged app. One
+  connect on Automatic chose Built-in (IKEv2) in the Netherlands and
+  showed PARTLY PROTECTED, its honest state for IKEv2 there; the data
+  check passed and the exit address matched. The VM's IPv6 path was not
+  captured in this check. Other protocols and countries in 0.9.63 were
+  not tried.
+- Android: the release has its APK and AAB, and the download link points
+  at 0.2.40. The AAB is checked against its checksum and ready for the
+  owner to upload to Play; nothing was uploaded. Nothing ran on a phone.
+- Worth knowing: GitHub's repo-level "latest" release in the releases
+  repository is now the Android one. The API picks the newest release
+  per tag prefix, so the desktop links are not affected, but anything
+  linking to GitHub's `/releases/latest` gets Android.
+
+**Smaller follow-ups of the day**, each in its own entry above: the UK
+backup route through a hop; the endpoint lists re-signed and published
+(offline v8, server v101); the purchase call refuses a plan that is not
+on sale (merged, not deployed); the fleet tool merged after its first
+read-only run.
+
+**Open.**
+- The dumps. 69 of the 78 were proposed for deletion (keep the newest
+  of each of the last 7 days and of each earlier week; the list is on
+  the panel host next to the dumps), waiting for the owner's yes. A
+  later commit on main adds `infra/scripts/prune-db-backups.sh`, and
+  `docs/backup-restore.md` now says it is installed on the panel host
+  as a daily job with a similar keep rule. This entry did not check the
+  host. If that job is in place, it, not a hand deletion, decides the
+  old dumps at its first run.
+- The backend deploy that carries the purchase check and the region
+  check.
+- A deploy that prunes the build cache, or builds somewhere else.
+- `usage_records` (1.5 GB, never trimmed), and `agent_commands` still
+  queued for disabled servers (757 new rows a day).
+- The backups sit on the disk they protect.
+- Provider dashboard chores (a label rename, one VPS to delete) need
+  the owner signed in.
