@@ -9135,3 +9135,27 @@ for ir1; both are switched off, so those stay QUEUED.
 Undo file (the deleted rows, restores configs then routes):
 `/root/retired-cleanup-undo-20261111.sql.gz` on the panel host, mode
 600, outside `db-backups`. Holds key material; remove it after a month.
+
+## 2026-11-11 (night) — website out of beta, 7-day 10 GB trial, live
+
+**Status:** done
+**Touches:** website/ (main `abbf6c53`, branch `claude/website-trial-copy`)
+
+The owner saw screenshots first and approved: the Beta badge, the "In
+beta" hero chip and the download page's beta note are gone; the trial
+reads "a 7-day free trial with 10 GB" in English and Persian. The
+announcement version went to 2 (`nx-announce-2`), so visitors who closed
+the old one see it once more. 7 files swapped by hand on the website
+host; rollback tarball `/root/web-backups/site-pre-trial-copy-20261111T230059Z.tgz`.
+
+Checked independently against the live site with headless Chrome (en+fa,
+1440 and 390 wide): no badge, chip or note, no gap left; trial line and
+announcement read right. A browser holding only `nx-announce-1` saw the
+new card; closing it stored `nx-announce-2` and it stayed hidden on
+reload, en and fa. All 18 sitemap pages 200, no PHP warning text, no
+beta / 30-day / first-month / 50 GB text in any page or meta; download
+links unchanged; /account/ loads. No edge cache (plain nginx, `no-cache,
+must-revalidate`), so every visitor gets the new page now.
+
+Not changed, by the owner's decision: the three feature-level Beta
+labels inside the apps stay.
