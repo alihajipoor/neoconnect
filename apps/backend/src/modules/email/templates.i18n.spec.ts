@@ -109,14 +109,18 @@ describe("the Persian shell", () => {
     expect(html).not.toContain("text-align:left;line-height");
   });
 
-  it("uses system Persian faces, not a webfont", () => {
-    // An email cannot bundle Vazirmatn the way the clients do, and an
-    // @font-face rule needs a <style> block this layout does not have.
+  it("names the app's Persian face, then system ones, and loads no webfont", () => {
+    // An email cannot bundle Vazirmatn the way the clients do, so it is
+    // only named: a reader who has it installed gets the app's own type,
+    // and everyone else falls through to a face their machine has.
     const { html } = verificationEmail("fa", "tok", "123456");
-    expect(html).toContain("Tahoma");
-    expect(html).toContain("Iranian Sans");
-    expect(html).not.toContain("Vazirmatn");
-    expect(html).not.toContain("<style");
+    expect(html).toContain("font-family:Vazirmatn,Tahoma,'Iranian Sans'");
+    // Named is not loaded. A fetched font is a network request most
+    // mail clients refuse, and a tracking surface besides.
+    expect(html).not.toContain("@font-face");
+    expect(html).not.toContain("@import");
+    expect(html).not.toContain("<link");
+    expect(html).not.toContain("url(");
   });
 
   it("gives Persian more vertical room than Latin", () => {
@@ -265,12 +269,15 @@ describe("every template", () => {
 describe("the invariants the Persian shell must not have broken", () => {
   for (const locale of ["en", "fa"] as const) {
     describe(locale, () => {
-      it("declares the design light-only", () => {
-        // Clients that auto-invert for dark mode recoloured the card and
-        // left violet text on a violet panel, illegible.
-        expect(verificationEmail(locale, "tok", "123456").html).toContain(
-          '<meta name="color-scheme" content="light">',
-        );
+      it("declares a light and a dark design, and supplies the dark one", () => {
+        // Clients that auto-invert for dark mode once recoloured the
+        // card by their own rules and left violet text on a violet
+        // panel, illegible. Declaring both schemes and carrying real
+        // dark rules is what stops a client inventing its own.
+        const { html } = verificationEmail(locale, "tok", "123456");
+        expect(html).toContain('<meta name="color-scheme" content="light dark">');
+        expect(html).toContain('<meta name="supported-color-schemes" content="light dark">');
+        expect(html).toContain("@media (prefers-color-scheme:dark)");
       });
 
       it("separates OTP digits with literal spaces", () => {
@@ -333,11 +340,38 @@ describe("the invariants the Persian shell must not have broken", () => {
         }
       });
 
-      it("uses tables and inline styles only", () => {
+      it("lays out with tables and inline styles, and one small style block", () => {
         for (const message of Object.values(renderAll(locale))) {
-          expect(message.html).not.toContain("<style");
+          // One block, for what an inline style cannot say: a narrow
+          // screen and dark mode.
+          expect(message.html.match(/<style/g)).toHaveLength(1);
           expect(message.html).not.toContain("display:flex");
           expect(message.html).not.toContain("display:grid");
+          expect(message.html).not.toContain("<script");
+        }
+      });
+
+      it("is a whole email without the style block", () => {
+        // Several clients strip <style>. What is left has to carry the
+        // page, the card, the type and the button on inline styles
+        // alone -- and nothing may be styled only by a class.
+        for (const message of Object.values(renderAll(locale))) {
+          const stripped = message.html.replace(/<style>[\s\S]*?<\/style>/, "");
+          expect(stripped).toContain("background:#f1f3f6");
+          expect(stripped).toContain("background:#ffffff");
+          expect(stripped).toContain("color:#090b10");
+          expect(stripped).toContain("max-width:600px");
+          for (const tag of stripped.match(/<[a-z0-9]+[^>]*\sclass="[^"]*"[^>]*>/g) ?? []) {
+            expect(tag).toMatch(/\sstyle="/);
+          }
+        }
+      });
+
+      it("hides a preheader ahead of the visible content", () => {
+        for (const message of Object.values(renderAll(locale))) {
+          const hidden = message.html.indexOf("display:none;max-height:0");
+          expect(hidden).toBeGreaterThan(-1);
+          expect(hidden).toBeLessThan(message.html.indexOf(BRAND_LOGO_SLOT));
         }
       });
     });

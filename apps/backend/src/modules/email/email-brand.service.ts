@@ -1,7 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../../prisma/prisma.service";
-import { BRAND_LINKS_SLOT, BRAND_LOGO_SLOT } from "./templates";
+import { fillBrandSlots, type BrandLinkKind } from "./templates";
 
 /** Community links change rarely and every send would otherwise hit the
  * database for them. A minute is short enough that fixing a dead Discord
@@ -15,13 +15,15 @@ interface Links {
   telegramUrl: string | null;
 }
 
-/** Fills the brand slots the templates leave behind: the mark in the
- * header and the community links in the footer.
+/** Supplies what the templates' slots are filled with: the mark in the
+ * header, the community links in the footer and, on staff mail, where
+ * the admin panel is.
  *
- * Done here rather than inside the templates because both depend on
+ * Done here rather than inside the templates because all three depend on
  * runtime state -- where this API answers from, and what the operator
  * has configured -- while the templates are pure synchronous functions
- * called from a dozen places.
+ * called from a dozen places. The drawing itself is `fillBrandSlots`,
+ * beside the design it belongs to.
  */
 @Injectable()
 export class EmailBrandService {
@@ -34,47 +36,20 @@ export class EmailBrandService {
 
   async apply(html: string): Promise<string> {
     const publicApiUrl = this.config.get<string>("publicApiUrl")?.replace(/\/$/, "");
-
-    return html
-      .replace(BRAND_LOGO_SLOT, this.logoHtml(publicApiUrl))
-      .replace(BRAND_LINKS_SLOT, await this.linksHtml());
-  }
-
-  /** Without a public URL there is nowhere to fetch the mark from, so
-   * the header falls back to the wordmark alone. A broken-image icon
-   * next to the product name looks worse than no image at all. */
-  private logoHtml(publicApiUrl: string | undefined): string {
-    if (!publicApiUrl) return "";
-    return (
-      `<img src="${publicApiUrl}/brand/logo-mono.png" width="28" height="28" alt="" ` +
-      `style="vertical-align:middle;margin-right:10px;border:0;display:inline-block;">`
-    );
-  }
-
-  private async linksHtml(): Promise<string> {
     const links = await this.links();
-    const entries = [
-      { url: links.websiteUrl, label: "Website" },
-      { url: links.discordUrl, label: "Discord" },
-      { url: links.instagramUrl, label: "Instagram" },
-      { url: links.telegramUrl, label: "Telegram" },
-    ].filter((entry): entry is { url: string; label: string } => Boolean(entry.url));
 
-    // Nothing set, nothing rendered -- not an empty row of separators.
-    // Same rule the app's header follows: never show a way to reach us
-    // that goes nowhere.
-    if (entries.length === 0) return "";
-
-    const rendered = entries
-      .map(
-        (entry) =>
-          `<a href="${escapeAttribute(entry.url)}" style="color:#7c3aed;text-decoration:none;font-weight:600;">${entry.label}</a>`,
-      )
-      // A middle dot rather than a table of buttons: this is a footer,
-      // and it should not compete with the message above it.
-      .join('<span style="color:#c9c4de;"> &middot; </span>');
-
-    return `<p style="margin:0 0 10px 0;font-size:12px;">${rendered}</p>`;
+    return fillBrandSlots(html, {
+      logoBaseUrl: publicApiUrl ? `${publicApiUrl}/brand` : undefined,
+      panelUrl: panelUrlFrom(publicApiUrl),
+      links: (
+        [
+          { kind: "website", url: links.websiteUrl },
+          { kind: "discord", url: links.discordUrl },
+          { kind: "instagram", url: links.instagramUrl },
+          { kind: "telegram", url: links.telegramUrl },
+        ] as const
+      ).filter((entry): entry is { kind: BrandLinkKind; url: string } => Boolean(entry.url)),
+    });
   }
 
   private async links(): Promise<Links> {
@@ -92,9 +67,19 @@ export class EmailBrandService {
   }
 }
 
-/** These are operator-entered URLs going into an href. A quote in one
- * would otherwise close the attribute and let the rest be read as
- * markup. */
-function escapeAttribute(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+/** Where the admin panel is, worked out from where the API is.
+ *
+ * There is no setting for the panel's own address, and there does not
+ * need to be: the installer puts the API under the panel's domain
+ * (PUBLIC_API_URL is `https://<panel domain>/api`, installer/lib/panel.sh),
+ * so the panel is that address without the `/api`.
+ *
+ * Only that one shape is trusted. An API served from somewhere else says
+ * nothing about where the panel is, and a button in an outage alert that
+ * opens the wrong site is worse than no button -- so anything else is
+ * "not known", and staff mail goes without one. */
+export function panelUrlFrom(publicApiUrl: string | undefined): string | undefined {
+  if (!publicApiUrl) return undefined;
+  const match = /^(https?:\/\/[^/]+)\/api\/?$/.exec(publicApiUrl);
+  return match ? match[1] : undefined;
 }

@@ -1,4 +1,5 @@
 import type { Page } from "../alerting/pager.service";
+import { opsTime } from "../email/templates";
 import type { BlockType, FamilyResult } from "./block-signals";
 
 /** What a page says. English: it goes to the owner. Never an address --
@@ -37,6 +38,14 @@ const FOOTER =
   "Nothing has been changed automatically. Check the server yourself, then answer in the panel under Block watch: " +
   "Replace (once it has its new address), Retire, Keep (it is fine, stop reminding me) or Snooze.";
 
+/** The html mail's own parts (Page.mail): the same facts as the text,
+ * set out as a table, with the panel page that answers them. */
+const WHAT_TO_DO =
+  "Check the server yourself, then answer under Block watch: Replace (once it has its new address), Retire, " +
+  "Keep (it is fine, stop reminding me) or Snooze.";
+const UNCHANGED = "Nothing has been changed automatically.";
+const PANEL = { path: "/block-watch", label: "Open Block watch" };
+
 function hoursSince(from: Date, now: Date): number {
   return Math.max(0, Math.round((now.getTime() - from.getTime()) / 3_600_000));
 }
@@ -72,6 +81,19 @@ export function likelyBlockedPage(i: IncidentView, now: Date): Page {
       `Why this is a page: ${reasonOf(i.evidence)}.\n\n` +
       `Evidence:\n${evidenceLines(i.evidence)}\n\n` +
       `${guess(i.evidence)}\n\n${FOOTER}`,
+    mail: {
+      severity: "urgent",
+      facts: [
+        { label: "What", value: "Likely blocked" },
+        { label: "Where", value: `${i.nodeName}, seen from ${where}` },
+        { label: "Since", value: `${opsTime(i.openedAt)} (about ${hoursSince(i.openedAt, now)} h ago)` },
+        { label: "How sure", value: `Likely, not proven: ${reasonOf(i.evidence)}. ${guess(i.evidence)}` },
+        { label: "What to do", value: WHAT_TO_DO },
+      ],
+      body: `Evidence:\n${evidenceLines(i.evidence)}`,
+      panel: PANEL,
+      note: UNCHANGED,
+    },
   };
 }
 
@@ -91,6 +113,29 @@ export function groupedPage(incidents: IncidentView[], pagedThisHour: number, no
       "service than separate blocks. Nothing has been switched or changed. Check before buying anything.\n\n" +
       incidents.map((i) => `${i.nodeName}: ${reasonOf(i.evidence)}\n${evidenceLines(i.evidence)}`).join("\n\n") +
       `\n\n${FOOTER}`,
+    mail: {
+      severity: "urgent",
+      facts: [
+        { label: "What", value: `${total} servers look blocked at once` },
+        {
+          label: "Where",
+          value:
+            `${names.join(", ")}, seen from ${where}` +
+            (pagedThisHour ? ` (after ${pagedThisHour} more paged within the hour)` : ""),
+        },
+        { label: "Since", value: opsTime(now) },
+        {
+          label: "How sure",
+          value:
+            "Unsure. Several servers at once is more often an international cut, a fault on our side or a problem " +
+            "with the probe service than separate blocks.",
+        },
+        { label: "What to do", value: `Check before buying anything. ${WHAT_TO_DO}` },
+      ],
+      body: incidents.map((i) => `${i.nodeName}: ${reasonOf(i.evidence)}\n${evidenceLines(i.evidence)}`).join("\n\n"),
+      panel: PANEL,
+      note: "Nothing has been switched or changed.",
+    },
   };
 }
 
@@ -106,6 +151,20 @@ export function remindersPage(incidents: IncidentView[], now: Date): Page {
       text:
         `${i.nodeName} has looked blocked from ${where} for about ${hoursSince(i.openedAt, now)} h and nobody has answered ` +
         `in the panel. This is the only reminder.\n\nLatest evidence:\n${evidenceLines(i.evidence)}\n\n${guess(i.evidence)}\n\n${FOOTER}`,
+      mail: {
+        severity: "warning",
+        chip: "Reminder",
+        facts: [
+          { label: "What", value: "Still looks blocked, and nobody has answered in the panel" },
+          { label: "Where", value: `${i.nodeName}, seen from ${where}` },
+          { label: "Since", value: `${opsTime(i.openedAt)} (about ${hoursSince(i.openedAt, now)} h ago)` },
+          { label: "How sure", value: guess(i.evidence) },
+          { label: "What to do", value: WHAT_TO_DO },
+        ],
+        body: `Latest evidence:\n${evidenceLines(i.evidence)}`,
+        panel: PANEL,
+        note: `This is the only reminder. ${UNCHANGED}`,
+      },
     };
   }
   const names = incidents.map((i) => i.nodeName);
@@ -120,6 +179,21 @@ export function remindersPage(incidents: IncidentView[], now: Date): Page {
         .map((i) => `${i.nodeName} (about ${hoursSince(i.openedAt, now)} h)\n${evidenceLines(i.evidence)}`)
         .join("\n\n") +
       `\n\n${FOOTER}`,
+    mail: {
+      severity: "warning",
+      chip: "Reminder",
+      facts: [
+        { label: "What", value: `${incidents.length} servers still look blocked, and nobody has answered in the panel` },
+        { label: "Where", value: `${names.join(", ")}, seen from ${where}` },
+        { label: "Since", value: "A day or more, each" },
+        { label: "What to do", value: WHAT_TO_DO },
+      ],
+      body: incidents
+        .map((i) => `${i.nodeName} (about ${hoursSince(i.openedAt, now)} h)\n${evidenceLines(i.evidence)}`)
+        .join("\n\n"),
+      panel: PANEL,
+      note: `This is the only reminder for each. ${UNCHANGED}`,
+    },
   };
 }
 
@@ -138,6 +212,19 @@ export function recoveriesPage(incidents: (IncidentView & { closedAt: Date })[],
       text:
         `${i.nodeName} is shown working from ${where} again after about ${hoursOf(i)} h (${now.toISOString()}): ${why(i)}. ` +
         "The incident is closed. If you already replaced the server, there is nothing to do.",
+      mail: {
+        severity: "info",
+        chip: "Resolved",
+        facts: [
+          { label: "What", value: "Working again; the incident is closed" },
+          { label: "Where", value: `${i.nodeName}, seen from ${where}` },
+          { label: "Lasted", value: `About ${hoursOf(i)} h, cleared ${opsTime(now)}` },
+          { label: "How sure", value: why(i) },
+          { label: "What to do", value: "Nothing. If you already replaced the server, there is nothing to undo." },
+        ],
+        body: "",
+        panel: PANEL,
+      },
     };
   }
   const names = incidents.map((i) => i.nodeName);
@@ -149,6 +236,18 @@ export function recoveriesPage(incidents: (IncidentView & { closedAt: Date })[],
       `These are shown working from ${where} again (${now.toISOString()}); their incidents are closed:\n\n` +
       incidents.map((i) => `- ${i.nodeName}, after about ${hoursOf(i)} h: ${why(i)}`).join("\n") +
       "\n\nIf you already replaced any of them, there is nothing to do.",
+    mail: {
+      severity: "info",
+      chip: "Resolved",
+      facts: [
+        { label: "What", value: `${incidents.length} servers work again; their incidents are closed` },
+        { label: "Where", value: `${names.join(", ")}, seen from ${where}` },
+        { label: "Cleared", value: opsTime(now) },
+        { label: "What to do", value: "Nothing. If you already replaced any of them, there is nothing to undo." },
+      ],
+      body: incidents.map((i) => `- ${i.nodeName}, after about ${hoursOf(i)} h: ${why(i)}`).join("\n"),
+      panel: PANEL,
+    },
   };
 }
 
@@ -216,5 +315,23 @@ export function digestPage(parts: DigestParts, now: Date): Page {
       `${cleared.length} cleared`,
     context: { event: "block_digest" },
     text: `${sections.join("\n\n")}\n\n(${now.toISOString()}) Nothing here has been changed automatically.`,
+    mail: {
+      // A page that reached nobody is the one thing in a digest that is
+      // not routine.
+      severity: undelivered.length ? "warning" : "info",
+      chip: "Daily digest",
+      facts: [
+        { label: "Under watch", value: `${watching} server${watching === 1 ? "" : "s"}, seen from ${where}` },
+        ...(undelivered.length
+          ? [{ label: "Pages lost", value: `${undelivered.length} reached nobody: ${undelivered.map((i) => i.nodeName).join(", ")}` }]
+          : []),
+        { label: "Cleared", value: cleared.length ? cleared.map((i) => i.nodeName).join(", ") : "None since the last digest" },
+        { label: "As of", value: opsTime(now) },
+        { label: "What to do", value: "Answer anything still open under Block watch. Note any verdict that was wrong." },
+      ],
+      body: sections.join("\n\n"),
+      panel: PANEL,
+      note: "Nothing here has been changed automatically.",
+    },
   };
 }

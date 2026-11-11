@@ -4,6 +4,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { AlertingService } from "../alerting/alerting.service";
 import { EmailService } from "../email/email.service";
 import { NetworkIdentityService } from "../network-identity/network-identity.service";
+import { signInAlert, wrongPasswordsAlert, type SignInAlert } from "./admin-sign-in-alerts.emails";
 
 /** Failed password counts for one admin account, within LoginGuard's
  * window, at which the owner is told -- the counts LoginGuard already
@@ -49,14 +50,7 @@ export class AdminSignInAlertsService {
     try {
       const admin = await this.adminByEmail(email);
       if (!admin || admin.role === AdminRole.RESELLER) return;
-      const where = await this.describe(ip);
-      const factor = withMfa ? "with two-factor" : "with a password only -- this account has no two-factor";
-      const text =
-        `${admin.email} (${admin.role}) signed in to the Neoxify admin panel ${factor}, ` +
-        `at ${now.toISOString()} from ${where}.\n\n` +
-        "If this was not you: change the password now, then sign out of the panel, " +
-        "which ends every session of this account. Turning on two-factor stops a stolen password on its own.";
-      await this.tell(`Neoxify panel: sign-in to ${admin.email}`, text, `[admin] Sign-in: ${admin.email} from ${where}`);
+      await this.tell(signInAlert(admin, await this.describe(ip), withMfa, now));
     } catch (err) {
       this.logger.warn(`Sign-in alert not sent: ${(err as Error).message}`);
     }
@@ -74,16 +68,7 @@ export class AdminSignInAlertsService {
       const admin = await this.adminByEmail(email);
       if (!admin) return;
       this.attackAlerts.push(now);
-      const where = await this.describe(ip);
-      const text =
-        `${failures} wrong passwords for ${admin.email} (${admin.role}) on the Neoxify admin panel ` +
-        `in the last few minutes, the latest from ${where}. Nobody has signed in with them. ` +
-        "Each attempt costs the guesser more, but only two-factor makes a guessed password useless.";
-      await this.tell(
-        `Neoxify panel: ${failures} wrong passwords for ${admin.email}`,
-        text,
-        `[admin] ${failures} wrong passwords for ${admin.email}, latest from ${where}`,
-      );
+      await this.tell(wrongPasswordsAlert(admin, failures, await this.describe(ip)));
     } catch (err) {
       this.logger.warn(`Failed-sign-in alert not sent: ${(err as Error).message}`);
     }
@@ -114,16 +99,12 @@ export class AdminSignInAlertsService {
   }
 
   /** The webhook, then every SUPERADMIN's mailbox. */
-  private async tell(subject: string, text: string, webhook: string): Promise<void> {
+  private async tell({ subject, text, html, webhook }: SignInAlert): Promise<void> {
     await this.alerting.send(webhook);
     const owners = await this.prisma.adminUser.findMany({
       where: { role: AdminRole.SUPERADMIN },
       select: { email: true },
     });
-    const html = text
-      .split("\n\n")
-      .map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`)
-      .join("");
     for (const owner of owners) await this.email.sendMail({ to: owner.email, subject, text, html });
   }
 }
@@ -141,8 +122,4 @@ export function emailOfAccessToken(token: unknown): string | null {
   } catch {
     return null;
   }
-}
-
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }

@@ -5,6 +5,7 @@ import { AlertingService } from "../alerting/alerting.service";
 import { HourlyBudget, PagerService } from "../alerting/pager.service";
 import { NodeDoorsService } from "../node-doors/node-doors.service";
 import { CreateNodeDto } from "./dto/create-node.dto";
+import { heartbeatGapPage, heartbeatReturnPage } from "./heartbeat-gap.messages";
 
 /** How long between repeat alerts for a node that is still OFFLINE.
  *
@@ -205,22 +206,7 @@ export class NodesService {
       const since = node.lastHeartbeatAt!;
       return { name: node.name, since: since.toISOString(), minutes: Math.round((now - since.getTime()) / 60_000) };
     });
-    const one = gaps.length === 1 ? gaps[0] : null;
-    const delivery = await this.pager.page({
-      subject: one ? `[Neoxify] ${one.name} has stopped heartbeating` : `[Neoxify] ${gaps.length} nodes have stopped heartbeating`,
-      webhook: one
-        ? `[node] ${one.name}: no heartbeat for ${one.minutes} min (since ${one.since})`
-        : `[node] no heartbeat from ${gaps.map((g) => `${g.name} (${g.minutes} min)`).join(", ")}`,
-      context: { event: "heartbeat_gap", nodes: gaps.map((g) => g.name) },
-      text:
-        (one
-          ? `The agent on ${one.name} has sent no heartbeat for ${one.minutes} minutes, since ${one.since}. `
-          : `${gaps.length} agents have sent no heartbeat:\n` +
-            gaps.map((g) => `- ${g.name}: ${g.minutes} minutes, since ${g.since}`).join("\n") +
-            "\n\nSeveral at once is more often a fault on our side or a network cut than separate failures. ") +
-        "Customers on them may be cut off. This is an outage -- the server, its network or the agent -- not a block.\n\n" +
-        "You will hear once more when it is back. Nothing has been changed automatically.",
-    });
+    const delivery = await this.pager.page(heartbeatGapPage(gaps));
     if (!delivery.delivered) {
       // Left unmarked, so a later sweep tries again -- a few times.
       this.logger.warn(`Heartbeat-gap page reached nobody: ${delivery.error ?? "no reason given"}`);
@@ -244,18 +230,9 @@ export class NodesService {
       orderBy: { name: "asc" },
     });
     if (back.length === 0 || !this.gapBudget.take(now)) return;
-    const names = back.map((n) => n.name);
-    const one = back.length === 1 ? back[0] : null;
-    const delivery = await this.pager.page({
-      subject: one ? `[Neoxify] ${one.name} is heartbeating again` : `[Neoxify] ${back.length} nodes are heartbeating again`,
-      webhook: `[node] heartbeating again: ${names.join(", ")}`,
-      context: { event: "heartbeat_gap_ended", nodes: names },
-      text:
-        (one
-          ? `The agent on ${one.name} has connected again; its gap was paged at ${one.heartbeatGapPagedAt!.toISOString()}. `
-          : `These agents have connected again: ${names.join(", ")}. `) +
-        "The backend re-sends their customers' credentials and routes as each one reconnects.",
-    });
+    const delivery = await this.pager.page(
+      heartbeatReturnPage(back.map((n) => ({ name: n.name, pagedAt: n.heartbeatGapPagedAt! }))),
+    );
     // Marked either way: a missed "back" is not worth repeating, and the
     // cooldown runs from here.
     if (delivery.error) this.logger.warn(`Heartbeat-return page: ${delivery.error}`);

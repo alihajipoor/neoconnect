@@ -24,8 +24,38 @@ describe("PagerService", () => {
     expect(alerting.deliver).toHaveBeenCalledWith("W", { event: "e" });
     expect(prisma.adminUser.findMany).toHaveBeenCalledWith({ where: { role: "SUPERADMIN" }, select: { email: true } });
     expect(sent.map((m) => m.to)).toEqual(["a@x.test", "b@x.test"]);
-    expect(sent[0].html).toBe("<p>one</p><p>two &lt;b&gt;</p>");
+    // The text, as paragraphs on the operations shell, escaped.
+    expect(sent[0].html).toMatch(/<p[^>]*>one<\/p><p[^>]*>two &lt;b&gt;<\/p>/);
+    expect(sent[0].html).not.toContain("<b>");
+    expect(sent[0].html).toContain("Operations mail for the owners of this Neoxify panel.");
+    expect(sent[0].text).toBe("one\n\ntwo <b>");
     expect(result).toEqual({ webhook: true, mailed: ["a@x.test", "b@x.test"], failed: [], delivered: true, error: null });
+  });
+
+  it("lays a page out by its mail part: the subject as headline, the facts, then the detail", async () => {
+    const { pager, sent } = build({ webhook: true, mail: { "a@x.test": true } });
+
+    await pager.page({
+      subject: "[Neoxify] node-a is down",
+      text: "The whole message, for the plain part.",
+      mail: {
+        severity: "urgent",
+        facts: [{ label: "Where", value: "node-a" }],
+        body: "Only the detail.",
+        panel: { path: "/nodes", label: "Open Nodes" },
+      },
+    });
+
+    const { html, text, subject } = sent[0];
+    expect(subject).toBe("[Neoxify] node-a is down");
+    expect(html).toContain(">node-a is down</h1>");
+    expect(html).toContain('class="nx-chip-urgent"');
+    expect(html).toContain(">Where</td>");
+    expect(html).toContain("Only the detail.");
+    expect(html).not.toContain("The whole message");
+    expect(html).toContain("<!--neoxify:panel:/nodes|Open Nodes-->");
+    // The plain part is never the abridged one.
+    expect(text).toBe("The whole message, for the plain part.");
   });
 
   it("records a mailbox it could not reach without calling the page lost", async () => {
