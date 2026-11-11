@@ -20,7 +20,7 @@
  *  selected with *):
  *
  *    name          price  days  dataCap        devices    relayOnly  active  purchasable
- *    Trial          1.00   30   50 GiB         2          false      true    FALSE
+ *    Trial          1.00    7   10 GiB         1          false      true    FALSE
  *    Starter        3.99   30   null           1          false      true    true
  *    Pro            6.99   30   null           2          false      true    true
  *    Ultimate       9.99   30   30 GiB         null       TRUE       true    true

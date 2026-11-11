@@ -310,7 +310,8 @@ add a second cookie, that page has to change.
 
 `beta_enabled` drives three things at once — a badge beside the wordmark, a
 line in the hero, and an explanation on the download page. Set it to `false`
-when the product leaves beta and all three disappear together.
+when the product leaves beta and all three disappear together. It was
+turned off on 2026-11-11, when the product left beta.
 
 ### Other download settings
 

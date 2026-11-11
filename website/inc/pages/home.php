@@ -346,7 +346,8 @@ require NX_INC . '/partials/head.php';
              never a card with a buy button. */ ?>
     <?php if (nx_free_trial_enabled()): ?>
       <p class="trial"><?php echo nx_icon('ticket'); ?><span><?php echo nx_e('home.pricing.trial', array(
-          'days' => nx_num((int) nx_cfg('free_trial_days', 30)))); ?></span></p>
+          'days' => nx_num((int) nx_cfg('free_trial_days', 7)),
+          'data' => nx_format_data(nx_cfg('free_trial_gb', 10)))); ?></span></p>
     <?php endif; ?>
     <p class="note"><?php echo nx_e('home.pricing.note'); ?></p>
 

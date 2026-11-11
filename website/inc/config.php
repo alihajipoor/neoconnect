@@ -183,7 +183,7 @@ return array(
     // Shows a "Beta" badge beside the logo, a line in the hero, and a short
     // explanation on the download page. Set false when the product leaves
     // beta and all three disappear together.
-    'beta_enabled' => true,
+    'beta_enabled' => false,
 
     // ---------------------------------------------------------------
     // Free trial
@@ -196,14 +196,15 @@ return array(
     // panel (FreeTrialSettings, which itself defaults to disabled) -- if the
     // website promised a trial the panel wasn't granting, people would sign
     // up and get nothing. Turn this on only once the trial is genuinely
-    // enabled in the panel, and set the number of days to match the trial
-    // plan's own duration.
+    // enabled in the panel, and set the number of days and the data to match
+    // the trial plan's own.
     // TURNED ON because you said the trial is running. Do check that
     // FreeTrialSettings is also enabled in the admin panel -- this switch only
     // controls what the website *says*. If the panel's own toggle is still
     // off, people will read the announcement, sign up, and get nothing.
     'free_trial_enabled' => true,
-    'free_trial_days' => 30,
+    'free_trial_days' => 7,
+    'free_trial_gb' => 10,
 
     // ---------------------------------------------------------------
     // Launch announcement
