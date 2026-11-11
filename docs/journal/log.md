@@ -8321,3 +8321,24 @@ wanted.
 **Also in hand:** `claude/fleet-tool`, a checklisted add / replace /
 retire process for servers, asked for by the owner so that nothing is
 missed; not merged.
+
+## 2026-11-11 — singapore-2 retired
+
+The owner's order, an hour after india-1: on the restricted networks it
+carried data on one ISP only (2 of the 4 customers who tried it in three
+days, 0.2 GB in a day). He had already deleted the VPS; the panel showed
+it OFFLINE four minutes before the retirement started.
+
+Same steps as india-1 (dump `pre-retire-singapore-2-20261111T03*`): its
+12 routes out of all five plans (0 to 10 s each), the 4 relay routes
+deleted through the API (REMOVE_ROUTE acked four times), the node
+DISABLED with its key and mirror host cleared and its 8 routes off,
+usage history kept (9,931 rows), both DNS names deleted, hop port 47133
+removed on the Germany exit and the matching rule on the relay (live by
+handle, file edited and syntax-checked only, engine PID unchanged). The
+five remaining relay routes passed end to end. The agent could not be
+stopped because the box was gone.
+
+The fleet is now five exits (Finland, Germany, the Netherlands, the UK,
+Türkiye) and the Iranian relay. The website's location list drops
+Singapore in code; not deployed until the owner has seen it.

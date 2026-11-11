@@ -14,7 +14,7 @@
  *  which listed the nodes, every one of them live and carrying paying
  *  customers -- since changed: France retired, the UK added, Finland and
  *  Singapore moved to replacement servers, the Netherlands and India
- *  added (2026-11-06), and India retired again (2026-11-11).
+ *  added (2026-11-06), and India and Singapore retired (2026-11-11).
  *
  *  Rules for editing:
  *    - Add a country here ONLY when a node is actually enrolled and
@@ -73,12 +73,6 @@ return array(
                change -- it has always been ترکیه. */
             'country' => array('en' => 'Türkiye', 'fa' => 'ترکیه'),
             'city' => array('en' => 'Istanbul', 'fa' => 'استانبول'),
-        ),
-
-        array(
-            'code' => 'sg',
-            'country' => array('en' => 'Singapore', 'fa' => 'سنگاپور'),
-            'city' => array('en' => 'Singapore', 'fa' => 'سنگاپور'),
         ),
     ),
 
