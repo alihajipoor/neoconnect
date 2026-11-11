@@ -46,6 +46,23 @@ dump of each of the last 7 days, the newest of each of the 8 ISO weeks before
 that, and always the newest overall; the rest is deleted. `--dry-run` shows
 what would go. The installer does not set this up; copy it by hand on a new box.
 
+## Off-box copy (database only)
+
+`infra/scripts/pull-offbox-backup.ps1` (Windows PowerShell 5.1) pulls the
+newest finished nightly off the panel host onto the machine it runs on.
+It copies only `database.dump`, never the tarball's `infra.env` or TLS key:
+on the host it extracts the dump into a root-only temp directory, checks
+`gzip -t` of the tarball and reads the whole archive with
+`pg_restore -f /dev/null` (no database is touched), and this side checks
+size and sha256 before rotating anything. It keeps the newest copy of the
+last 7 days plus the newest of each of the 4 weeks before, logs to
+`offbox-pull.log` next to the copies and exits 1 on any failure. The host
+comes from a private config file outside the repo (format in the script
+header), so no address is committed. Run it after 03:15 UTC. It is not
+scheduled anywhere yet. A dump alone cannot restore the credential blobs:
+`CREDENTIALS_ENCRYPTION_KEY` (and the other `infra/.env` secrets) must also
+be kept off the box, separately and by the owner.
+
 ## Manual backup
 
 From the panel management menu (`sudo ./install.sh` on an already-installed
