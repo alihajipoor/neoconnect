@@ -135,6 +135,9 @@ services:
       # Its thresholds, as name=value pairs. The values in use are set in
       # infra/.env only, never in this repository.
       BLOCK_WATCH_TUNING: ${BLOCK_WATCH_TUNING:-}
+      # Nightly database retention (docs/usage-retention.md): off (blank),
+      # dry or on.
+      DATA_RETENTION: ${DATA_RETENTION:-}
       # Minutes without a heartbeat before the owner is paged (webhook and
       # email). Blank or 0 = off.
       HEARTBEAT_GAP_PAGE_MINUTES: ${HEARTBEAT_GAP_PAGE_MINUTES:-}

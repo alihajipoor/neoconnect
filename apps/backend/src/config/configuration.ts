@@ -194,6 +194,12 @@ export default () => ({
     // fallbacks in the code.
     tuning: process.env.BLOCK_WATCH_TUNING ?? "",
   },
+  // The nightly database retention (modules/data-retention,
+  // docs/usage-retention.md): off (the default), dry (log what it would
+  // do) or on. Anything else is off.
+  dataRetention: {
+    mode: process.env.DATA_RETENTION ?? "off",
+  },
   // Minutes without a heartbeat before the owner is paged (webhook and
   // email) that a node has gone quiet, once per gap. Blank or 0 is off,
   // the default: paging a person is opted into. The webhook-only offline

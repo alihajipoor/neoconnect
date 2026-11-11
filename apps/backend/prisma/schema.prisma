@@ -598,6 +598,7 @@ model Subscription {
   primaryNode       Node?                @relation(fields: [primaryNodeId], references: [id])
   protocolUsers     ProtocolUser[]
   usageRecords      UsageRecord[]
+  usageHourly       UsageHourly[]
   transactions      PaymentTransaction[]
   invoices          Invoice[]
   referralReward    ReferralReward?
@@ -685,6 +686,7 @@ model Node {
   protocolUsers    ProtocolUser[]
   agentCommands    AgentCommand[]
   usageRecords     UsageRecord[]
+  usageHourly      UsageHourly[]
   subscriptions    Subscription[]
   enrollmentTokens EnrollmentToken[]
   /// Optional, and absent on every node until one is provisioned for it.
@@ -922,6 +924,37 @@ model UsageRecord {
   // 45 minutes for one plan edit's 6,722 revocations (2026-11-07).
   @@index([protocolUserId])
   @@map("usage_records")
+}
+
+/// usage_records older than the days kept, added up per subscription,
+/// node and UTC hour by the retention job (modules/data-retention), which
+/// deletes the detailed rows in the same transaction. Kept forever.
+/// Rolled-up hours lose the credential (so protocol and route) and the
+/// 30-second detail; nothing else. See docs/usage-retention.md.
+///
+/// Cascades with its subscription and node, unlike usage_records: an older
+/// backend that knows nothing of this table can still delete either.
+model UsageHourly {
+  subscriptionId String
+  nodeId         String
+  /// The UTC hour the rows were reported in (reportedAt truncated).
+  hourStart      DateTime
+  bytesUp        BigInt
+  bytesDown      BigInt
+  /// How many detailed rows were added in.
+  records        Int
+  /// The newest reportedAt among them.
+  lastReportedAt DateTime
+  /// The newest reportedAt among those with bytesUp > 0: "last seen" means
+  /// the device sent something, never a WireGuard handshake retry alone.
+  lastUpAt       DateTime?
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  node         Node         @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@id([subscriptionId, nodeId, hourStart])
+  @@index([nodeId, hourStart])
+  @@map("usage_hourly")
 }
 
 // ---------------------------------------------------------------------------

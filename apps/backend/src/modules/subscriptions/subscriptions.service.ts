@@ -223,6 +223,8 @@ export class SubscriptionsService {
 
     await this.prisma.$transaction([
       this.prisma.usageRecord.deleteMany({ where: { subscriptionId: id } }),
+      // Its rolled-up hours (they cascade too; named here like the rest).
+      this.prisma.usageHourly.deleteMany({ where: { subscriptionId: id } }),
       this.prisma.invoice.updateMany({ where: { subscriptionId: id }, data: { subscriptionId: null } }),
       this.prisma.paymentTransaction.updateMany({
         where: { subscriptionId: id },
