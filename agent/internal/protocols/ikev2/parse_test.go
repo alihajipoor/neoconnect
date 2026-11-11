@@ -73,6 +73,22 @@ type fakeSwanctl struct {
 	// Makes --terminate fail; onTerminate runs first, if set.
 	terminateErr error
 	onTerminate  func(f *fakeSwanctl)
+
+	// What --stats prints, and what --load-creds and --load-all fail with.
+	stats      string
+	loadErr    error
+	loadAllErr error
+}
+
+// count is how many times swanctl was run with this first argument.
+func (f *fakeSwanctl) count(command string) int {
+	n := 0
+	for _, call := range f.calls {
+		if len(call) > 0 && call[0] == command {
+			n++
+		}
+	}
+	return n
 }
 
 // terminateOptions is every option swanctl's terminate command registers
@@ -95,6 +111,18 @@ func (f *fakeSwanctl) run(_ context.Context, args ...string) (string, string, er
 			return "", f.listErr.Error(), f.listErr
 		}
 		return f.listSAs, "", nil
+	case "--stats":
+		return f.stats, "", nil
+	case "--load-creds":
+		if f.loadErr != nil {
+			return "", f.loadErr.Error(), f.loadErr
+		}
+		return "", "", nil
+	case "--load-all":
+		if f.loadAllErr != nil {
+			return "", f.loadAllErr.Error(), f.loadAllErr
+		}
+		return "", "", nil
 	case "--terminate":
 		var ikeID, ikeName string
 		for i := 1; i < len(args); i++ {

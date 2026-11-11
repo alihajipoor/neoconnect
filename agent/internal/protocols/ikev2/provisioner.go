@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/common"
 )
@@ -76,7 +77,43 @@ type Provisioner struct {
 	// next poll forgets it, the one gap left. Re-provisioning the identity
 	// takes it off.
 	ending map[string]bool
+
+	// What strongSwan is known to hold, so an unchanged list is not
+	// loaded again. The control plane re-asserts every credential every
+	// 60 seconds, and each one used to rewrite the file and reload it: 51
+	// customers were 51 reloads a minute, and strongSwan logs one line per
+	// stored secret per reload, so the log grew with the square of the
+	// customer count -- about a gigabyte a day per node, 87% of every line
+	// a node wrote (measured 2026-11-11).
+	//
+	// loaded is the exact text of the last load this process saw succeed,
+	// and means something only while loadedOK is true. loadedOK goes false
+	// the moment a write begins and comes back only when the reload after
+	// it succeeds, so a failed write or a refused reload is tried again by
+	// the next command, whatever the list looks like by then.
+	loaded   string
+	loadedOK bool
+	loadedAt time.Time
+	// daemonSince is strongSwan's own "up since" text as the stats poll
+	// last read it, "" until it has been read once. When it changes the
+	// daemon restarted and holds nothing this process loaded: the poll
+	// clears loadedOK and sets daemonRestarted, and the next command does
+	// the loading. The poll itself never writes the file and never loads
+	// anything -- after an agent restart this process's list is empty
+	// until the control plane re-asserts, and a load from the poll would
+	// put that empty list in front of every customer.
+	daemonSince     string
+	daemonRestarted bool
+	// now is time.Now, a field so a test can move the clock.
+	now func() time.Time
 }
+
+// reloadEvery bounds how long a state this process cannot see stays
+// wrong: credentials cleared by another tool, or a daemon restart the
+// poll could not read. Once it has passed, the next command loads the
+// list again even though nothing changed. One reload in ten minutes
+// where there used to be one per customer per minute.
+const reloadEvery = 10 * time.Minute
 
 // swanctlRunner runs swanctl with the given arguments and returns what it
 // wrote to stdout and to stderr separately: only stdout is ever parsed,
@@ -94,6 +131,7 @@ func New(secretsPath, swanctlPath string) *Provisioner {
 		users:       map[string]string{},
 		lastBytes:   map[string]saBytes{},
 		ending:      map[string]bool{},
+		now:         time.Now,
 	}
 	p.runSwanctl = p.execSwanctl
 	return p
@@ -242,9 +280,11 @@ func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, erro
 	if err != nil {
 		return nil, err
 	}
+	since := p.readDaemonSince(ctx)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.noteDaemonSinceLocked(since)
 
 	// Only a successful read can be the baseline -- see primed.
 	baseline := !p.primed
@@ -465,12 +505,110 @@ func (p *Provisioner) listSAs(ctx context.Context) ([]saInfo, error) {
 	return sas, nil
 }
 
-// flushLocked rewrites the secrets file and reloads it.
+// readDaemonSince asks strongSwan when it started and returns the text
+// after "since" on the uptime line of `swanctl --stats`, for example
+// "Nov 07 07:29:18 2026". The text is compared, never parsed: its only
+// use is to notice that it changed. "" when it could not be read, which
+// means "not known" and never "restarted".
+func (p *Provisioner) readDaemonSince(ctx context.Context) string {
+	stdout, _, err := p.runSwanctl(ctx, "--stats")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "uptime:") {
+			continue
+		}
+		if i := strings.Index(line, "since "); i >= 0 {
+			return strings.TrimSpace(line[i+len("since "):])
+		}
+	}
+	return ""
+}
+
+// noteDaemonSinceLocked records strongSwan's start marker and, when it
+// differs from the one recorded before, marks what strongSwan holds as
+// unknown. The first reading only records. See daemonSince for why this
+// stops short of loading anything itself.
+func (p *Provisioner) noteDaemonSinceLocked(since string) {
+	if since == "" {
+		return
+	}
+	if p.daemonSince != "" && since != p.daemonSince {
+		p.loadedOK = false
+		p.daemonRestarted = true
+		log.Printf("ikev2: strongSwan restarted (up since %s); the next credential command loads its configuration again", since)
+	}
+	p.daemonSince = since
+}
+
+// fileHoldsLocked reports whether the secrets file on disk is exactly
+// text. strongSwan also loads from that file when it starts and when a
+// certificate renewal hook reloads credentials, so a file someone edited
+// or restored underneath this process has to be put right at the next
+// command, not left until something else changes.
+func (p *Provisioner) fileHoldsLocked(text string) bool {
+	onDisk, err := os.ReadFile(p.secretsPath)
+	return err == nil && string(onDisk) == text
+}
+
+// flushLocked makes strongSwan hold the current list: it rewrites the
+// secrets file and reloads it, unless strongSwan is known to hold exactly
+// this list already.
 //
 // Written to a temporary file and renamed, so a crash midway leaves the
 // previous list intact rather than a half-written one that strongSwan
 // would refuse and every customer would fail against.
 func (p *Provisioner) flushLocked(ctx context.Context) error {
+	text := p.secretsTextLocked()
+
+	// Nothing to do when the last successful load was this exact text, it
+	// is recent, strongSwan has not restarted since, and the file still
+	// says the same. Every one of those has to hold; any doubt loads.
+	if p.loadedOK && p.loaded == text && p.now().Sub(p.loadedAt) < reloadEvery && p.fileHoldsLocked(text) {
+		return nil
+	}
+	// From here until the reload succeeds, what strongSwan holds is not
+	// known: `--load-creds --clear` clears first and loads second, so a
+	// run that fails can leave it holding nothing at all.
+	p.loadedOK = false
+
+	if err := p.writeSecretsLocked(text); err != nil {
+		return err
+	}
+
+	// After a strongSwan restart the credentials alone are not enough on
+	// a node whose strongSwan is run by the starter: its connection and
+	// address pool are loaded by a unit that a daemon-only restart does
+	// not run again, so nobody can connect until they are loaded. Loading
+	// everything is what that unit and strongswan.service both do at
+	// start. A failure is logged and the credentials are still loaded:
+	// they are the part only this process can supply.
+	if p.daemonRestarted {
+		if stdout, stderr, err := p.runSwanctl(ctx, "--load-all", "--noprompt"); err != nil {
+			log.Printf("ikev2: could not load strongSwan's configuration after its restart: %v (%s)", err, joinOutput(stdout, stderr))
+		} else {
+			p.daemonRestarted = false
+		}
+	}
+
+	// --clear so a removed user is actually gone. Without it swanctl
+	// merges the file over what is already loaded and a deleted identity
+	// keeps authenticating, which is the whole failure this call exists
+	// to prevent. Established SAs are unaffected: EAP is consulted at
+	// authentication and not again.
+	if stdout, stderr, err := p.runSwanctl(ctx, "--load-creds", "--clear"); err != nil {
+		return fmt.Errorf("ikev2: strongSwan refused the credentials: %w (%s)", err, joinOutput(stdout, stderr))
+	}
+	p.loaded = text
+	p.loadedOK = true
+	p.loadedAt = p.now()
+	return nil
+}
+
+// secretsTextLocked is the secrets file for the current list.
+func (p *Provisioner) secretsTextLocked() string {
 	var b strings.Builder
 	b.WriteString("# Managed by neoxify-agentd. Edits here are overwritten.\n")
 	b.WriteString("secrets {\n")
@@ -486,7 +624,11 @@ func (p *Provisioner) flushLocked(ctx context.Context) error {
 		fmt.Fprintf(&b, "    eap-%s {\n        id = %s\n        secret = %q\n    }\n", name, name, p.users[name])
 	}
 	b.WriteString("}\n")
+	return b.String()
+}
 
+// writeSecretsLocked replaces the secrets file with text.
+func (p *Provisioner) writeSecretsLocked(text string) error {
 	dir := filepath.Dir(p.secretsPath)
 	tmp, err := os.CreateTemp(dir, ".neoxify-users-*.conf")
 	if err != nil {
@@ -500,7 +642,7 @@ func (p *Provisioner) flushLocked(ctx context.Context) error {
 		tmp.Close()
 		return fmt.Errorf("ikev2: could not secure the secrets file: %w", err)
 	}
-	if _, err := tmp.WriteString(b.String()); err != nil {
+	if _, err := tmp.WriteString(text); err != nil {
 		tmp.Close()
 		return fmt.Errorf("ikev2: could not write the secrets file: %w", err)
 	}
@@ -509,15 +651,6 @@ func (p *Provisioner) flushLocked(ctx context.Context) error {
 	}
 	if err := os.Rename(tmpName, p.secretsPath); err != nil {
 		return fmt.Errorf("ikev2: could not replace the secrets file: %w", err)
-	}
-
-	// --clear so a removed user is actually gone. Without it swanctl
-	// merges the file over what is already loaded and a deleted identity
-	// keeps authenticating, which is the whole failure this call exists
-	// to prevent. Established SAs are unaffected: EAP is consulted at
-	// authentication and not again.
-	if stdout, stderr, err := p.runSwanctl(ctx, "--load-creds", "--clear"); err != nil {
-		return fmt.Errorf("ikev2: strongSwan refused the credentials: %w (%s)", err, joinOutput(stdout, stderr))
 	}
 	return nil
 }
