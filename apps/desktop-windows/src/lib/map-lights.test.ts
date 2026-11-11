@@ -185,10 +185,21 @@ describe("mapLights", () => {
     }
   });
 
-  it("does not draw a country the map has no anchor for; the list stays the truth", () => {
-    const s = scene({ routes: [...ROUTES, route("jp", "jp-japan", "WIREGUARD", { ispTag: works }), route("odd", "frankfurt", "WIREGUARD")] });
-    expect(light(s, "jp")).toBeUndefined();
+  it("does not draw a region that names no country; the list stays the truth", () => {
+    const s = scene({ routes: [...ROUTES, route("zz", "zz-lab", "WIREGUARD", { ispTag: works }), route("odd", "frankfurt", "WIREGUARD")] });
+    expect(light(s, "zz")).toBeUndefined();
     expect(s.lights).toHaveLength(4);
+  });
+
+  /** Every country has an anchor, so a server opened somewhere new has its
+   * light without an app update -- and still only because the customer's
+   * own list names a route there. */
+  it("lights a country nobody added by hand once the list has a route there, and no other", () => {
+    const without = scene({ routes: ROUTES });
+    expect(light(without, "jp")).toBeUndefined();
+    const s = scene({ routes: [...ROUTES, route("jp", "jp-japan", "WIREGUARD", { ispTag: works })] });
+    expect(light(s, "jp")).toMatchObject({ look: "live", why: "isp", listed: true });
+    expect(s.lights).toHaveLength(without.lights.length + 1);
   });
 
   describe("the connected light", () => {
@@ -281,7 +292,11 @@ describe("mapLights", () => {
 
 describe("mapCountries", () => {
   it("names every country the list can light or leave from, once, in list order", () => {
-    const routes = [DE_REALITY, relay("ir-fr", "fr-france"), FI, DE_WG, route("jp", "jp-japan", "WIREGUARD")];
+    const routes = [DE_REALITY, relay("ir-fr", "fr-france"), FI, DE_WG, route("zz", "zz-lab", "WIREGUARD")];
     expect(mapCountries(routes)).toEqual(["de", "ir", "fr", "fi"]);
+  });
+
+  it("names a country that has only its capital's anchor", () => {
+    expect(mapCountries([DE_REALITY, route("jp", "jp-japan", "WIREGUARD")])).toEqual(["de", "jp"]);
   });
 });

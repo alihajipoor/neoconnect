@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { COUNTRY_NAMES } from "./country-names";
 import { countryCode, countryName, groupByPlace, placeKey, placeLabel, routePlace } from "./route-place";
 import { RouteFlag } from "../components/Flag";
 import type { RouteOption } from "./types";
@@ -82,6 +83,36 @@ describe("naming the place", () => {
       expect(countryName(`${code}-x`, "en")).not.toBe(`${code}-x`);
       expect(countryName(`${code}-x`, "fa")).toMatch(/[؀-ۿ]/);
     }
+  });
+
+  /** All 249 ISO 3166-1 codes, from the app's own list and not the
+   * platform's: a server opened in any country is named without an update,
+   * whatever the WebView carries. */
+  it("names every country there is, in both languages", () => {
+    const codes = Object.keys(COUNTRY_NAMES);
+    expect(codes).toHaveLength(249);
+    for (const code of codes) {
+      expect(code).toMatch(/^[a-z]{2}$/);
+      const en = countryName(`${code}-x`, "en");
+      const fa = countryName(`${code}-x`, "fa");
+      expect(en, code).toBe(COUNTRY_NAMES[code].en);
+      expect(en, code).toMatch(/^[A-ZÅ][\p{L} .'-]+$/u);
+      expect(fa, code).toBe(COUNTRY_NAMES[code].fa);
+      // Persian letters, spaces and the zero-width non-joiner only: no
+      // Latin, no Arabic yeh or kaf, no formal ezafe mark.
+      expect(fa, code).toMatch(/^[آابپتثجچحخدذرزژسشصضطظعغفقکگلمنوهیئ \u200c]+$/);
+    }
+    // No two countries under one name.
+    expect(new Set(codes.map((code) => COUNTRY_NAMES[code].en)).size).toBe(249);
+    expect(new Set(codes.map((code) => COUNTRY_NAMES[code].fa)).size).toBe(249);
+  });
+
+  /** The names people say, where the platform's list has the formal one. */
+  it("uses the everyday name where the formal one differs", () => {
+    expect(countryName("hk-hong-kong", "en")).toBe("Hong Kong");
+    expect(countryName("hk-hong-kong", "fa")).toBe("هنگ کنگ");
+    expect(countryName("kr-seoul", "fa")).toBe("کره جنوبی");
+    expect(countryName("za-johannesburg", "fa")).toBe("آفریقای جنوبی");
   });
 
   it("reads the ISO code off a region slug", () => {

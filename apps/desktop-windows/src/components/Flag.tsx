@@ -1,5 +1,8 @@
+import { useEffect, useSyncExternalStore } from "react";
 import { Globe } from "lucide-react";
 import { cn } from "../lib/utils";
+import { isCountry } from "../lib/country-names";
+import { flagSet, loadFlagSet, subscribeFlagSet } from "../lib/flag-art";
 import { countryCode } from "../lib/route-place";
 
 /** A country flag for a server location.
@@ -14,17 +17,25 @@ import { countryCode } from "../lib/route-place";
  * - **A remote sprite** would put a network fetch in front of the server
  *   list -- for customers whose networks are the reason they installed a
  *   VPN, and whose first view of the app is often before a tunnel is up.
- * - **A flag package** costs a dependency and a bundle for the handful of
- *   countries we actually run nodes in.
+ * - **A flag package** as a dependency costs every screen its whole
+ *   bundle, for flags of countries the screen is not showing.
  *
- * These are deliberately simple: at 20px wide the details of a coat of
- * arms are a smudge, so each flag keeps only what identifies it at a
- * glance -- bands, crosses, a crescent.
+ * So the flags come from two places, both inside the package:
+ *
+ * - The countries below are drawn here by hand. They are deliberately
+ *   simple: at 20px wide the details of a coat of arms are a smudge, so
+ *   each flag keeps only what identifies it at a glance -- bands, crosses,
+ *   a crescent.
+ * - Every other country's is a file in `src/assets/flags`, copied from a
+ *   set drawn the same plain way, and loaded in one piece the first time
+ *   any of them is wanted (`lib/flag-art.ts`). A server can open in any
+ *   country and have its flag without a new release of the app, which is
+ *   what Sweden did not have on 2026-11-11.
  */
 
 // Read from the region slug; lives with the country names now. Anything
 // it cannot read falls through to the globe, which is the honest answer
-// for a region nobody has taught this component about yet.
+// for a region that names no country.
 export { countryCode };
 
 const FLAGS: Record<string, React.ReactNode> = {
@@ -138,25 +149,39 @@ const FLAGS: Record<string, React.ReactNode> = {
   ),
 };
 
-/** Renders the flag for a region, or a globe when we have no flag for it.
+/** The countries drawn by hand above. Every other country's flag is a
+ * file from the set (`scripts/gen-flags.mjs` reads this table to know
+ * which ones to leave out). */
+export const HAND_DRAWN: readonly string[] = Object.keys(FLAGS);
+
+/** The flag's box: its size, its rounding and the hairline around it. One
+ * constant, so a flag from the set sits in exactly the box a hand-drawn
+ * one does and no row shifts. */
+const FLAG_BOX = "h-4 w-[1.35rem] rounded-[2px] ring-1 ring-inset ring-white/15";
+
+function NoFlag({ className }: { className?: string }) {
+  return <Globe className={cn("size-4 text-muted-foreground", className)} aria-hidden />;
+}
+
+/** Renders the flag for a region, or a globe when it names no country.
  *
- * The fallback matters more than it looks: a node can be added in any
- * country from the installer without touching this file, and a missing
- * flag must degrade to a neutral icon rather than to an empty box or the
- * wrong country's colours.
+ * Every ISO 3166-1 country has a flag, so the globe is left for a region
+ * that is not one: `zz`, `xx`, a slug with no code in front, nothing at
+ * all. It must stay a neutral icon, never an empty box or the wrong
+ * country's colours.
  */
 export function Flag({ region, className }: { region?: string | null; className?: string }) {
   const code = countryCode(region);
   const art = code ? FLAGS[code] : null;
 
   if (!art) {
-    return <Globe className={cn("size-4 text-muted-foreground", className)} aria-hidden />;
+    return isCountry(code) ? <SetFlag code={code} region={region} className={className} /> : <NoFlag className={className} />;
   }
 
   return (
     <svg
       viewBox="0 0 4 3"
-      className={cn("h-4 w-[1.35rem] rounded-[2px] ring-1 ring-inset ring-white/15", className)}
+      className={cn(FLAG_BOX, className)}
       role="img"
       // Named for screen readers and for anyone reading a bug report: the
       // slug is what the picker and the dashboard both key off.
@@ -165,6 +190,46 @@ export function Flag({ region, className }: { region?: string | null; className?
     >
       {art}
     </svg>
+  );
+}
+
+/** Shown in the flag's box for the moment the set takes to load: the box
+ * itself, faintly, so the row holds its shape and nothing reads as a
+ * country yet. */
+const PENDING = { viewBox: "0 0 4 3", body: '<rect width="4" height="3" fill="currentColor" opacity="0.1"/>' };
+
+/** A flag from the bundled set, in the same box as a hand-drawn one.
+ *
+ * The set is drawn 3:2 and the box is nearer 4:3, so the flag keeps its own
+ * coordinate box and is fitted the way the hand-drawn ones already are:
+ * scaled until it covers the box and trimmed evenly, a few percent off each
+ * end, never stretched.
+ *
+ * The file's shapes go into the page as they are. That is safe to do with
+ * any number of flags on one screen because no file in the set carries an
+ * `id`, a style or a reference for another flag's to collide with, and
+ * nothing in it can run: `gen-flags.mjs` refuses a file that does, and
+ * `flags.test.ts` checks the committed ones again. */
+function SetFlag({ code, region, className }: { code: string; region?: string | null; className?: string }) {
+  const set = useSyncExternalStore(subscribeFlagSet, flagSet, flagSet);
+  useEffect(() => {
+    void loadFlagSet();
+  }, []);
+
+  // The set could not be read, or has no file for this code: neither
+  // should happen, and the neutral icon is the honest thing to show.
+  if (set === null || (set && !set[code])) return <NoFlag className={className} />;
+  const art = set?.[code] ?? PENDING;
+
+  return (
+    <svg
+      viewBox={art.viewBox}
+      className={cn(FLAG_BOX, className)}
+      role="img"
+      aria-label={region ?? "unknown location"}
+      preserveAspectRatio="xMidYMid slice"
+      dangerouslySetInnerHTML={{ __html: art.body }}
+    />
   );
 }
 

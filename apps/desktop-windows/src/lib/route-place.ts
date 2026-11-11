@@ -1,3 +1,4 @@
+import { COUNTRY_NAMES } from "./country-names";
 import type { Language } from "./i18n";
 import type { RouteOption } from "./types";
 
@@ -22,35 +23,18 @@ export function countryCode(region: string | undefined | null): string | null {
   return /^[a-z]{2}$/.test(head) ? head : null;
 }
 
-/** The countries the app draws a flag for (`Flag.tsx`), named in each
- * language. A `Record<Language, ...>` so a language added later is a
- * build error here until it names them too. */
-const COUNTRY_NAMES: Record<string, Record<Language, string>> = {
-  ir: { en: "Iran", fa: "ایران" },
-  de: { en: "Germany", fa: "آلمان" },
-  fr: { en: "France", fa: "فرانسه" },
-  fi: { en: "Finland", fa: "فنلاند" },
-  se: { en: "Sweden", fa: "سوئد" },
-  tr: { en: "Turkey", fa: "ترکیه" },
-  nl: { en: "Netherlands", fa: "هلند" },
-  sg: { en: "Singapore", fa: "سنگاپور" },
-  ae: { en: "UAE", fa: "امارات" },
-  us: { en: "USA", fa: "آمریکا" },
-  gb: { en: "UK", fa: "بریتانیا" },
-  in: { en: "India", fa: "هند" },
-};
-
 /** The country a region slug is in, or the slug as written when this
  * cannot name it.
  *
- * A node can be added in any country from the installer without touching
- * this file. The platform's own list is asked next; failing that the slug
- * stands, which is what the apps showed before and is never the wrong
- * country. */
+ * Every ISO 3166-1 country is named in `country-names.ts`, so a node
+ * added in any of them is named without touching the app. For a code that
+ * list does not have -- one the standard assigns after this build -- the
+ * platform's own list is asked next; failing that the slug stands, which
+ * is never the wrong country. */
 export function countryName(region: string, language: Language): string {
   const code = countryCode(region);
   if (!code) return region;
-  const known = COUNTRY_NAMES[code]?.[language];
+  const known = Object.prototype.hasOwnProperty.call(COUNTRY_NAMES, code) ? COUNTRY_NAMES[code][language] : undefined;
   if (known) return known;
   // `zz` is the standard's own code for "unknown region", which the
   // platform would name as such -- a worse answer than the slug.

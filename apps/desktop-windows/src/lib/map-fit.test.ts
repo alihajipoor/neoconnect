@@ -1,11 +1,14 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { COUNTRY_NAMES } from "./country-names";
 import {
   ANCHORS,
   LAMP_MAX_NUDGE,
   LISTED_BOX,
+  MAP_COLS,
   MAP_KMAX,
   MAP_PAD,
+  MAP_ROWS,
   RIBBON_MARGIN,
   RIBBON_MIN,
   RIBBON_MIN_WINDOW,
@@ -30,9 +33,49 @@ describe("boxFor", () => {
   });
 
   it("widens for another anchored country in the list, and ignores one with no anchor", () => {
-    const box = boxFor([...LISTED, "us", "jp"]);
+    const box = boxFor([...LISTED, "us", "zz"]);
     expect(box.x0).toBe(ANCHORS.us.x);
     expect(box.x1).toBe(LISTED_BOX.x1);
+  });
+
+  /** A server opened in a country nobody listed by hand: the box reaches
+   * its capital, as it always did for the United States. */
+  it("widens for a country that has only its capital's anchor", () => {
+    const box = boxFor([...LISTED, "jp"]);
+    expect(box.x1).toBe(ANCHORS.jp.x);
+    expect(box.x0).toBe(LISTED_BOX.x0);
+  });
+});
+
+describe("the anchors", () => {
+  /** One for each of the 249 ISO 3166-1 countries, so a server opened in
+   * any of them has a place for its light without an app update. */
+  it("has one for every country, on the drawn map", () => {
+    const codes = Object.keys(COUNTRY_NAMES);
+    expect(Object.keys(ANCHORS).sort()).toEqual([...codes].sort());
+    for (const code of codes) {
+      const { x, y } = ANCHORS[code];
+      expect(x, code).toBeGreaterThanOrEqual(0);
+      expect(x, code).toBeLessThanOrEqual(MAP_COLS - 1);
+      expect(y, code).toBeGreaterThanOrEqual(0);
+      expect(y, code).toBeLessThanOrEqual(MAP_ROWS - 1);
+    }
+  });
+
+  it("puts a capital where it is on the map", () => {
+    // Tokyo: east of everything listed, north of Singapore.
+    expect(ANCHORS.jp.x).toBeGreaterThan(LISTED_BOX.x1);
+    expect(ANCHORS.jp.y).toBeLessThan(ANCHORS.sg.y);
+    // Brasilia: west of London. Canberra: south of Singapore.
+    expect(ANCHORS.br.x).toBeLessThan(ANCHORS.gb.x);
+    expect(ANCHORS.au.y).toBeGreaterThan(ANCHORS.sg.y);
+  });
+
+  /** The hero frames the countries listed by hand. Anchoring every other
+   * country must not move it: none of them is listed. */
+  it("left the hero's box where it was", () => {
+    expect(LISTED_BOX).toEqual({ x0: 99.439, y0: 8.862, x1: 157.156, y1: 45.366 });
+    expect(LISTED_BOX).toEqual({ x0: ANCHORS.gb.x, y0: ANCHORS.fi.y, x1: ANCHORS.sg.x, y1: ANCHORS.sg.y });
   });
 });
 
@@ -65,7 +108,7 @@ describe("fitBox", () => {
 
 describe("lightPoints", () => {
   it("places each anchored country, and nothing for one without an anchor", () => {
-    const pts = lightPoints(["de", "jp"], { k: 4, ox: 10, oy: 20 });
+    const pts = lightPoints(["de", "zz"], { k: 4, ox: 10, oy: 20 });
     expect(pts).toEqual([{ cc: "de", x: 10 + ANCHORS.de.x * 4, y: 20 + ANCHORS.de.y * 4 }]);
   });
 
