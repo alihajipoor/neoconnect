@@ -321,7 +321,7 @@ return array(
     'download.autoupdate.body' => 'After you install it, the Windows app checks for new versions and installs them by itself. You don\'t need to come back here for updates.',
 
     'download.unsigned.title' => 'Windows will show a warning',
-    'download.unsigned.body' => 'The installer isn\'t code-signed yet, so the first time you run it, Windows SmartScreen may show a blue "Windows protected your PC" screen. Click More info, then Run anyway. We plan to get a signing certificate before the public launch. Until then, download the app only from this page.',
+    'download.unsigned.body' => 'The installer isn\'t code-signed yet, so the first time you run it, Windows SmartScreen may show a blue "Windows protected your PC" screen. Click More info, then Run anyway. We plan to get a signing certificate. Until then, download the app only from this page.',
 
     'download.steps.title' => 'Installing on Windows',
     'download.steps.1' => 'Run the installer. It installs for your Windows user only and doesn\'t need administrator rights.',
