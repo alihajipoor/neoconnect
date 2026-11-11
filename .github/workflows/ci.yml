@@ -115,6 +115,15 @@ jobs:
       # upstream counts, the owner's latest answer per server), whose unit
       # tests use an in-memory stand-in. Skipped everywhere but here, the
       # turbo run below included.
+      # scripts/fleet (adding, retiring and replacing servers) reads and
+      # writes production through SQL written by hand. Nothing runs
+      # those queries before a real server change does, so a column
+      # renamed by a migration would be found halfway through a
+      # retirement. Here every one of them is run against the schema
+      # the migrations just produced, and rolled back.
+      - name: Fleet tool's queries run against the migrated schema
+        run: bash scripts/fleet/test/sql-check.sh
+
       - name: Database-backed specs
         working-directory: apps/backend
         env:
@@ -152,6 +161,26 @@ jobs:
           # expected noise for scripts that source relative paths computed
           # at runtime — real issues are warning severity and above.
           severity: warning
+
+      # scripts/fleet is the checklist that adds, retires and replaces
+      # servers. Its scripts are copied to production hosts and run
+      # there as root, so they get the same lint the installer gets.
+      - uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: scripts/fleet
+          additional_files: fleet
+          severity: warning
+
+      # The whole point of that checklist is that no step is forgotten,
+      # so a step that disappears from one has to fail here. Each
+      # command is run for real under --dry-run against a fixture
+      # address file, with ssh, scp, curl and tar replaced by stand-ins
+      # that must not be called. Also the plan-list arithmetic, the DNS
+      # matching, the relay-hop file edits, and the jq that guards a
+      # plan edit on the panel host (this runner has jq; the operator's
+      # PC does not).
+      - name: Fleet checklists are complete, and a dry run touches nothing
+        run: node --test scripts/fleet/test/*.test.mjs
 
       # Catches the backend growing an environment variable the
       # installer never creates. That drift is invisible until somebody
