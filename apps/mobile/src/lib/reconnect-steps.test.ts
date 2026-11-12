@@ -1,6 +1,15 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { droppedWhileAway, reconnectPreflight, rungAccess, type ReconnectPreflight } from "./reconnect-steps";
+import {
+  droppedWhileAway,
+  reconnectPreflight,
+  rungAccess,
+  waitOutTeardown,
+  type PreflightNote,
+  type ReconnectPreflight,
+} from "./reconnect-steps";
+
+const GONE = { gone: true, ours: null, state: "disconnected" };
 
 function deps(over: Partial<ReconnectPreflight> = {}): ReconnectPreflight & { asked: string[] } {
   const asked: string[] = [];
@@ -9,7 +18,7 @@ function deps(over: Partial<ReconnectPreflight> = {}): ReconnectPreflight & { as
     exclusion: () => null,
     vpnGone: async () => {
       asked.push("vpnGone");
-      return true;
+      return GONE;
     },
     access: async () => {
       asked.push("access");
@@ -36,11 +45,14 @@ describe("before a phone's reconnect may dial", () => {
   it("stops when another VPN holds the device -- before the permission is asked about", async () => {
     // On Android asking is `VpnService.prepare`, which can move the VPN
     // back to this app: the other app's tunnel would be taken from it.
+    // A VPN up and none of it ours is the sign.
     const asked: string[] = [];
+    const notes: PreflightNote[] = [];
     const d = deps({
+      noted: (n) => notes.push(n),
       vpnGone: async () => {
         asked.push("vpnGone");
-        return false;
+        return { gone: false, ours: false, state: null };
       },
       access: async () => {
         asked.push("access");
@@ -49,6 +61,56 @@ describe("before a phone's reconnect may dial", () => {
     });
     expect(await reconnectPreflight(d)).toEqual({ kind: "stop", why: "otherVpn" });
     expect(asked).toEqual(["vpnGone"]);
+    expect(notes).toEqual([{ branch: "otherVpnUp", outcome: "stop", state: null }]);
+  });
+
+  it("tries again on the next step, not \"another VPN\", while our own tunnel is still on its way down", async () => {
+    // An iPhone sees only its own connections: a tunnel not gone at the
+    // end of the wait is ours, stuck between up and down. Read as another
+    // VPN, the reconnect stopped after one attempt with nothing dialled.
+    const notes: PreflightNote[] = [];
+    const d = deps({
+      noted: (n) => notes.push(n),
+      vpnGone: async () => {
+        d.asked.push("vpnGone");
+        return { gone: false, ours: true, state: "disconnecting" };
+      },
+    });
+    expect(await reconnectPreflight(d)).toEqual({ kind: "failed" });
+    // Nothing more asked, nothing dialled.
+    expect(d.asked).toEqual(["vpnGone"]);
+    expect(notes).toEqual([{ branch: "ownStillStopping", outcome: "retry", state: "disconnecting" }]);
+  });
+
+  it("tries again when it cannot tell whose VPN is still up", async () => {
+    const notes: PreflightNote[] = [];
+    const d = deps({ noted: (n) => notes.push(n), vpnGone: async () => ({ gone: false, ours: null, state: null }) });
+    expect(await reconnectPreflight(d)).toEqual({ kind: "failed" });
+    expect(notes).toEqual([{ branch: "unknownStillUp", outcome: "retry", state: null }]);
+  });
+
+  it("says which check stopped it, with the state the wait saw, and nothing for a clearance", async () => {
+    const notes: PreflightNote[] = [];
+    await reconnectPreflight(
+      deps({ noted: (n) => notes.push(n), access: async () => ({ granted: true, ikev2: true, chosenElsewhere: true }) }),
+    );
+    await reconnectPreflight(deps({ noted: (n) => notes.push(n), access: async () => ({ granted: false }) }));
+    await reconnectPreflight(deps({ noted: (n) => notes.push(n) }));
+    expect(notes).toEqual([
+      { branch: "chosenElsewhere", outcome: "stop", state: "disconnected" },
+      { branch: "permission", outcome: "stop", state: "disconnected" },
+    ]);
+    // A report that throws changes nothing.
+    expect(
+      await reconnectPreflight(
+        deps({
+          noted: () => {
+            throw new Error("x");
+          },
+          vpnGone: async () => ({ gone: false, ours: true, state: "connecting" }),
+        }),
+      ),
+    ).toEqual({ kind: "failed" });
   });
 
   it("stops on an iPhone where another VPN configuration has been chosen over ours", async () => {
@@ -107,7 +169,7 @@ describe("before a phone's reconnect may dial", () => {
       vpnGone: async () => {
         during.asked.push("vpnGone");
         live = false;
-        return true;
+        return GONE;
       },
     });
     const answer = await reconnectPreflight(during);
@@ -140,6 +202,81 @@ describe("before a phone's reconnect may dial", () => {
     expect(await reconnectPreflight(deps({ access: () => Promise.reject(new Error("x")) }))).toEqual({
       kind: "failed",
     });
+  });
+});
+
+describe("the wait for the device to be out of every VPN, before a reconnect", () => {
+  function clock() {
+    let t = 0;
+    return { now: () => t, sleep: async (ms: number) => void (t += ms) };
+  }
+  const base = { timeoutMs: 8_000, pollMs: 500 };
+
+  it("is over the moment the tunnel is gone", async () => {
+    const c = clock();
+    let reads = 0;
+    const wait = await waitOutTeardown({
+      ...base,
+      ...c,
+      read: async () => ({ gone: ++reads >= 3, state: reads >= 3 ? "disconnected" : "disconnecting", seesOthers: false }),
+      ownUp: async () => {
+        throw new Error("not asked");
+      },
+    });
+    expect(wait).toEqual({ gone: true, ours: null, state: "disconnected" });
+    expect(reads).toBe(3);
+  });
+
+  it("on an iPhone, a tunnel still not down at the deadline is our own, with the state it was in", async () => {
+    let asked = false;
+    const wait = await waitOutTeardown({
+      ...base,
+      ...clock(),
+      read: async () => ({ gone: false, state: "connecting", seesOthers: false }),
+      ownUp: async () => {
+        asked = true;
+        return false;
+      },
+    });
+    expect(wait).toEqual({ gone: false, ours: true, state: "connecting" });
+    // Not asked: the reading is only ever about our own connections.
+    expect(asked).toBe(false);
+  });
+
+  it("on Android, asks whether one of our engines is what is still up", async () => {
+    const read = async () => ({ gone: false });
+    expect(await waitOutTeardown({ ...base, ...clock(), read, ownUp: async () => true })).toEqual({
+      gone: false,
+      ours: true,
+      state: null,
+    });
+    expect(await waitOutTeardown({ ...base, ...clock(), read, ownUp: async () => false })).toEqual({
+      gone: false,
+      ours: false,
+      state: null,
+    });
+    expect(
+      await waitOutTeardown({
+        ...base,
+        ...clock(),
+        read,
+        ownUp: async () => {
+          throw new Error("x");
+        },
+      }),
+    ).toEqual({ gone: false, ours: null, state: null });
+  });
+
+  it("times out not knowing when no reading could be made, never \"gone\"", async () => {
+    const wait = await waitOutTeardown({
+      ...base,
+      ...clock(),
+      read: async () => {
+        throw new Error("x");
+      },
+      ownUp: async () => false,
+    });
+    expect(wait).toEqual({ gone: false, ours: null, state: null });
   });
 });
 
@@ -247,7 +384,8 @@ describe("the phone dashboard's wiring", () => {
   it("asks the phone's questions, then runs an ordinary pass", () => {
     expect(bindAt).toBeGreaterThan(0);
     expect(runner).toContain("await reconnectPreflight({");
-    expect(runner).toContain("vpnGone: waitForTeardown,");
+    expect(runner).toContain("vpnGone: reconnectTeardownWait,");
+    expect(runner).toContain("noted: reportPreflight,");
     // The whole answer, iOS's two extra words with it -- not the bare
     // `granted` a press of Connect reads.
     expect(runner).toContain("access: vpnAccess,");

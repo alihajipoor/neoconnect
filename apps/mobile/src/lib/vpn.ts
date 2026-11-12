@@ -40,6 +40,9 @@ export interface VpnStatus {
    * client uses to tell "engine running" from "traffic flowing", which
    * is the distinction that stopped it lying about being connected. */
   lastHandshakeAgeSecs: number | null;
+  /** iOS: the connection's state in one word (`TunnelPhase` in the
+   * plugin). For reports only; nothing decides on it. */
+  state?: string | null;
 }
 
 /** What the tunnel needs. The field names are the ones the backend
@@ -149,8 +152,20 @@ export const disconnect = () => invoke<void>("vpn_disconnect");
  * Polled after a disconnect so the UI confirms the teardown instead of
  * announcing it. Kept out of `disconnect` itself because the connect
  * ladder disconnects between rungs and must not wait. */
-export const tunnelGone = () =>
-  invoke<{ gone: boolean }>("vpn_tunnel_gone").then((r) => r.gone);
+export const tunnelGone = () => tunnelReading().then((r) => r.gone);
+
+/** `tunnelGone`'s whole answer. `state` (iOS) names the state of the
+ * connection of ours still not down. `seesOthers` is false on iOS, which
+ * shows an app only its own connections, so a tunnel not gone there is
+ * always ours; absent on Android, whose answer is whether any VPN network
+ * is up. */
+export interface TunnelReading {
+  gone: boolean;
+  state?: string | null;
+  seesOthers?: boolean | null;
+}
+
+export const tunnelReading = () => invoke<TunnelReading>("vpn_tunnel_gone");
 
 export const vpnStatus = () => invoke<VpnStatus>("vpn_status");
 /** The status with the byte totals, for the speeds alone: on iOS each is a
