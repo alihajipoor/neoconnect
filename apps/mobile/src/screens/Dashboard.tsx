@@ -199,7 +199,7 @@ import {
   type PreflightNote,
   type TeardownWait,
 } from "../lib/reconnect-steps";
-import { dropReason, preflightReason, readRunFiles } from "../lib/run-diagnostics";
+import { dropReason, pendingRunReason, preflightReason, readRunFiles, runEndOwed } from "../lib/run-diagnostics";
 import {
   beginPass,
   connectPending,
@@ -387,10 +387,23 @@ async function reportDropSeen(protocol: string | undefined) {
       kind: "CONNECT",
       outcome: "OTHER",
       ...(protocol ? { protocol } : {}),
-      reason: dropReason(files, status?.state, Date.now() / 1000),
+      reason: dropReason(files, status?.state, Date.now() / 1000, protocol),
     });
   } catch {
     // A report that could not be made is not the drop's concern.
+  }
+}
+
+/** After a tunnel lands: the extension's own summary of a run that a drop
+ * could only call possibly still running (`pendingRunReason`), which the
+ * start just made has written. Nothing when nothing is owed. */
+async function reportRunEndOwed() {
+  if (!runEndOwed()) return;
+  try {
+    const reason = pendingRunReason(await readRunFiles());
+    if (reason !== null) void reportAttempt({ kind: "CONNECT", outcome: "OTHER", reason });
+  } catch {
+    // Not the landing's concern.
   }
 }
 
@@ -3039,6 +3052,9 @@ export function Dashboard({
                 options.reconnect,
               ),
             );
+            // After the landing's own report: the run a drop could not
+            // yet sum up, now that this start has.
+            void reportRunEndOwed();
           });
           // A tunnel to reconnect if it drops. A reconnect's own landing
           // is armed by the episode, which carries its count of quick

@@ -5,6 +5,7 @@ import {
   describeLastRun,
   dropReason,
   fatalLine,
+  pendingRunReason,
   preflightReason,
   REASON_MAX,
   resetDescribed,
@@ -108,14 +109,15 @@ describe("how the tunnel's last run ended, for a drop's report", () => {
     const files: RunFiles = { lastEnd: JSON.stringify(lastEnd), run: JSON.stringify({ startedAt: NOW - 100 }), heartbeat: null, fatalTail: null };
     expect(describeLastRun(files, NOW)).toEqual({
       key: NOW - 100,
+      conclusive: true,
       text: "previous run: ended without a stop reason, up 13 s; mem peak 48.2 MiB, last 47.9 MiB, left 1.1 MiB; engine xray, core 26.6.27 patched; fatal: panic: runtime error: invalid memory address or nil pointer dereference",
     });
   });
 
   it("says when there is no record, and when the platform keeps none", () => {
-    expect(describeLastRun(null, NOW)).toEqual({ key: null, text: "run: no record on this platform" });
-    expect(describeLastRun({ lastEnd: null, run: null, heartbeat: null, fatalTail: null }, NOW)).toEqual({ key: null, text: "run: no record" });
-    expect(describeLastRun({ lastEnd: "{not json", run: "[]", heartbeat: "x", fatalTail: null }, NOW)).toEqual({ key: null, text: "run: no record" });
+    expect(describeLastRun(null, NOW)).toEqual({ key: null, conclusive: true, text: "run: no record on this platform" });
+    expect(describeLastRun({ lastEnd: null, run: null, heartbeat: null, fatalTail: null }, NOW)).toEqual({ key: null, conclusive: true, text: "run: no record" });
+    expect(describeLastRun({ lastEnd: "{not json", run: "[]", heartbeat: "x", fatalTail: null }, NOW)).toEqual({ key: null, conclusive: true, text: "run: no record" });
   });
 
   it("sends nothing it does not recognise: an odd engine or version is replaced", () => {
@@ -241,5 +243,119 @@ describe("the wiring", () => {
     }
     expect(commands).toContain('.run_mobile_plugin::<LastRunFiles>("lastRun", ())');
     expect(app).toContain("tauri_plugin_neoxify_vpn::vpn_last_run,");
+  });
+
+  it("the fatal output is read from its head, where the panic line is", () => {
+    expect(swift).toContain('text("engine-fatal.log", tail: 4096, fromStart: true)');
+  });
+
+  it("a landing sends what a drop still owed, and a drop names its protocol", () => {
+    expect(dashboard).toContain("reason: dropReason(files, status?.state, Date.now() / 1000, protocol),");
+    expect(dashboard).toContain("void reportRunEndOwed();");
+  });
+});
+
+describe("a crash or a memory kill seen while its heartbeat is fresh", () => {
+  const crashed: RunFiles = {
+    lastEnd: null,
+    run: JSON.stringify({ startedAt: NOW - 20 }),
+    heartbeat: heartbeat({ t: NOW - 3 }),
+    fatalTail: PANIC,
+  };
+
+  it("is called ended without a stop reason when the system shows the tunnel down", () => {
+    for (const state of ["disconnected", "invalid"]) {
+      resetDescribed();
+      const reason = dropReason(crashed, state, NOW);
+      expect(reason).toContain("run: ended without a stop reason, last heartbeat 3 s ago");
+      expect(reason).toContain("fatal: panic: Net: Unknown address type");
+    }
+  });
+
+  it("is not counted as reported while it may still be running, and its summary is sent after the next start", () => {
+    const first = dropReason(crashed, "disconnecting", NOW);
+    expect(first).toContain("run: no stop reason yet, extension may still be running");
+    // Seen again, still inconclusive: described again, not "already reported".
+    expect(dropReason(crashed, "disconnecting", NOW)).toContain("may still be running");
+    // The reconnect starts a new run, which sums the old one up.
+    const summed: RunFiles = {
+      lastEnd: JSON.stringify({
+        version: 1,
+        recordedAt: NOW + 10,
+        runStartedAt: NOW - 20,
+        ended: "withoutStop",
+        stopReason: null,
+        stopReasonName: null,
+        stoppedAt: null,
+        lastHeartbeat: JSON.parse(heartbeat({ t: NOW - 3 })),
+        fatalSummary: "panic: Net: Unknown address type",
+        fatalTail: [],
+      }),
+      run: JSON.stringify({ startedAt: NOW + 10 }),
+      heartbeat: heartbeat({ t: NOW + 12 }),
+      fatalTail: "",
+    };
+    const follow = pendingRunReason(summed);
+    expect(follow).toBe(
+      "auto-reconnect dropped run summed up; previous run: ended without a stop reason, up 13 s; mem peak 48.2 MiB, last 47.9 MiB, left 1.1 MiB; engine xray, core 26.6.27 patched; fatal: panic: Net: Unknown address type",
+    );
+    // Once.
+    expect(pendingRunReason(summed)).toBeNull();
+    // And a later drop of the new run does not send it again.
+    expect(dropReason(summed, "connecting", NOW + 14)).toContain("run: no stop reason yet");
+  });
+
+  it("a later drop sends the summary of an earlier run no report has described", () => {
+    const files: RunFiles = {
+      lastEnd: JSON.stringify({ version: 1, runStartedAt: NOW - 100, ended: "withoutStop", lastHeartbeat: null, fatalSummary: "", fatalTail: [] }),
+      run: JSON.stringify({ startedAt: NOW - 20 }),
+      heartbeat: heartbeat({ t: NOW - 2 }),
+      fatalTail: null,
+    };
+    expect(dropReason(files, "connecting", NOW)).toContain("previous run: ended without a stop reason");
+    expect(dropReason(files, "connecting", NOW)).toContain("run: no stop reason yet");
+  });
+
+  it("nothing is owed when every drop was conclusive", () => {
+    dropReason(crashed, "disconnected", NOW);
+    expect(pendingRunReason(crashed)).toBeNull();
+  });
+
+  it("an IKEv2 drop carries no run clause: the extension did not carry it", () => {
+    expect(dropReason(crashed, "disconnected", NOW, "IKEV2")).toBe(
+      "auto-reconnect drop seen; state disconnected; run: IKEv2, the system's own client",
+    );
+    // And the crashed run is still sent with the next drop that is ours.
+    expect(dropReason(crashed, "disconnected", NOW)).toContain("fatal: panic");
+  });
+});
+
+describe("cleaning lines that touch a word character", () => {
+  it.each([
+    ["dial dest_203.0.113.7:443 failed", "203.0.113"],
+    ["x203.0.113.7 refused", "203.0.113"],
+    ["at 203.0.113.7abc", "203.0.113"],
+    ["proxy https://user:pass@node.example.com/x", "user"],
+    ["proxy https://user:pass@node.example.com/x", "pass"],
+    ["short id 6ba85179e30d4fc2 rejected", "6ba85179e30d4fc2"],
+    ["sid=6ba85179e30d4fc2", "6ba85179e30d4fc2"],
+    ["password Zx9kQ2mP7vL4w rejected", "Zx9kQ2mP7vL4w"],
+    ["lookup dest_node.example.com failed", "example"],
+    ["route via dest_2001:db8::1", "2001"],
+  ])("%s", (line, secret) => {
+    const cleaned = cleanFatalLine(line);
+    expect(cleaned).not.toContain(secret);
+    assertClean(cleaned);
+  });
+
+  it("keeps the words and the file names that make a line useful", () => {
+    expect(cleanFatalLine("panic: Net: Unknown address type")).toBe("panic: Net: Unknown address type");
+    expect(cleanFatalLine("\thandler.go:113 +0x5c")).toBe("handler.go:113 +0x?");
+    expect(cleanFatalLine("fatal error: concurrent map writes")).toBe("fatal error: concurrent map writes");
+  });
+
+  it("uses no lookbehind, which iOS 15's WebKit cannot load", () => {
+    const source = readFileSync(new URL("./run-diagnostics.ts", import.meta.url), "utf8");
+    expect(source).not.toMatch(/\(\?<[=!]/);
   });
 });

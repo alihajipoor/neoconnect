@@ -148,6 +148,14 @@ func TestCleanLine(t *testing.T) {
 		{"created by github.com/xtls/xray-core/proxy/tun.(*stackGVisor).Start.func1 in goroutine 41", "created by github.com/xtls/xray-core/proxy/tun.(*stackGVisor).Start.func1 in goroutine 41"},
 		{"goroutine 7 [running]:", "goroutine 7 [running]:"},
 		{"mail me@example.org", "mail <id>"},
+		{"panic: dial dest_203.0.113.7:443 failed", "panic: dial dest_<ip> failed"},
+		{"panic: x203.0.113.7 and 203.0.113.7abc", "panic: x<ip> and <ip>abc"},
+		{"panic: proxy https://user:pass@node.example.com/x", "panic: proxy https://<id>@<host>/x"},
+		{"panic: short id 6ba85179e30d4fc2 rejected", "panic: short id <id> rejected"},
+		{"panic: password Zx9kQ2mP7vL4w rejected", "panic: password <id> rejected"},
+		{"panic: lookup dest_node.example.com failed", "panic: lookup dest_<host> failed"},
+		{"panic: route via dest_2001:db8::1", "panic: route via dest_<ip>"},
+		{"panic: Net: Unknown address type", "panic: Net: Unknown address type"},
 	}
 	for _, c := range cases {
 		if got := cleanLine(c.in); got != c.want {

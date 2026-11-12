@@ -327,9 +327,25 @@ func summarizeFatal(raw []byte) (summary string, tail []string) {
 }
 
 var (
-	reUUID  = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
-	reEmail = regexp.MustCompile(`[\w.+-]+@[\w-]+(?:\.[\w-]+)+`)
-	reIPv4  = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b`)
+	// Where a left boundary is needed it is a character that cannot be part
+	// of the thing, kept by the replacement ("${1}"). \b is not used there:
+	// it fails next to a letter or an underscore, and let
+	// "dest_203.0.113.7" through whole. The app's cleaner
+	// (run-diagnostics.ts) is the same.
+	reUUID = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	// A URL's user part ("user:pass@"), before the e-mail pattern, which
+	// would take only what follows its colon.
+	reUserinfo = regexp.MustCompile(`[^\s/@]*:[^\s/@]*@`)
+	reEmail    = regexp.MustCompile(`[\w.+-]+@[\w-]+(?:\.[\w-]+)+`)
+	reIPv4     = regexp.MustCompile(`(^|[^\d.])\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?`)
+	// What is left of an IPv6 address whose first group sat against a word
+	// character, so that reIPv6 began after it.
+	reIPv6Head = regexp.MustCompile(`(?i)[0-9a-f]{1,4}<ip>`)
+	// 8 or more hex digits with nothing alphanumeric before them: a REALITY
+	// short id (up to 16), part of a key or a token.
+	reHexRun = regexp.MustCompile(`(^|[^0-9A-Za-z])[0-9a-fA-F]{8,}`)
+	// Shorter key-like runs: 12 or more, with a letter and a digit.
+	reMixed = regexp.MustCompile(`[A-Za-z0-9+/_=-]{12,}`)
 	// Two colons or more between hex groups: an IPv6 address (and, as a
 	// cost, a clock time). A Go frame's "file.go:123" has one.
 	reIPv6 = regexp.MustCompile(`(?i)\[?\b[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}\b\]?(?::\d+)?|\[?::(?:[0-9a-f]{1,4}:?){0,7}\]?`)
@@ -341,7 +357,7 @@ var (
 	reSecret = regexp.MustCompile(`[A-Za-z0-9+/_=-]{20,}`)
 	reHex    = regexp.MustCompile(`\b0x[0-9a-fA-F]+\b`)
 	// A host name: labels joined by dots ending in a letters-only label.
-	reHost = regexp.MustCompile(`(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b`)
+	reHost = regexp.MustCompile(`(?i)(^|[^a-z0-9.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b`)
 	// A Go traceback line: a frame ("pkg.Func(args)", or "created by
 	// pkg.Func in goroutine N") or its source line ("\tfile.go:123 +0x1c").
 	reFrame = regexp.MustCompile(`^(?:created by \S+|\S+\(.*\))(?: in goroutine \d+)?$|^\t\S+\.(?:go|s|c):\d+`)
@@ -357,9 +373,10 @@ var (
 func cleanLine(line string) string {
 	frame := reFrame.MatchString(line)
 	line = rePath.ReplaceAllString(line, "$1")
+	line = reUserinfo.ReplaceAllString(line, "<id>@")
 	line = reEmail.ReplaceAllString(line, "<id>")
 	line = reUUID.ReplaceAllString(line, "<id>")
-	line = reIPv4.ReplaceAllString(line, "<ip>")
+	line = reIPv4.ReplaceAllString(line, "${1}<ip>")
 	line = reIPv6.ReplaceAllStringFunc(line, func(s string) string {
 		// "file.go:123:" style and lone "::" in Go syntax are not
 		// addresses; anything with a hex group on both sides of two colons
@@ -369,12 +386,20 @@ func cleanLine(line string) string {
 		}
 		return "<ip>"
 	})
+	line = reIPv6Head.ReplaceAllString(line, "<ip>")
 	line = reHex.ReplaceAllString(line, "0x?")
+	line = reHexRun.ReplaceAllString(line, "${1}<id>")
 	if frame {
 		line = reModVer.ReplaceAllString(line, "")
 	} else {
-		line = reHost.ReplaceAllString(line, "<host>")
+		line = reHost.ReplaceAllString(line, "${1}<host>")
 		line = reSecret.ReplaceAllString(line, "<id>")
+		line = reMixed.ReplaceAllStringFunc(line, func(s string) string {
+			if strings.ContainsAny(s, "0123456789") && strings.IndexFunc(s, func(r rune) bool { return (r|0x20) >= 'a' && (r|0x20) <= 'z' }) >= 0 {
+				return "<id>"
+			}
+			return s
+		})
 	}
 	if len(line) > fatalLineMax {
 		line = line[:fatalLineMax]

@@ -389,20 +389,24 @@ class NeoxifyVpnPlugin: Plugin {
                 invoke.resolve(["lastEnd": NSNull(), "run": NSNull(), "heartbeat": NSNull(), "fatalTail": NSNull()])
                 return
             }
-            func text(_ name: String, tail: Int = 16 * 1024) -> Any {
+            func text(_ name: String, tail: Int = 16 * 1024, fromStart: Bool = false) -> Any {
                 guard let handle = try? FileHandle(forReadingFrom: dir.appendingPathComponent(name)) else { return NSNull() }
                 defer { try? handle.close() }
                 let size = (try? handle.seekToEnd()) ?? 0
-                let from = size > UInt64(tail) ? size - UInt64(tail) : 0
+                let from = !fromStart && size > UInt64(tail) ? size - UInt64(tail) : 0
                 try? handle.seek(toOffset: from)
-                guard let data = try? handle.readToEnd() else { return NSNull() }
+                guard let data = try? handle.read(upToCount: tail) else { return NSNull() }
                 return String(decoding: data, as: UTF8.self)
             }
             invoke.resolve([
                 "lastEnd": text("tunnel-last-end.json"),
                 "run": text("tunnel-run.json"),
                 "heartbeat": text("engine-heartbeat.json"),
-                "fatalTail": text("engine-fatal.log", tail: 4096),
+                // The head, not the end: the file is truncated at every
+                // start and only crash output reaches it, so its "panic:"
+                // or "fatal error:" line comes first, and a long trace
+                // would push it out of the last few KiB.
+                "fatalTail": text("engine-fatal.log", tail: 4096, fromStart: true),
             ])
         }
     }

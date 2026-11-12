@@ -28,6 +28,13 @@ if [ "$#" -eq 0 ]; then
 fi
 
 cd "$src"
+# A replace already there is a run that was killed before it could put
+# go.mod back (SIGKILL, a cancelled CI job). Refused, not built over:
+# restoring would keep it, and it must not be committed.
+if grep -q "^replace $module " go.mod || grep -q "^[[:space:]]*$module .*=>" go.mod; then
+  echo "error: go.mod already replaces $module; a killed run left it. Undo it: git checkout -- go.mod" >&2
+  exit 1
+fi
 if ! command -v patch >/dev/null; then
   echo "error: 'patch' is not installed" >&2
   exit 1

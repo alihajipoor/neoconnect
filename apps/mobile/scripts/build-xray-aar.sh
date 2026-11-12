@@ -54,6 +54,13 @@ gomobile init
 mkdir -p "$libs"
 cd "$src"
 
+# Android keeps upstream xray-core. A replace here is an iOS patch run
+# (xray-core-patch.sh) that was killed before it put go.mod back.
+if grep -q "github.com/xtls/xray-core .*=>" go.mod; then
+  echo "error: go.mod replaces xray-core; a killed iOS patch run left it. Undo it: git checkout -- go.mod" >&2
+  exit 1
+fi
+
 # arm64 only by default, deliberately: it is every Android device sold
 # for years, and each extra ABI adds ~46MB of compiled Go to the APK for
 # hardware nobody is running this on.
