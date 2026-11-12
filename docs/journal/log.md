@@ -9275,3 +9275,116 @@ six indexes, each valid, no `_ccnew`/`_ccold` left. usage_records 1538 -> 864 MB
 23:52:56Z (backend recreated, 8/8 nodes ONLINE, ir2 back, API 200); next run
 2026-11-12 01:15Z, dry run now finds 0 to do. Unverified: the first scheduled
 run itself, and `shm_size: 256m`, which applies only when Postgres is next recreated.
+
+## 2026-11-12 — iPhone tunnel drops: four faults, fix branch, internal build 20
+
+**Status:** in flight — fix on `claude/phone-engine-fix` (`74197e64`), NOT
+on main; TestFlight 1.0.2 (20) uploaded for internal testers only, still
+processing at last check.
+**Touches:** apps/mobile (Xray engine pin, iOS TCP buffer patch, reconnect
+preflight, extension diagnostics). Nothing server-side.
+
+**Report.** On iPhone, Stealth (VLESS REALITY) and Shadowsocks sessions end
+by themselves and the customer must press Connect again. The owner's own
+iPhone (0.2.39) dropped three times in ~150 s during a speed test on
+Shadowsocks: 13 s after connecting, in the test's first burst of
+connections, and just as download ended and upload began (184.6 MB down in
+30 s; the upload never reached the server).
+
+**Ruled out, with evidence.** Backend: no command, no device-limit hold.
+Exit servers: no restart, no user removal; the server only sees the phone go
+silent. Last night's changes. The Windows app: held five minutes on four
+routes.
+
+**Four faults.**
+1. The phones pinned xray-core v1.260327.0 from August until this branch.
+   Its TUN handler panics on a connection reset right after the handshake
+   (`proxy/tun/handler.go:113`, no nil check; upstream fix #6365, first in
+   v26.6.27). No recover, so it kills the iOS extension / Android VpnService
+   process. Desktop took the fix in 0.9.49 (see 2026-10-11/12 here, which
+   already said mobile had the same panic).
+2. Memory: each upload can hold ~8 MiB in gVisor's TCP buffers (8 MiB
+   receive, 6 MiB send per connection, not GC-reclaimable). 4 parallel
+   uploads put the engine at 42-47 MiB, 8 at 72 MiB; iOS kills the extension
+   near 50 MB. The only limits were the soft GC settings in memory_darwin.go.
+3. App: after a drop the iOS reconnect preflight could decide "another VPN
+   holds the device" and stop without dialling. `status()` and `tunnelGone`
+   disagreed on in-between states (connecting/disconnecting), so a provider
+   stuck between them failed the 8 s wait. Five of five such production stops
+   followed an Xray landing.
+4. Nothing recorded why the extension ended: a crash or memory kill skips
+   stopTunnel, so the app only said "the tunnel dropped".
+
+**Not known.** No crash or jetsam record from a phone has been seen. Whether
+real sessions end from the panic, the memory kill, or both is unproven.
+
+**What the branch changes.**
+- Engine to xray-core `v1.260327.1-0.20260627131803-45cf2898ab12` (= tag
+  v26.6.27, desktop's core; pseudo-version because upstream v26 tags are not
+  Go module versions). `x/mobile` kept as a go.mod tool requirement (tidy
+  dropped it and broke gomobile). Android links with `-checklinkname=0`
+  (wlynxg/anet; without it: `invalid reference to net.zoneCache`).
+- Shadowsocks UDP now goes over XUDP/mux (uot removed in xray-config.ts).
+- iOS only: `plugins/vpn/xray/patches/ios-tcp-buffers.patch` caps gVisor TCP
+  buffers at 512 KiB max / 256 KiB default each way, applied by
+  `scripts/xray-core-patch.sh` (dry run, marker check, temporary replace,
+  go.mod restored) from build-xray-xcframework.sh only, which then checks the
+  binary records the patched module. Heartbeat field `corePatched` shows it.
+  Android keeps upstream buffers.
+- Preflight: one shared TunnelPhase for status and tunnelGone. Our own tunnel
+  still stopping after 8 s = failed attempt, retried on the next backoff step,
+  nothing dialled (`ownStillStopping`). "Another VPN" only on iOS
+  chosenElsewhere/superceded, or on Android a VPN up with none of ours.
+  Unknown readings retry; never read as gone or as another VPN.
+- Diagnostics: the extension writes `diagnostics/` in the app group
+  (`tunnel-last-end.json`, heartbeat, fatal log); new `vpn_last_run` command;
+  the app sends drop and preflight reason texts in client_attempts (cleaned of
+  IPs, hosts, emails, UUIDs, key-like runs and paths; capped at 500 chars).
+  A run that is disconnected with no stop reason reads "ended without a stop
+  reason".
+- Mobile version 0.2.41.
+
+**Mac numbers** (Mac process, loopback, the app's own Go package; NOT iOS).
+- Transports vs a 26.3.27 server built from source: REALITY, VLESS TLS TCP,
+  VLESS TLS WS (fallback + PROXY protocol), Trojan, Shadowsocks 2022 all PASS
+  (1 MiB echo, 32 MiB each way, 20/20 UDP). WireGuard and IKEv2 untouched.
+- Reset storm: old pin dies after 37-50 resets (`panic: Net: Unknown address
+  type`); new core survives ~80k resets in 20 s. The 20 s run's download
+  after the storm then fails with connection reset; the Mac ran out of
+  loopback ports (EADDRNOTAVAIL) at the same time, so likely the Mac; not
+  proven.
+- Engine footprint peak MiB, SS/REALITY, stock -> capped: 4 stalled uploads
+  45.4/37.4 -> 16.4/15.9; 8 stalled 78.9/64.5 -> 23.6/22.2; 8 fast 33.5/35.4
+  -> 14.5/17.2; 8 slow downloads 57.1/57.0 -> 17.9/16.8; idle ~9.
+- Speed cost: download ~2630 -> 2590 Mbit/s (-1.5%); upload faster.
+- Not fixed: an unpaced flood (~360 short connections/s, thousands failing)
+  still reaches 400 MiB on SS, 110 MiB on REALITY. Customers show 10-30/s.
+
+**Tests/CI.** Mobile `pnpm test` 25 files, 358 passed; tsc clean; Go tests and
+vet on the Mac clean; CI and CI (iOS) green at `74197e64` (iOS rerun after
+GitHub had no macOS runner).
+
+**TestFlight.** 1.0.2 (20) from `74197e64` (1.0.1 build 18 is approved and
+live, so its train is closed). Extension carries the new core and the
+patched marker; entitlements present in app and appex, app group in both;
+assert-store-bundle clean. Upload succeeded 21:58Z; still PROCESSING ~100 min
+later. Not yet in any group. Intent: internal only, never the external
+group; compliance and What to Test to be set once VALID. No App Store
+version or review submission touched. Next build number 21.
+
+**Next, in order.** (1) Build 20 finishes processing, goes to internal only.
+(2) The owner speed-tests it on Shadowsocks and REALITY. (3) Read the new
+drop/preflight reasons in client_attempts: they say panic, memory kill or
+stop reason. (4) Only then merge to main, give it to outside testers, build
+and device-test Android (debug-android.yml), and later the App Store.
+
+**Unverified.** Anything on an iPhone or Android phone. The Mac footprint is
+not iOS's jetsam figure. XUDP and a 26.6.27 client against the live 26.3.27
+nodes and on censored networks. Full Android gradle build. The Rust iOS
+branch of vpn_last_run (not compiled for an iOS target). Whether our provider
+really sticks in connecting/disconnecting and a retry then dials. Preflight-
+only retries that end "attempts" keep the device slot (shared controller,
+not changed; check under CONCURRENCY_CUT=enforce).
+
+**Lesson.** When the desktop takes an engine fix, the phones need it too.
+This one sat on mobile for a month after the journal named it.
