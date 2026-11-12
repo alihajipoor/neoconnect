@@ -9,7 +9,12 @@ import { SubscriptionsModule } from "../subscriptions/subscriptions.module";
 import { ClientAttemptsModule } from "../client-attempts/client-attempts.module";
 import { ReachabilityModule } from "../reachability/reachability.module";
 import { BlockWatchModule } from "../block-watch/block-watch.module";
-import { ANNOUNCEMENTS_QUEUE, SWEEPS_QUEUE } from "./jobs.constants";
+import {
+  ANNOUNCEMENTS_FINISHED,
+  ANNOUNCEMENTS_QUEUE,
+  SWEEPS_FINISHED,
+  SWEEPS_QUEUE,
+} from "./jobs.constants";
 import { ReferralsModule } from "../referrals/referrals.module";
 import { ProtocolUsersModule } from "../protocol-users/protocol-users.module";
 import { RelayAuthModule } from "../relay-auth/relay-auth.module";
@@ -24,7 +29,10 @@ import { AnnouncementsProcessor } from "./announcements.processor";
 // announcements module imports JobsModule and re-exports below to get
 // its own @InjectQueue(ANNOUNCEMENTS_QUEUE), same as sweeps-scheduler
 // does for SWEEPS_QUEUE from within this same module.
-const announcementsQueue = BullModule.registerQueue({ name: ANNOUNCEMENTS_QUEUE });
+const announcementsQueue = BullModule.registerQueue({
+  name: ANNOUNCEMENTS_QUEUE,
+  defaultJobOptions: ANNOUNCEMENTS_FINISHED,
+});
 
 @Module({
   imports: [
@@ -38,7 +46,8 @@ const announcementsQueue = BullModule.registerQueue({ name: ANNOUNCEMENTS_QUEUE 
         connection: new IORedis(config.get<string>("redis.url")!, { maxRetriesPerRequest: null }),
       }),
     }),
-    BullModule.registerQueue({ name: SWEEPS_QUEUE }),
+    // Finished jobs are removed: see FinishedJobs in jobs.constants.
+    BullModule.registerQueue({ name: SWEEPS_QUEUE, defaultJobOptions: SWEEPS_FINISHED }),
     ReferralsModule,
     announcementsQueue,
     UsageModule,

@@ -3,7 +3,7 @@ import { Logger } from "@nestjs/common";
 import { Job } from "bullmq";
 import { EmailService } from "../email/email.service";
 import { announcementEmail, announcementText, toLocale, type Locale } from "../email/templates";
-import { ANNOUNCEMENTS_QUEUE } from "./jobs.constants";
+import { ANNOUNCEMENTS_FINISHED, ANNOUNCEMENTS_QUEUE } from "./jobs.constants";
 
 export interface AnnouncementRecipient {
   email: string;
@@ -29,8 +29,11 @@ export interface AnnouncementJobData {
  * AnnouncementsService.send() only enqueues, it never blocks a request on
  * this loop. Best-effort per recipient: one failed address must not stop
  * the rest of the broadcast (EmailService.sendMail() already swallows its
- * own errors and returns a boolean, exactly for this reason). */
-@Processor(ANNOUNCEMENTS_QUEUE)
+ * own errors and returns a boolean, exactly for this reason).
+ *
+ * A finished job is the whole recipient list sitting in Redis, so only
+ * the last few are kept (ANNOUNCEMENTS_FINISHED). */
+@Processor(ANNOUNCEMENTS_QUEUE, ANNOUNCEMENTS_FINISHED)
 export class AnnouncementsProcessor extends WorkerHost {
   private readonly logger = new Logger(AnnouncementsProcessor.name);
 
