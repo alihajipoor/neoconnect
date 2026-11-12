@@ -32,6 +32,8 @@ function matches(row: Row, where: Row = {}): boolean {
     const value = row[key];
     if (cond === null) return value === null || value === undefined;
     if (cond instanceof Date) return value instanceof Date && value.getTime() === cond.getTime();
+    // A filter on the related row (`node: { status: ... }`).
+    if (key === "node") return matches((value as Row | undefined) ?? {}, cond as Row);
     if (typeof cond === "object" && !Array.isArray(cond)) {
       if ("in" in cond && !cond.in.includes(value)) return false;
       if ("not" in cond) {
@@ -117,7 +119,7 @@ function fakePrisma(world: World) {
     },
     blockIncident: {
       findMany: jest.fn(async ({ where, include, select, distinct, orderBy }: Row) => {
-        let rows = world.incidents.filter((i) => matches(i, where));
+        let rows = world.incidents.filter((i) => matches(withNode(i), where));
         if (orderBy?.closedAt === "desc") {
           rows = [...rows].sort((a, b) => (b.closedAt?.getTime() ?? 0) - (a.closedAt?.getTime() ?? 0));
         }
@@ -446,6 +448,85 @@ describe("BlockWatchService", () => {
     for (let i = 1; i <= 3; i += 1) await service.runCycle(new Date(T0 + i * 30 * MIN));
     expect(world.incidents[0]).toMatchObject({ status: "OPEN", quietCycles: 0 });
     expect(world.incidents[0].evidenceJson.outage).toContain("offline");
+  });
+
+  it("does not evaluate a retired (DISABLED) server: no outage, no incident, nothing sent", async () => {
+    const { service, world, pages } = build("notify", { ...blocked(T0), checks: unreachableChecks("n1", T0) });
+    world.nodes[0].status = "DISABLED";
+    // The summaries are what the sweep logs its warning from.
+    expect(await service.runCycle(new Date(T0))).toEqual([]);
+    expect(service.tcpReachable).not.toHaveBeenCalled();
+    expect(world.incidents).toHaveLength(0);
+    expect(pages).toHaveLength(0);
+  });
+
+  it("still calls an offline server an outage beside a retired one", async () => {
+    const { service } = build("record", {
+      nodes: [
+        { id: "n1", name: "germany-1", status: "ONLINE", publicIp: "192.0.2.10", realityDestReachable: true },
+        { id: "n2", name: "turkey-1", status: "OFFLINE", publicIp: "192.0.2.11", realityDestReachable: null },
+        { id: "n3", name: "france-1", status: "DISABLED", publicIp: "192.0.2.12", realityDestReachable: null },
+        { id: "n4", name: "sweden-1", status: "PENDING", publicIp: "192.0.2.13", realityDestReachable: null },
+      ],
+    });
+    const summaries = await service.runCycle(new Date(T0));
+    expect(summaries.map((s) => s.nodeName)).toEqual(["germany-1", "turkey-1"]);
+    expect(summaries[0].outage).toBeNull();
+    expect(summaries[1].outage).toContain("offline");
+  });
+
+  it("keeps an incident open on a server that is then retired, and sends no reminder about it", async () => {
+    const { service, world, alerts } = build("notify", { ...blocked(T0), checks: unreachableChecks("n1", T0) });
+    await service.runCycle(new Date(T0));
+    expect(alerts()).toHaveLength(1);
+    const lastRead = world.incidents[0].evidenceJson.evaluatedAt;
+
+    world.nodes[0].status = "DISABLED";
+    for (const at of [T0 + 25 * HOUR, T0 + 26 * HOUR]) {
+      world.attempts = blockedReports(at);
+      world.checks = unreachableChecks("n1", at);
+      expect(await service.runCycle(new Date(at))).toEqual([]);
+    }
+    expect(alerts()).toHaveLength(1);
+
+    // Still there for the panel, as it last read, and still answerable.
+    const overview = await service.overview(new Date(T0 + 26 * HOUR));
+    expect(overview.open).toHaveLength(1);
+    expect(overview.open[0]).toMatchObject({
+      status: "OPEN",
+      verdict: "LIKELY_BLOCKED",
+      node: { name: "germany-1", status: "DISABLED" },
+    });
+    expect(world.incidents[0].evidenceJson.evaluatedAt).toBe(lastRead);
+    const answered = await service.act(world.incidents[0].id, "retired", "owner@x.test", {}, new Date(T0 + 27 * HOUR));
+    expect(answered.status).toBe("RETIRED");
+    expect((await service.overview(new Date(T0 + 28 * HOUR))).closed).toHaveLength(1);
+  });
+
+  it("does not page a held likely block once its server is retired", async () => {
+    const { service, world, alerts } = build("notify", blocked(T0));
+    await service.runCycle(new Date(T0));
+    await service.act(world.incidents[0].id, "snooze", "owner@x.test", { hours: 2 }, new Date(T0 + MIN));
+    world.attempts = blockedReports(T0 + 70 * MIN);
+    await service.runCycle(new Date(T0 + 70 * MIN));
+    expect(world.incidents[0].verdict).toBe("LIKELY_BLOCKED");
+    // The snooze ends with the server retired: its last reading stands
+    // unrefreshed, and must not be paged as if it were current.
+    world.nodes[0].status = "DISABLED";
+    await service.runCycle(new Date(T0 + 130 * MIN));
+    expect(alerts()).toHaveLength(0);
+  });
+
+  it("leaves a retired server's open incident out of the daily digest", async () => {
+    const { service, world, pages } = build("digest", { ...blocked(T0), checks: unreachableChecks("n1", T0) });
+    await service.runCycle(new Date(T0));
+    expect(pages).toHaveLength(1);
+    world.nodes[0].status = "DISABLED";
+    world.attempts = blockedReports(T0 + 25 * HOUR);
+    world.checks = unreachableChecks("n1", T0 + 25 * HOUR);
+    await service.runCycle(new Date(T0 + 25 * HOUR));
+    expect(pages).toHaveLength(1);
+    expect(world.incidents[0].status).toBe("OPEN");
   });
 
   it("clears only when the server is shown working again, and then tells the owner", async () => {
