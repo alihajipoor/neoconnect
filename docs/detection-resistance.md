@@ -277,11 +277,12 @@ that never sends a ClientHello, is its own anomaly under active
 probing).
 
 UDP rides inside TCP on both clients, so DNS and game traffic are not
-silently dropped where UDP is blocked. Mobile (xray 26.3.27) uses
-`uot: true`. The Windows client's xray v26.6.27 dropped UoT (#6286), so
-the Windows client uses XUDP over Xray's mux instead (`concurrency: -1`, so TCP is not
-muxed), and it sends the tunnel's lookups to Xray's DNS outbound, which
-asks over TCP on every protocol. The nodes still keep the UoT carve-out for
+silently dropped where UDP is blocked. xray v26.6.27 dropped UoT (#6286),
+so both clients (Windows since 0.9.49; the phones from branch
+`claude/phone-engine-fix`, 2026-11-12) use XUDP over Xray's mux instead (`concurrency: -1`, so TCP is not
+muxed). The Windows client also sends the tunnel's lookups to Xray's DNS
+outbound, which asks over TCP on every protocol; the phones' lookups ride
+the mux like any other UDP. The nodes still keep the UoT carve-out for
 clients that send UoT.
 
 ## WireGuard, OpenVPN, IKEv2

@@ -52,3 +52,6 @@ local.properties
 # Built by scripts/build-xray-xcframework.sh; a compiled Go framework
 # has no business in git, same as the Android AAR.
 plugins/vpn/tunnel/Frameworks/
+# The patched copy of xray-core scripts/xray-core-patch.sh builds against,
+# and its saved go.mod/go.sum while a command runs.
+plugins/vpn/xray/.xray-core-patched*

@@ -1,0 +1,267 @@
+{
+  "reality": {
+    "log": {
+      "loglevel": "warning"
+    },
+    "stats": {},
+    "policy": {
+      "system": {
+        "statsOutboundUplink": true,
+        "statsOutboundDownlink": true
+      }
+    },
+    "inbounds": [
+      {
+        "tag": "tun-in",
+        "protocol": "tun",
+        "port": 0,
+        "settings": {
+          "name": "neoxify",
+          "MTU": 1400
+        }
+      }
+    ],
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "vless",
+        "settings": {
+          "vnext": [
+            {
+              "address": "127.0.0.1",
+              "port": 1,
+              "users": [
+                {
+                  "id": "UUID",
+                  "encryption": "none",
+                  "flow": "xtls-rprx-vision"
+                }
+              ]
+            }
+          ]
+        },
+        "streamSettings": {
+          "network": "tcp",
+          "security": "reality",
+          "realitySettings": {
+            "serverName": "neoxify.test",
+            "fingerprint": "chrome",
+            "publicKey": "mYq9AsSqMYjpfG2Vp36NMc8zFJcippAHvP1_R0ebzFc",
+            "shortId": "e341f2050d3761d4"
+          }
+        }
+      }
+    ]
+  },
+  "vless-tls-tcp": {
+    "log": {
+      "loglevel": "warning"
+    },
+    "stats": {},
+    "policy": {
+      "system": {
+        "statsOutboundUplink": true,
+        "statsOutboundDownlink": true
+      }
+    },
+    "inbounds": [
+      {
+        "tag": "tun-in",
+        "protocol": "tun",
+        "port": 0,
+        "settings": {
+          "name": "neoxify",
+          "MTU": 1400
+        }
+      }
+    ],
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "vless",
+        "settings": {
+          "vnext": [
+            {
+              "address": "127.0.0.1",
+              "port": 1,
+              "users": [
+                {
+                  "id": "UUID",
+                  "encryption": "none",
+                  "flow": "xtls-rprx-vision"
+                }
+              ]
+            }
+          ]
+        },
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "neoxify.test",
+            "fingerprint": "chrome",
+            "alpn": [
+              "h2",
+              "http/1.1"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "vless-tls-ws": {
+    "log": {
+      "loglevel": "warning"
+    },
+    "stats": {},
+    "policy": {
+      "system": {
+        "statsOutboundUplink": true,
+        "statsOutboundDownlink": true
+      }
+    },
+    "inbounds": [
+      {
+        "tag": "tun-in",
+        "protocol": "tun",
+        "port": 0,
+        "settings": {
+          "name": "neoxify",
+          "MTU": 1400
+        }
+      }
+    ],
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "vless",
+        "settings": {
+          "vnext": [
+            {
+              "address": "127.0.0.1",
+              "port": 1,
+              "users": [
+                {
+                  "id": "UUID",
+                  "encryption": "none",
+                  "flow": ""
+                }
+              ]
+            }
+          ]
+        },
+        "streamSettings": {
+          "network": "ws",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "neoxify.test",
+            "fingerprint": "chrome",
+            "alpn": [
+              "h2",
+              "http/1.1"
+            ]
+          },
+          "wsSettings": {
+            "path": "/ws",
+            "host": "neoxify.test"
+          }
+        }
+      }
+    ]
+  },
+  "trojan": {
+    "log": {
+      "loglevel": "warning"
+    },
+    "stats": {},
+    "policy": {
+      "system": {
+        "statsOutboundUplink": true,
+        "statsOutboundDownlink": true
+      }
+    },
+    "inbounds": [
+      {
+        "tag": "tun-in",
+        "protocol": "tun",
+        "port": 0,
+        "settings": {
+          "name": "neoxify",
+          "MTU": 1400
+        }
+      }
+    ],
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "trojan",
+        "settings": {
+          "servers": [
+            {
+              "address": "127.0.0.1",
+              "port": 1,
+              "password": "PASSWORD"
+            }
+          ]
+        },
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "neoxify.test",
+            "fingerprint": "chrome",
+            "alpn": [
+              "h2",
+              "http/1.1"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "shadowsocks": {
+    "log": {
+      "loglevel": "warning"
+    },
+    "stats": {},
+    "policy": {
+      "system": {
+        "statsOutboundUplink": true,
+        "statsOutboundDownlink": true
+      }
+    },
+    "inbounds": [
+      {
+        "tag": "tun-in",
+        "protocol": "tun",
+        "port": 0,
+        "settings": {
+          "name": "neoxify",
+          "MTU": 1400
+        }
+      }
+    ],
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "shadowsocks",
+        "settings": {
+          "servers": [
+            {
+              "address": "127.0.0.1",
+              "port": 1,
+              "method": "2022-blake3-aes-256-gcm",
+              "password": "SERVERKEY:USERKEY"
+            }
+          ]
+        },
+        "mux": {
+          "enabled": true,
+          "concurrency": -1,
+          "xudpConcurrency": 16,
+          "xudpProxyUDP443": "allow"
+        }
+      }
+    ]
+  }
+}

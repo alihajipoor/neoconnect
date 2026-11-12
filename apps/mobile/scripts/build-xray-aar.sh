@@ -92,11 +92,19 @@ echo "Building the Xray engine for $target"
 # is a reproducibility fix rather than a size one: without it the .so
 # differs between two otherwise identical builds purely by the checkout
 # directory, which makes "did this change?" unanswerable by comparison.
+#
+# -checklinkname=0: xray-core v26.6.27 (the TUN crash fix) pulls in
+# github.com/wlynxg/anet through pion/stun (transport/internet/finalmask,
+# registered by infra/conf whether used or not). On Android anet reaches
+# into the standard library with go:linkname (net.zoneCache), which the
+# Go 1.23+ linker refuses unless this check is off -- the link fails with
+# "invalid reference to net.zoneCache", on 1.26.5 (CI's) and 1.27 alike.
+# anet's own documented requirement; it touches no other package.
 gomobile bind \
   -target="$target" \
   -androidapi 24 \
   -trimpath \
-  -ldflags="-s -w" \
+  -ldflags="-s -w -checklinkname=0" \
   -o "$aar" .
 
 # Unpacked, because an Android *library* module cannot depend on a local

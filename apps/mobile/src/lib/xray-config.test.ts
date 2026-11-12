@@ -83,6 +83,61 @@ describe("REALITY", () => {
   });
 });
 
+describe("Shadowsocks", () => {
+  const SS_PARAMS = { method: "2022-blake3-aes-256-gcm", serverKey: "server-key" };
+
+  // xray-core v26.6.27 (the engine since the TUN crash fix) reads no
+  // `uot` (#6286): a key that looks like it carries UDP and does nothing,
+  // so every UDP flow would leave as plain UDP. XUDP over the mux instead,
+  // with TCP left unmuxed -- the Windows client's shape.
+  it("carries UDP over the mux, not the dropped uot key", () => {
+    const config = JSON.parse(buildXrayConfig(user("SHADOWSOCKS", SS_PARAMS, { userKey: "user-key" })));
+    const outbound = config.outbounds.find((o: { tag: string }) => o.tag === "proxy");
+    expect(outbound.mux).toEqual({ enabled: true, concurrency: -1, xudpConcurrency: 16, xudpProxyUDP443: "allow" });
+    expect(outbound.settings.servers[0].uot).toBeUndefined();
+    expect(outbound.settings.servers[0].password).toBe("server-key:user-key");
+  });
+
+  it("muxes nothing else: Vision refuses a mux, and TCP stays one connection each", () => {
+    for (const [protocol, params, credentials] of [
+      ["XRAY_VLESS_REALITY", REALITY_PARAMS, { uuid: "u-1", flow: "xtls-rprx-vision" }],
+      ["XRAY_VLESS_TLS", { serverName: "example.com" }, { uuid: "u-1", flow: "xtls-rprx-vision" }],
+      ["XRAY_TROJAN", { serverName: "example.com" }, { password: "p" }],
+    ] as const) {
+      const config = JSON.parse(buildXrayConfig(user(protocol, params, credentials)));
+      expect(config.outbounds[0].mux, protocol).toBeUndefined();
+    }
+  });
+});
+
+/*
+The configs the engine's own tests start (plugins/vpn/xray, darwin): one
+per transport the phones offer, built here by the real builder so the Go
+tests run what the app sends rather than a hand-written copy. The Go side
+replaces only the address, port and credentials with a local server's
+throwaway ones. A change to the builder changes this file; `pnpm test -u`
+rewrites it, and the engine tests should then be run on the Mac.
+*/
+describe("engine test fixture", () => {
+  it("matches what the builder produces for every transport", async () => {
+    const PLACEHOLDER = { host: "127.0.0.1", port: 1 };
+    function fixtureUser(protocol: string, transport: string, publicParams: Record<string, unknown>, credentials: Record<string, string>) {
+      const u = user(protocol, publicParams, credentials);
+      return { ...u, connection: { ...u.connection, ...PLACEHOLDER, transport } } as ProtocolUser;
+    }
+    const tls = { serverName: "neoxify.test" };
+    const configs = {
+      "reality": buildXrayConfig(fixtureUser("XRAY_VLESS_REALITY", "TCP", { ...REALITY_PARAMS, serverName: "neoxify.test" }, { uuid: "UUID", flow: "xtls-rprx-vision" })),
+      "vless-tls-tcp": buildXrayConfig(fixtureUser("XRAY_VLESS_TLS", "TCP", tls, { uuid: "UUID", flow: "xtls-rprx-vision" })),
+      "vless-tls-ws": buildXrayConfig(fixtureUser("XRAY_VLESS_TLS", "WS", { ...tls, path: "/ws" }, { uuid: "UUID", flow: "" })),
+      "trojan": buildXrayConfig(fixtureUser("XRAY_TROJAN", "TCP", tls, { password: "PASSWORD" })),
+      "shadowsocks": buildXrayConfig(fixtureUser("SHADOWSOCKS", "TCP", { method: "2022-blake3-aes-256-gcm", serverKey: "SERVERKEY" }, { userKey: "USERKEY" })),
+    };
+    const parsed = Object.fromEntries(Object.entries(configs).map(([k, v]) => [k, JSON.parse(v)]));
+    await expect(JSON.stringify(parsed, null, 2) + "\n").toMatchFileSnapshot("../../plugins/vpn/xray/testdata/app-configs.json");
+  });
+});
+
 describe("traffic counters", () => {
   // The speeds come from these (plugins/vpn/xray/xray.go, Uplink and
   // Downlink): the engine counts the outbound tagged "proxy", and only when

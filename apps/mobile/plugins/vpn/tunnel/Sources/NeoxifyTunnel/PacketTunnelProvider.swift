@@ -105,7 +105,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         case wireGuard(WireGuardEngine.Profile)
     }
 
-    override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
+    override func startTunnel(options: [String: NSObject]?, completionHandler finish: @escaping (Error?) -> Void) {
+        // First, before anything can fail or crash: turn what the last run
+        // left into tunnel-last-end.json for the app, and start this run's
+        // record. See RunDiagnostics.
+        RunDiagnostics.begin()
+        // A start that fails is recorded as such, or the next run would
+        // read it as a run that ended without a stop -- a crash.
+        let completionHandler: (Error?) -> Void = { error in
+            if error != nil { RunDiagnostics.end(reason: -1) }
+            finish(error)
+        }
         // Started again: why it last stopped is no longer news.
         LastStop.clear()
         var request: Request
@@ -271,6 +281,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         // For the app, which cannot otherwise tell another app's VPN taking
         // the device from a crash; see `LastStop`.
         LastStop.record(reason)
+        // The same reason in this run's record: a run with none, read at
+        // the next start, is one that ended without stopTunnel.
+        RunDiagnostics.end(reason: reason.rawValue)
         // Said while the app may well be in the background: the system, or
         // another VPN, ended a tunnel the customer did not end in Neoxify.
         // Waited for below, briefly, so the request reaches the system
@@ -456,6 +469,36 @@ enum TunnelNotice {
             }
             done()
         }
+    }
+}
+
+/// Why the extension ended, for the app: the engine package's BeginRun and
+/// EndRun (plugins/vpn/xray/diagnostics.go), kept in the app group's
+/// `diagnostics` folder. A crash or a memory kill by iOS skips stopTunnel,
+/// so before this nothing at all recorded it. What the app reads is
+/// `diagnostics/tunnel-last-end.json`, written at the next start; the
+/// other files there (the Go runtime's fatal output, a heartbeat every
+/// five seconds, this run's record) are the extension's. Every address,
+/// host name and identifier is removed from fatal output before it
+/// reaches that file.
+enum RunDiagnostics {
+    static var directory: String? {
+        FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: LastStop.suite)?
+            .appendingPathComponent("diagnostics", isDirectory: true)
+            .path
+    }
+
+    static func begin() {
+        guard let directory else { return }
+        _ = NeoxifyxrayBeginRun(directory)
+    }
+
+    /// `reason` is NEProviderStopReason's raw value, or -1 for a start
+    /// that failed.
+    static func end(reason: Int) {
+        guard let directory else { return }
+        NeoxifyxrayEndRun(directory, reason)
     }
 }
 

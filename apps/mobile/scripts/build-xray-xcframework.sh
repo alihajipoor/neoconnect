@@ -73,7 +73,20 @@ cd "$src"
 target="${XRAY_APPLE_TARGET:-${XRAY_IOS_TARGET:-ios,iossimulator}}"
 
 echo "building $framework for $target..."
-gomobile bind -target="$target" -o "$framework" .
+# Through xray-core-patch.sh: the iOS engine carries the patches in
+# plugins/vpn/xray/patches (today, a cap on the TUN stack's per-connection
+# TCP buffers, which otherwise let a few stalled uploads take the
+# extension past iOS's ~50 MB limit). The script fails the build, naming
+# the patch, if one no longer applies to the pinned xray-core.
+"$here/scripts/xray-core-patch.sh" gomobile bind -target="$target" -o "$framework" .
+
+# The patched module is recorded in the binary's build info, and the
+# extension reports it in its heartbeat (corePatched). Checked here too,
+# so a build that somehow linked upstream's stack cannot pass unnoticed.
+if ! grep -rqa "xray-core-patched" "$framework"; then
+  echo "error: $framework does not record the patched xray-core" >&2
+  exit 1
+fi
 
 echo "built:"
 du -sh "$framework" | sed 's/^/  /'

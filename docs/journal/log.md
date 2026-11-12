@@ -9275,3 +9275,73 @@ six indexes, each valid, no `_ccnew`/`_ccold` left. usage_records 1538 -> 864 MB
 23:52:56Z (backend recreated, 8/8 nodes ONLINE, ir2 back, API 200); next run
 2026-11-12 01:15Z, dry run now finds 0 to do. Unverified: the first scheduled
 run itself, and `shm_size: 256m`, which applies only when Postgres is next recreated.
+
+## 2026-11-12 — phone engine: xray-core v26.6.27, a TCP buffer cap on iPhone, and a record of how the tunnel ended (branch `claude/phone-engine-fix`, not merged)
+
+**Why.** iPhone Stealth and Shadowsocks sessions end on their own (the
+owner's phone: three drops in ~150 s of a speed test). Two engine faults
+fit, and nothing on the phone said which: the TUN panic the desktop shed in
+0.9.49 (`panic: Net: Unknown address type`, `proxy/tun/handler.go:113`,
+fixed upstream in #6365), and memory -- each stalled upload could hold ~8
+MiB in the engine's gVisor stack, inside an extension iOS kills at ~50 MB.
+
+**What changed (engine and tunnel only; the app side is a separate step).**
+- `plugins/vpn/xray/go.mod`: xray-core v1.260327.0 (26.3.27) ->
+  `45cf2898ab12` (v26.6.27, the desktop's pin; as a pseudo-version, since
+  upstream's v26 tags are not Go module versions). Shadowsocks' `uot` is
+  gone in that core (#6286), so `xray-config.ts` sends the desktop's mux
+  (XUDP, `concurrency: -1`). `golang.org/x/mobile` is now a `tool`
+  requirement, so `go mod tidy` no longer drops it and breaks gomobile.
+- iOS only: `patches/ios-tcp-buffers.patch` caps the TUN stack's
+  per-connection TCP buffers at 512 KiB (default 256 KiB) each way, from
+  8 MiB receive / 6 MiB send. Applied by `scripts/xray-core-patch.sh`
+  (copy of the pinned module + a temporary `replace`), which
+  `build-xray-xcframework.sh` now runs gomobile through; a patch that no
+  longer applies fails the build by name. Android is untouched.
+- Android: `build-xray-aar.sh` links with `-checklinkname=0`. The new core
+  pulls in `wlynxg/anet` (via pion/stun, finalmask), whose go:linkname to
+  `net.zoneCache` the linker otherwise refuses -- on Go 1.26.5 and 1.27.
+- Diagnostics (`diagnostics.go`, `RunDiagnostics` in the tunnel): the app
+  group's `diagnostics/` folder gets the Go runtime's fatal output
+  (`debug.SetCrashOutput`), a heartbeat every 5 s (footprint and kernel
+  peak, iOS's available memory, heap, goroutines, core version, whether the
+  build is patched), and the run's stop reason. At the next start
+  `tunnel-last-end.json` says how the last run ended -- `stopped` with a
+  reason, or `withoutStop` (crash or memory kill) -- with the last
+  heartbeat and the fatal output's tail, addresses, hosts and identifiers
+  removed.
+
+**Proven on the Mac** (`engine_e2e_darwin_test.go`: the app's configs from
+`testdata/app-configs.json`, written by the real builder; this package's
+`Start` in a child process on a socketpair carrying utun frames; a 26.3.27
+server built from source with throwaway keys and the node template's
+inbound shapes):
+- All five transports (REALITY, VLESS TLS TCP, VLESS TLS WebSocket through
+  the node's fallback path, Trojan, Shadowsocks 2022) carried a 1 MiB TCP
+  echo, 32 MiB each way and 20/20 UDP datagrams. Shadowsocks' UDP rode
+  XUDP into the 26.3.27 server.
+- Reset storm (handshake then RST, 32 workers): the old pin panicked at
+  handler.go:113 after 37 resets; the new core took 80,965 in 20 s (~4,000
+  a second) and still carried traffic.
+- Memory, engine footprint peak, stock v26.6.27 -> capped (Shadowsocks /
+  REALITY): 4 stalled uploads 45.4/37.4 -> 16.4/15.9 MiB; 8 stalled
+  uploads 78.9/64.5 -> 23.6/22.2; 8 slow-read downloads 57.1/57.0 ->
+  17.9/16.8; 50 short connections a second 27.9/16.6 capped; idle ~9.
+  Speed on loopback, three runs each: download ~2630 -> ~2590 Mbit/s,
+  upload ~1600-1800 -> ~2160-2360.
+- The xcframework builds through the script (patch applied; the binary
+  records the patched module); the tunnel's Swift typechecks against it.
+  The Android AAR (arm64) links on Windows with Go 1.26.5.
+
+**Found, not fixed.** An unpaced flood of short connections (~360 a second,
+16 workers, thousands failing) still drives the engine to 400 MiB on
+Shadowsocks and 110 MiB on REALITY, capped or not: not buffers, and far
+past the 10-30 a second seen from customers. Xray's Trojan client fails a
+connection whose first 100 ms of data exceeds one 8 KiB buffer ("buffer is
+full"), identical in 26.3.27; a real app's first write is small.
+
+**Unverified.** Nothing here has run on a phone. Whether real drops were
+the panic, a memory kill or both is still open -- the next drop on the new
+build will say, through `tunnel-last-end.json`. Android's gradle build and
+a device run; the XUDP path through a real censored network; a 26.6.27
+client against the live nodes.

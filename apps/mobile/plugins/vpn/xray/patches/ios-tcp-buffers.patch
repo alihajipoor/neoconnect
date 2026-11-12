@@ -1,0 +1,39 @@
+neoxify-patch header: ios-tcp-buffers
+
+Caps the TUN inbound's per-connection TCP buffers in the iOS engine.
+Written against xray-core v26.6.27 (45cf2898ab12), proxy/tun/stack_gvisor.go.
+Applied by apps/mobile/scripts/xray-core-patch.sh, for the iOS build only.
+Measured with TestEngineMemory (plugins/vpn/xray); see the journal,
+2026-11-12. If it stops applying after a version bump, re-make it by
+hand against the new stack_gvisor.go: the four sizes are the whole change.
+
+--- a/proxy/tun/stack_gvisor.go
++++ b/proxy/tun/stack_gvisor.go
+@@ -23,13 +23,20 @@
+ const (
+ 	defaultNIC tcpip.NICID = 1
+ 
+-	tcpRXBufMinSize = tcp.MinBufferSize
+-	tcpRXBufDefSize = tcp.DefaultSendBufferSize
+-	tcpRXBufMaxSize = 8 << 20 // 8MiB
+-
+-	tcpTXBufMinSize = tcp.MinBufferSize
+-	tcpTXBufDefSize = tcp.DefaultReceiveBufferSize
+-	tcpTXBufMaxSize = 6 << 20 // 6MiB
++	// neoxify-patch: ios-tcp-buffers. Every connection the phone opens
++	// is held in this stack, and a stalled one holds as much as these
++	// allow -- upstream, 8 MiB received and 6 MiB to send, per connection
++	// -- inside an iOS packet tunnel that is killed at about 50 MB. The
++	// phone's apps and this stack are one hop apart in memory, so a window
++	// this size does not limit a connection's speed; the real path's
++	// window belongs to the engine's own socket to the server.
++	tcpRXBufMinSize = tcp.MinBufferSize
++	tcpRXBufDefSize = 256 << 10
++	tcpRXBufMaxSize = 512 << 10
++
++	tcpTXBufMinSize = tcp.MinBufferSize
++	tcpTXBufDefSize = 256 << 10
++	tcpTXBufMaxSize = 512 << 10
+ )
+ 
+ // stackGVisor is ip stack implemented by gVisor package
