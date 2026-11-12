@@ -12,9 +12,12 @@ import { RelayAuthService } from "../relay-auth/relay-auth.service";
 import { BlockWatchService } from "../block-watch/block-watch.service";
 import { NodeDoorsService } from "../node-doors/node-doors.service";
 import { DataRetentionService } from "../data-retention/data-retention.service";
-import { SWEEPS_QUEUE, STALE_PENDING_AFTER_MS } from "./jobs.constants";
+import { SWEEPS_FINISHED, SWEEPS_QUEUE, STALE_PENDING_AFTER_MS } from "./jobs.constants";
 
-@Processor(SWEEPS_QUEUE)
+// The removal of finished jobs is given to the worker as well as to the
+// jobs: it is the only one of the three that reaches a repeat chain
+// started before the setting existed (FinishedJobs in jobs.constants).
+@Processor(SWEEPS_QUEUE, SWEEPS_FINISHED)
 export class SweepsProcessor extends WorkerHost {
   private readonly logger = new Logger(SweepsProcessor.name);
 
