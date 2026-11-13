@@ -771,7 +771,7 @@ export interface NodeReachability {
 export type BlockWatchMode = "off" | "record" | "digest" | "notify";
 export type BlockVerdict = "SUSPECT" | "LIKELY_BLOCKED";
 export type BlockIncidentStatus = "OPEN" | "CLEARED" | "REPLACED" | "RETIRED";
-export type BlockFamily = "client" | "traffic" | "probe";
+export type BlockFamily = "client" | "traffic" | "probe" | "inside";
 export type BlockType = "address" | "protocol" | "tunnel";
 
 export interface BlockNetworkFinding {
