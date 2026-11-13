@@ -58,6 +58,38 @@ const DEVICE_CREDENTIAL_LIMIT_CEILING = 50;
 /** Each rejected value is reported once, not on every fetch. */
 const warnedLimitValues = new Set<string>();
 
+/** WG_EXPIRED_RELEASE: whether the hourly sweep gives the WireGuard
+ * addresses of long-expired subscriptions back (releaseExpiredWireGuard).
+ * "off" (blank, the default, and anything unreadable) does nothing;
+ * "dry" logs how many it would release per server and deletes nothing;
+ * "on" releases them. Read at call time, like the limit above. */
+export type WgExpiredReleaseMode = "off" | "dry" | "on";
+export function wgExpiredReleaseMode(): WgExpiredReleaseMode {
+  const raw = (process.env.WG_EXPIRED_RELEASE ?? "").trim().toLowerCase();
+  if (raw === "dry" || raw === "on") return raw;
+  if (raw !== "" && raw !== "off" && !warnedLimitValues.has(`release:${raw}`)) {
+    warnedLimitValues.add(`release:${raw}`);
+    new Logger("ProtocolUsersService").warn(`WG_EXPIRED_RELEASE=${JSON.stringify(raw)} is not off, dry or on; off`);
+  }
+  return "off";
+}
+
+/** WG_EXPIRED_RELEASE_DAYS: how long past expiry a subscription's
+ * WireGuard addresses are kept for a renewal to switch back on. Blank = 7,
+ * a whole number from 1 to 365 otherwise. Seven: on 2026-11-13 it caught
+ * no customer who had used the service in the last week (at 0 days, two
+ * who had expired that week), and freed 40 of the fullest pool's 190. */
+export function wgExpiredReleaseDays(): number {
+  const raw = (process.env.WG_EXPIRED_RELEASE_DAYS ?? "").trim();
+  const parsed = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 365 ? parsed : DEFAULT_WG_EXPIRED_RELEASE_DAYS;
+}
+const DEFAULT_WG_EXPIRED_RELEASE_DAYS = 7;
+/** Rows released per run, so one run never holds the database or a node's
+ * command queue for long. The whole fleet held 122 such rows on
+ * 2026-11-13; the hourly runs clear any backlog within hours. */
+export const WG_RELEASE_PER_RUN = 200;
+
 /** How many devices of one customer may receive their first credential
  * set within DEVICE_SET_WINDOW_MS. See allowNewDeviceSet. Ten an hour is
  * far above anyone signing in on their own devices -- reinstalls
@@ -763,6 +795,92 @@ export class ProtocolUsersService {
       );
     }
     return { sessions, revoked, failed };
+  }
+
+  /** Gives the WireGuard addresses of long-expired subscriptions back to
+   * their pools (WG_EXPIRED_RELEASE; docs/device-slots.md, "WireGuard
+   * addresses of expired subscriptions").
+   *
+   * An EXPIRED subscription's credentials are only switched off, so that
+   * a renewal can switch the same ones back on -- which holds a WireGuard
+   * address for ever: every lapsed trial keeps one on every WireGuard
+   * server its plan served, and a /24 has 253. This deletes the WireGuard
+   * rows, shared and device, of subscriptions EXPIRED more than
+   * WG_EXPIRED_RELEASE_DAYS ago with auto-renew off. Nothing else: not
+   * SUSPENDED (a data cap, possibly paying), not ACTIVE, no other
+   * protocol's rows. A renewal later provisions a fresh WireGuard
+   * credential (renewSubscription runs provisionAll; proven in
+   * expired-wireguard-release specs).
+   *
+   * Each row goes in one statement that re-checks the subscription, so a
+   * renewal landing at the same moment either sees the row (and the
+   * delete then matches nothing, the subscription being ACTIVE) or does
+   * not (and provisions a fresh one). The node is then told DELETE_USER,
+   * as any other deletion; the peer is normally gone already, since the
+   * row was switched off at expiry. At most WG_RELEASE_PER_RUN rows a
+   * run; running it again does nothing more. Never throws. */
+  async releaseExpiredWireGuard(now = new Date()) {
+    const mode = wgExpiredReleaseMode();
+    if (mode === "off") return { mode, matched: 0, released: 0, failed: 0 };
+    const cutoff = new Date(now.getTime() - wgExpiredReleaseDays() * 86_400_000);
+    const lapsed = {
+      status: SubscriptionStatus.EXPIRED,
+      expireAt: { lt: cutoff },
+      autoRenew: false,
+    } satisfies Prisma.SubscriptionWhereInput;
+    let released = 0;
+    let failed = 0;
+    try {
+      const rows = await this.prisma.protocolUser.findMany({
+        where: { protocol: Protocol.WIREGUARD, subscription: lapsed },
+        select: {
+          id: true,
+          nodeId: true,
+          protocol: true,
+          externalUserId: true,
+          credentialsJson: true,
+          node: { select: { name: true } },
+          protocolConfig: { select: { transport: true, inboundTag: true } },
+        },
+        orderBy: { id: "asc" },
+        take: WG_RELEASE_PER_RUN,
+      });
+      const perNode = new Map<string, number>();
+      for (const row of rows) perNode.set(row.node.name, (perNode.get(row.node.name) ?? 0) + 1);
+      const tally = [...perNode].sort(([a], [b]) => a.localeCompare(b)).map(([n, c]) => `${n} ${c}`).join(", ");
+      if (mode === "dry") {
+        if (rows.length > 0) {
+          this.logger.log(
+            `[dry] WireGuard release: would free ${rows.length} address(es) of subscriptions expired before ` +
+              `${cutoff.toISOString()} (${tally}); WG_EXPIRED_RELEASE=dry, nothing deleted`,
+          );
+        }
+        return { mode, matched: rows.length, released: 0, failed: 0 };
+      }
+      for (const row of rows) {
+        try {
+          const { count } = await this.prisma.protocolUser.deleteMany({
+            where: { id: row.id, protocol: Protocol.WIREGUARD, subscription: lapsed },
+          });
+          if (count === 0) continue;
+          released += 1;
+          await this.agentGateway.enqueueCommand(row.nodeId, "DELETE_USER", deleteUserPayload(row, row.protocolConfig));
+        } catch (err) {
+          failed += 1;
+          this.logger.error(`WireGuard release: credential ${row.id}: ${(err as Error).message}`);
+        }
+      }
+      if (rows.length > 0) {
+        this.logger.log(
+          `WireGuard release: freed ${released} address(es) of subscriptions expired before ${cutoff.toISOString()} ` +
+            `(${tally})${failed > 0 ? `, ${failed} failed` : ""}`,
+        );
+      }
+      return { mode, matched: rows.length, released, failed };
+    } catch (err) {
+      this.logger.error(`WireGuard release failed: ${(err as Error).message}`);
+      return { mode, matched: 0, released, failed: failed + 1 };
+    }
   }
 
   /** Internal callers (setEnabled, remove) need the raw encrypted row,
