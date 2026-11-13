@@ -263,14 +263,20 @@ export async function repairCommandLine(): Promise<string> {
  * a server in a country the app does not draw by hand, and until one
  * opens there is no screen on which to see whether an installed app can
  * read it. Left out when the caller did not ask.
+ *
+ * `engine` is the Windows web component's line (`engineLine` in
+ * lib/webview-engine.ts): an engine older than Chromium 105 draws the app
+ * from fallbacks, and only this says which one a customer has. Left out
+ * when the caller did not give one (the phone).
  */
-export function diagnosticsToText(d: Diagnostics, appVersion: string, flagSet?: number | null): string {
+export function diagnosticsToText(d: Diagnostics, appVersion: string, flagSet?: number | null, engine?: string): string {
   const yesNo = (value: boolean) => (value ? "yes" : "no");
   const list = (values: string[]) => (values.length ? values.join(", ") : "none");
 
   const lines = [
     "Neoxify diagnostics",
     `app: ${appVersion}`,
+    ...(engine === undefined ? [] : [engine]),
     ...(flagSet === undefined ? [] : [`flag set: ${flagSet === null ? "could not be read" : `${flagSet} flags`}`]),
     `service: ${d.serviceVersion}`,
     `our adapters: ${list(d.ourAdapters.map((a) => `${a.name}=${yesNo(a.present)}`))}`,

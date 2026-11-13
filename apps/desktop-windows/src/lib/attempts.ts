@@ -5,6 +5,7 @@ import { publicRequest, requestFailed } from "./api";
 import { API_ENDPOINT_MAX, clipTrace, LEGACY_API_ENDPOINT_MAX } from "./endpoint-trace";
 import { getTokens } from "./session";
 import { currentAttestation, currentClientIp } from "./network-identity";
+import { takeEngineNote } from "./webview-engine";
 
 /** Telling the panel how an attempt went, so a beta can be watched from
  * somewhere other than screenshots.
@@ -521,6 +522,14 @@ export interface AttemptAddendum {
 
 const REASON_MAX = 500;
 
+/** A report's reason with a note after it, fitted to `REASON_MAX`: the
+ * reason gives way, never the note. */
+export function withNote(reason: string | undefined, note: string | null): string | undefined {
+  if (!note) return reason?.slice(0, REASON_MAX);
+  if (!reason) return note.slice(0, REASON_MAX);
+  return `${reason.slice(0, Math.max(0, REASON_MAX - note.length - 2))}; ${note}`;
+}
+
 /** `report` with `addendum` added to it, each field still fitted. */
 function amended(report: QueuedReport, addendum: AttemptAddendum): QueuedReport {
   const join = (own?: string, more?: string) => (own && more ? `${own}; ${more}` : (own ?? more));
@@ -641,8 +650,9 @@ export async function reportAttempt(
       occurredAt: new Date().toISOString(),
       // A reason of unbounded length would be rejected by the server's
       // validation, losing the whole report over its least important
-      // field.
-      reason: report.reason?.slice(0, REASON_MAX),
+      // field. The first report of an app start on an old Windows web
+      // component says so at its end (webview-engine.ts), kept whole.
+      reason: withNote(report.reason, await takeEngineNote()),
       // The same, for the one field long enough to hit its limit: the
       // hostname list 0.9.39 to 0.9.43 send would overrun the old 200.
       apiEndpoint: shaped.apiEndpoint === undefined ? undefined : clipTrace(shaped.apiEndpoint, API_ENDPOINT_MAX),

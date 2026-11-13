@@ -36,7 +36,9 @@ describe("the first-launch window is created at its size and place, and shown on
   it("is made with its size, minimum and place in it, never moved after, then painted and shown", () => {
     const create = fit.slice(fit.indexOf("pub fn create_main_window"), fit.indexOf("fn main_opening"));
     expect(create).toMatch(
-      /let config = placed\(&config, main_opening\(app\)\);\s*let window = tauri::WebviewWindowBuilder::from_config\(app\.handle\(\), &config\)\?\.build\(\)\?;\s*paint_base\(&window\);\s*let _ = window\.show\(\);/,
+      // (`with_page` swaps the app for the plain page an engine too old
+      // to draw it gets: webview_floor.rs.)
+      /let config = with_page\(placed\(&config, main_opening\(app\)\), page\);\s*let window = tauri::WebviewWindowBuilder::from_config\(app\.handle\(\), &config\)\?\.build\(\)\?;\s*paint_base\(&window\);\s*let _ = window\.show\(\);/,
     );
     const placing = fit.slice(fit.indexOf("fn placed("), fit.indexOf("pub fn create_main_window"));
     for (const field of ["config.width = ", "config.height = ", "config.min_width = ", "config.min_height = ", "config.x = ", "config.y = ", "config.center = false;", "config.visible = false;"]) {
@@ -48,7 +50,8 @@ describe("the first-launch window is created at its size and place, and shown on
 
   it("is made first in setup, so nothing before it can leave the window unmade or unshown", () => {
     const setup = lib.slice(lib.indexOf(".setup(|app| {"));
-    const firstCall = setup.indexOf("window_fit::create_main_window(app)?;");
+    // The web component's version is read just before it, to choose the page.
+    const firstCall = setup.indexOf("window_fit::create_main_window(app, page)?;");
     expect(firstCall).toBeGreaterThan(0);
     expect(firstCall).toBeLessThan(setup.indexOf("app.deep_link().register"));
     expect(firstCall).toBeLessThan(setup.indexOf("tauri::async_runtime::spawn"));

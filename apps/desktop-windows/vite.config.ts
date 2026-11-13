@@ -1,5 +1,8 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+// Layouts for a Windows web component without container queries
+// (Chromium 99-104): see scripts/old-engine-css.mjs.
+import { oldEngineCss } from "./scripts/old-engine-css.mjs";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -35,7 +38,11 @@ function previewMockPlugin(): Plugin {
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react(), ...(previewMocks ? [previewMockPlugin()] : [])],
+  plugins: [
+    react(),
+    ...(previewMocks ? [previewMockPlugin()] : []),
+    oldEngineCss(),
+  ],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

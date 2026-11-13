@@ -6,6 +6,7 @@ mod health_ip;
 mod notify;
 mod relay_http;
 mod vpn;
+mod webview_floor;
 mod window_fit;
 
 use tauri::{Emitter, Manager};
@@ -112,7 +113,15 @@ pub fn run() {
             // and place, and only then shown. At runtime rather than in
             // tauri.conf.json; see window_fit.rs. First, so nothing below can
             // leave the window unmade or unshown.
-            window_fit::create_main_window(app)?;
+            //
+            // The Windows web component's version is read first: below the
+            // oldest the stylesheet can draw, the window opens a plain page
+            // saying what to update instead of an unstyled app
+            // (webview_floor.rs). Unknown starts the app as always.
+            let engine = webview_floor::read();
+            let page = webview_floor::page_for(app, engine.as_deref());
+            app.manage(webview_floor::Engine(engine));
+            window_fit::create_main_window(app, page)?;
 
             // Static scheme registration in tauri.conf.json alone doesn't
             // actually take effect with the NSIS installer target this
@@ -209,6 +218,10 @@ pub fn run() {
             vpn::network_uplinks,
             get_launch_deep_link,
             build_platform,
+            // The Windows web component's version, read at start, for the
+            // Support diagnostics and a connection report's note
+            // (lib/webview-engine.ts).
+            webview_floor::webview_version,
             // After a control-plane request fails: which stage each
             // address failed at. See control_plane_probe.rs.
             control_plane_probe::probe_control_plane,

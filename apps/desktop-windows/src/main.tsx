@@ -6,6 +6,7 @@ import { I18nProvider } from "./lib/i18n";
 import { setHealthIpTransport } from "./lib/egress";
 import { ipv4OnlyHealthIp } from "./lib/health-ip-v4";
 import { startEffects } from "./lib/effects";
+import { startHasFallback } from "./lib/old-engine-has";
 import "./globals.css";
 
 // Before anything can take a baseline: the egress check compares two
@@ -16,6 +17,11 @@ setHealthIpTransport(ipv4OnlyHealthIp);
 // The glass and motion tiers, on <html> before the first paint
 // (lib/effects.ts).
 startEffects();
+
+// A Windows web component older than Chromium 105 has no `:has()`: the
+// few rules that decide a layout with it are kept in step by attributes
+// instead (lib/old-engine-has.ts). Nothing at all on a newer engine.
+startHasFallback();
 
 // The window draws its own title strip over the app (TitleBar): the pages
 // that are their own root -- sign-in and its steps -- keep its 32px clear.

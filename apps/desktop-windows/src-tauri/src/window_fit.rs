@@ -143,16 +143,27 @@ fn placed(config: &WindowConfig, at: Option<Opening>) -> WindowConfig {
     config
 }
 
+/// The window opening `page` instead of the app (webview_floor.rs), with
+/// Windows' own title bar: the app draws its own title strip, and that page
+/// has none, so without it the window could be neither moved nor closed.
+fn with_page(mut config: WindowConfig, page: Option<String>) -> WindowConfig {
+    if let Some(page) = page {
+        config.url = tauri::WebviewUrl::App(page.into());
+        config.decorations = true;
+    }
+    config
+}
+
 /// Creates the main window at its size and place on the monitor the
 /// customer is working on (`opening_monitor`), then shows it, painted the
 /// theme's base colour first. Created there rather than created and then
 /// moved: the first rectangle Windows draws it in is the right one. With no
 /// monitor or scale to work from, it is created as the config says.
-pub fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
+pub fn create_main_window(app: &tauri::App, page: Option<String>) -> tauri::Result<()> {
     let Some(config) = app.config().app.windows.iter().find(|w| w.label == MAIN).cloned() else {
         return Ok(());
     };
-    let config = placed(&config, main_opening(app));
+    let config = with_page(placed(&config, main_opening(app)), page);
     let window = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?.build()?;
     paint_base(&window);
     let _ = window.show();
@@ -348,6 +359,18 @@ mod tests {
         let plain = placed(&config, None);
         assert_eq!((plain.width, plain.height, plain.x, plain.center), (940.0, 700.0, None, true));
         assert!(!plain.visible);
+    }
+
+    #[test]
+    fn opens_the_plain_page_with_a_title_bar_only_when_asked() {
+        let mut config = WindowConfig::default();
+        config.decorations = false;
+        let app = with_page(config.clone(), None);
+        assert_eq!(app.url, config.url, "the app, as always");
+        assert!(!app.decorations);
+        let page = with_page(config, Some("webview-too-old.html?v=98.0".into()));
+        assert_eq!(page.url, tauri::WebviewUrl::App("webview-too-old.html?v=98.0".into()));
+        assert!(page.decorations, "Windows' title bar, to move and close it");
     }
 
     /// The monitor under the pointer, when there is one; the primary only

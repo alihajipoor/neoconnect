@@ -89,7 +89,8 @@ describe("the platform a report carries", () => {
     invoke.mockResolvedValue("android");
     await attempts.reportAttempt({ kind: "SIGN_IN", outcome: "SUCCESS" });
     await attempts.reportAttempt({ kind: "CONNECT", outcome: "SUCCESS" });
-    expect(invoke).toHaveBeenCalledTimes(1);
+    // (The web component's version is asked once too: webview-engine.ts.)
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "build_platform")).toHaveLength(1);
     expect(sentBodies().map((b) => b.platform)).toEqual(["android", "android"]);
   });
 });
@@ -715,5 +716,44 @@ describe("a report only a page answered", () => {
     publicRequest.mockResolvedValue({ ok: false, error: "Internal server error", status: 500 });
     await attempts.reportAttempt(unreachable);
     expect(queued()).toHaveLength(0);
+  });
+});
+
+describe("the note an old Windows web component adds", () => {
+  const engine = (version: string | null) =>
+    invoke.mockImplementation(async (cmd: string) => (cmd === "webview_version" ? version : cmd === "build_platform" ? "windows" : undefined));
+
+  /** Once per app start, on the first report, at the end of its reason. */
+  it("goes on the first report only", async () => {
+    engine("100.0.1185.36");
+    await attempts.reportAttempt({ kind: "SIGN_IN", outcome: "REJECTED", reason: "first" });
+    await attempts.reportAttempt({ kind: "SIGN_IN", outcome: "SUCCESS" });
+    await attempts.reportAttempt({ kind: "CONNECT", outcome: "OTHER", reason: "third" });
+    expect(sentBodies().map((b) => b.reason)).toEqual(["first; webview 100.0.1185.36", undefined, "third"]);
+  });
+
+  it("is the whole reason of a report that had none", async () => {
+    engine("104.0.1293.70");
+    await attempts.reportAttempt({ kind: "CONNECT", outcome: "SUCCESS" });
+    expect(sentBodies()[0].reason).toBe("webview 104.0.1293.70");
+  });
+
+  it("is not there from 111 on, or when the version is unknown", async () => {
+    for (const version of ["111.0.1661.41", "157.0.1", "garbage", "", null]) {
+      vi.resetModules();
+      attempts = await import("./attempts");
+      publicRequest.mockClear();
+      engine(version);
+      await attempts.reportAttempt({ kind: "SIGN_IN", outcome: "REJECTED", reason: "r" });
+      expect(sentBodies()[0].reason, String(version)).toBe("r");
+    }
+  });
+
+  it("is kept whole when the reason is at its limit", async () => {
+    engine("100.0.1185.36");
+    await attempts.reportAttempt({ kind: "CONNECT", outcome: "OTHER", reason: "x".repeat(600) });
+    const reason = String(sentBodies()[0].reason);
+    expect(reason.length).toBe(500);
+    expect(reason.endsWith("; webview 100.0.1185.36")).toBe(true);
   });
 });
