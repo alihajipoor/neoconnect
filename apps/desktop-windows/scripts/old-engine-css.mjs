@@ -86,13 +86,13 @@ export const INNER = {
   },
   // The locations panel (`.nx-panel`). Wide: `--panel` is
   // clamp(268px, 24vw, 340px), and its only rule asks for less than 300px,
-  // which is 24vw below 1250px exactly. Medium: 700 -> 300, 800 -> 346,
-  // 899 -> 391.
+  // which is 24vw below 1250px exactly. Medium: 690 -> 295.31,
+  // 700 -> 299.91, 701 -> 300.38, 800 -> 345.91, 899 -> 391.45.
   lpanel: {
     scope: null,
     models: [
       { media: "(min-width:900px)", w: { a: 0.24, b: 0 } },
-      { media: "(min-width:640px) and (max-width:899.98px)", w: { a: 0.4573, b: -20 } },
+      { media: "(min-width:640px) and (max-width:899.98px)", w: { a: 0.46, b: -22.09 } },
     ],
   },
   // The tray's speed section, wide layout only (medium and phone show the

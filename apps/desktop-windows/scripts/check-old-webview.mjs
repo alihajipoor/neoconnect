@@ -208,7 +208,13 @@ async function open(exe) {
       ws.close();
     } catch {}
     child.kill();
-    setTimeout(() => fs.rmSync(profile, { recursive: true, force: true }), 1500);
+    // Once the engine has let go of its profile; a file it still holds is
+    // left in the temp folder rather than failing the run.
+    child.once("exit", () => {
+      try {
+        fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+      } catch {}
+    });
   };
   return { send, ev, version, close, logs };
 }

@@ -171,7 +171,7 @@ describe("transformCss", () => {
     const { css, problems } = transformCss("@container lpanel (max-width:299.98px){.r{display:none}}", {});
     expect(problems).toEqual([]);
     expect(css).toContain("@media (min-width:900px) and (max-width:1249.917px){.r{display:none}}");
-    expect(css).toContain("@media (min-width:640px) and (max-width:899.98px) and (max-width:699.716px){.r{display:none}}");
+    expect(css).toContain("@media (min-width:640px) and (max-width:899.98px) and (max-width:700.152px){.r{display:none}}");
   });
 
   it("reports what it cannot mirror", () => {
