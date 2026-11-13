@@ -112,6 +112,9 @@ export class SweepsProcessor extends WorkerHost {
         // nodes (docs/per-device-credentials.md). Logs its own summary
         // when it did anything.
         await this.protocolUsersService.sweepDeadSessionCredentials();
+        // And the WireGuard addresses of long-expired subscriptions, while
+        // WG_EXPIRED_RELEASE says so (off by default). Never throws.
+        await this.protocolUsersService.releaseExpiredWireGuard();
         break;
       }
       case "relay-unverified": {

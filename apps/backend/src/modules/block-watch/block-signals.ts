@@ -12,7 +12,10 @@ import { durationSeconds } from "../../common/duration";
  * * traffic -- how many people sent data through the server lately,
  *   against the same time of day on earlier days;
  * * probe -- the third-party TCP probes from inside the country that the
- *   reachability monitor already runs.
+ *   reachability monitor already runs;
+ * * inside -- our own boxes inside the country (modules/inside-probe):
+ *   whether each still opens a TCP connection to the server, judged only
+ *   in rounds where the same box reached other servers.
  *
  * One family on its own is a suspicion. A page needs two that agree, or
  * one that is broad and has lasted. A server that is down is an outage,
@@ -22,8 +25,32 @@ import { durationSeconds } from "../../common/duration";
  * The thresholds are settings (BLOCK_WATCH_TUNING), so the values in use
  * are not the ones written here. */
 
-export type Family = "client" | "traffic" | "probe";
-export const FAMILIES: readonly Family[] = ["client", "traffic", "probe"];
+export type Family = "client" | "traffic" | "probe" | "inside";
+export const FAMILIES: readonly Family[] = ["client", "traffic", "probe", "inside"];
+
+/** Each family in plain words, for a reason a person reads. */
+export const FAMILY_LABELS: Record<Family, string> = {
+  client: "the apps' connect reports",
+  traffic: "the server's own traffic",
+  probe: "the outside TCP check from inside the country",
+  inside: "our own boxes inside the country",
+};
+
+/** Rounds in a row (the inside probe runs every 30 minutes) in which a box
+ * that normally connects to a server gets no TCP connection to it, while
+ * it still reaches other servers, before that box's evidence counts. Four
+ * rounds span 1.5 hours from the first lost one, so with the block watch's
+ * own 30-minute cadence an address-level block is told in 1.5 to 2 hours
+ * of the first lost round -- against the 22 hours a blocked server waited on
+ * 2026-11-12. Fewer would page on a routing blip of an hour; the boxes'
+ * connects to healthy servers fail far less often than that. */
+export const INSIDE_LOST_ROUNDS = 4;
+/** A box "normally reaches" a server when it connected in at least this
+ * share of at least this many earlier rounds in which it was alive. A
+ * server a box has never reached (one of its networks never could) says
+ * nothing about a new block from that box. */
+export const INSIDE_BASELINE_ROUNDS = 6;
+export const INSIDE_BASELINE_SHARE = 0.5;
 
 export type Verdict = "SUSPECT" | "LIKELY_BLOCKED";
 
@@ -69,6 +96,8 @@ export interface BlockTuning {
   networksForLikely: number;
   clientSustain: number;
   probeAlone: number;
+  /** Inside-probe rounds in a row without a connection (INSIDE_LOST_ROUNDS). */
+  insideRounds: number;
   /** Evaluations in a row showing the server working before it clears. */
   quietCyclesToClear: number;
 }
@@ -94,6 +123,7 @@ export const DEFAULT_TUNING: Readonly<BlockTuning> = Object.freeze({
   networksForLikely: 2,
   clientSustain: 1 * HOUR,
   probeAlone: 6 * HOUR,
+  insideRounds: INSIDE_LOST_ROUNDS,
   quietCyclesToClear: 2,
 });
 
@@ -118,6 +148,7 @@ const TUNING_KINDS: Record<keyof BlockTuning, TuningKind> = {
   networksForLikely: "count",
   clientSustain: "duration",
   probeAlone: "duration",
+  insideRounds: "count",
   quietCyclesToClear: "count",
 };
 
@@ -194,6 +225,10 @@ export interface FamilyResult {
   firing: boolean;
   /** Too little data to say anything either way. */
   thin: boolean;
+  /** Not read this evaluation (the data it needs was not available, e.g.
+   * the network table had not loaded). Neither thin nor evidence: it
+   * keeps the "too little data" rules from firing on its absence. */
+  unknown?: boolean;
   /** Positive evidence the server works for what this family measures:
    * the probes connect, traffic is back near usual, or networks that had
    * failed carry again. What an open incident needs before it clears. */
@@ -462,6 +497,184 @@ function parseAsn(value: unknown): number {
   return match ? Number(match[1]) : 0;
 }
 
+/** The client family when its data could not be read this evaluation:
+ * the network table that says which networks are in the country had not
+ * loaded. Unknown -- never "too few customers", which would let the
+ * probe-alone rule page on a backend restart (2026-11-13). */
+export function unknownClientFamily(why: string): FamilyResult {
+  return {
+    family: "client",
+    firing: false,
+    thin: false,
+    unknown: true,
+    healthy: false,
+    onset: null,
+    summary: `App reports: not read this time -- ${why}`,
+    networks: [],
+  };
+}
+
+/** One server's result in one inside-probe round from one box. */
+export interface InsideCheck {
+  nodeId: string;
+  /** The box ("ir2", "signin"): each is its own series. */
+  vantage: string;
+  /** Whether a TCP connection opened (the probe's connectMs). Losing it is
+   * the evidence of a block. */
+  connected: boolean;
+  /** Whether any data then moved (down or up bytes above zero). Not
+   * evidence of a block on its own -- one box connects and moves nothing
+   * to several healthy servers as its normal state -- but it is what makes
+   * a box's connection count AGAINST a block: a bare connect from a box
+   * that never moves data to the server is what that box saw both before
+   * and during the blocks of 2026-10-28 and 2026-11-07. */
+  moved: boolean;
+  /** The round's time; every row of one round carries the same one (ms). */
+  checkedAt: number;
+}
+
+/** A box's round counts only when it connected to at least this share of
+ * the other servers it usually connects to in a round (its median), and
+ * to at least one. A box whose own network is partly failing, reaching one
+ * server where it usually reaches eight, says nothing about the other
+ * seven: counted, it would fire for each of them at once. */
+export const INSIDE_ALIVE_SHARE = 0.5;
+
+interface BoxReading {
+  vantage: string;
+  /** Normally connects to this server. */
+  qualified: boolean;
+  /** Normally moves data to this server. */
+  mover: boolean;
+  /** Latest alive rounds in a row with no connection to it. */
+  streak: number;
+  /** Connected in its latest alive round. */
+  connectedNow: boolean;
+  /** Data moved in its latest alive round. */
+  movedNow: boolean;
+  /** The first round of the streak (ms). */
+  streakStart: number | null;
+}
+
+/** Our own boxes inside the country, read for one server.
+ *
+ * A round counts for a box only when that box connected to most of the
+ * OTHER servers it usually reaches in a round (INSIDE_ALIVE_SHARE): a box
+ * that reaches nothing, or far less than usual, is a box or network
+ * problem, not a block, and its round is skipped, never counted either
+ * way. Each box's own rounds are then read newest first: how many in a
+ * row had no connection to this server (the streak), and, before that,
+ * whether it normally connected at all and whether it normally moved data
+ * (INSIDE_BASELINE_*). A box that never reached the server gives no
+ * evidence of a block.
+ *
+ * Fires when at least one box that normally reaches the server has lost
+ * it for `insideRounds` rounds in a row and no box shows it working. A box
+ * shows it working only by connecting in its latest round AND either
+ * moving data in it or normally moving data to it: a bare connect from a
+ * box that never moves data to the server is no proof (the sign-in box
+ * kept such connects through the real blocks of 10-28 and 11-07). Healthy
+ * when a box connects again and none that normally reaches it is losing
+ * it. `checks` is every server's rows (the other servers are how a box is
+ * known to be alive), from `floor` on. */
+export function insideFamily(
+  checks: InsideCheck[],
+  nodeId: string,
+  now: number,
+  floor: number,
+  tuning: BlockTuning = DEFAULT_TUNING,
+): FamilyResult {
+  type Round = { self: boolean | null; moved: boolean; others: number };
+  const byBox = new Map<string, Map<number, Round>>();
+  for (const c of checks) {
+    if (c.checkedAt < floor || c.checkedAt > now) continue;
+    let rounds = byBox.get(c.vantage);
+    if (!rounds) byBox.set(c.vantage, (rounds = new Map<number, Round>()));
+    const round = rounds.get(c.checkedAt) ?? { self: null, moved: false, others: 0 };
+    if (c.nodeId === nodeId) {
+      round.self = c.connected;
+      round.moved = c.connected && c.moved;
+    } else if (c.connected) round.others += 1;
+    rounds.set(c.checkedAt, round);
+  }
+
+  const boxes: BoxReading[] = [];
+  for (const [vantage, rounds] of [...byBox.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const usual = median([...rounds.values()].map((r) => r.others));
+    const needed = Math.max(1, Math.ceil(INSIDE_ALIVE_SHARE * usual));
+    const alive = [...rounds.entries()]
+      .filter(([, r]) => r.others >= needed && r.self !== null)
+      .sort(([a], [b]) => b - a);
+    if (!alive.length || now - alive[0][0] > tuning.probeFresh) continue;
+    let streak = 0;
+    let streakStart: number | null = null;
+    for (const [at, r] of alive) {
+      if (r.self) break;
+      streak += 1;
+      streakStart = at;
+    }
+    const before = alive.slice(streak);
+    const enough = before.length >= INSIDE_BASELINE_ROUNDS;
+    const connects = before.filter(([, r]) => r.self).length;
+    const moves = before.filter(([, r]) => r.moved).length;
+    boxes.push({
+      vantage,
+      qualified: enough && connects >= INSIDE_BASELINE_SHARE * before.length,
+      mover: enough && moves >= INSIDE_BASELINE_SHARE * before.length,
+      streak,
+      connectedNow: alive[0][1].self === true,
+      movedNow: alive[0][1].moved,
+      streakStart,
+    });
+  }
+
+  const qualified = boxes.filter((b) => b.qualified);
+  const lost = qualified.filter((b) => b.streak >= tuning.insideRounds);
+  const working = boxes.filter((b) => b.connectedNow && (b.movedNow || b.mover));
+  const firing = lost.length > 0 && working.length === 0;
+  const healthy = !firing && boxes.some((b) => b.connectedNow) && !qualified.some((b) => b.streak > 0);
+  const names = (list: BoxReading[]) => list.map((b) => b.vantage).join(" and ");
+  let summary: string;
+  if (firing) {
+    const rounds = Math.min(...lost.map((b) => b.streak));
+    const bare = boxes.filter((b) => b.connectedNow);
+    const one = bare.length === 1;
+    summary =
+      `Our boxes inside the country: ${names(lost)} could not open a connection to this server for ${rounds} checks in a row, ` +
+      `while in the same checks ${lost.length === 1 ? "it" : "they"} still reached most of the other servers ${lost.length === 1 ? "it usually reaches" : "they usually reach"}` +
+      (bare.length
+        ? `; ${names(bare)} still connect${one ? "s" : ""} but move${one ? "s" : ""} no data to it, as usual, which is no proof it works`
+        : "");
+  } else if (!boxes.length) {
+    summary = "Our boxes inside the country: no recent check in which a box reached any server";
+  } else if (!qualified.length) {
+    summary = "Our boxes inside the country: no box that normally reaches this server has checked it lately";
+  } else if (qualified.some((b) => b.streak > 0)) {
+    const losing = qualified.filter((b) => b.streak > 0);
+    summary = `Our boxes inside the country: ${names(losing)} lost the connection in the latest check (${Math.max(...losing.map((b) => b.streak))} in a row so far)`;
+  } else {
+    summary = `Our boxes inside the country: ${names(qualified)} connect${qualified.length === 1 ? "s" : ""} to this server`;
+  }
+  const starts = lost.map((b) => b.streakStart).filter((t): t is number => t !== null);
+  return {
+    family: "inside",
+    firing,
+    thin: qualified.length === 0,
+    healthy,
+    onset: firing && starts.length ? Math.min(...starts) : null,
+    summary,
+    networks: [],
+    tcpOpen: qualified.length ? qualified.some((b) => b.connectedNow) : null,
+  };
+}
+
+function median(values: number[]): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
 export interface Assessment {
   verdict: Verdict | null;
   /** Why it reached LIKELY_BLOCKED, in words. */
@@ -475,9 +688,11 @@ export interface Assessment {
   outage: string | null;
 }
 
-/** Turns the three families into a verdict.
+/** Turns the families into a verdict.
  *
- * LIKELY_BLOCKED when two families fire at once; or when the app reports
+ * LIKELY_BLOCKED when two families fire at once (our own boxes losing the
+ * server together with the outside TCP check is the address-level block
+ * told within hours); or when the app reports
  * fail on several networks and have for a while, and the server's own
  * traffic does not show it working as usual; or when the probe alone has
  * fired for a long time and there is too little residential data to
@@ -486,6 +701,8 @@ export function assess(input: {
   client: FamilyResult;
   traffic: FamilyResult;
   probe: FamilyResult;
+  /** Our own boxes inside the country; absent where nothing reads them. */
+  inside?: FamilyResult;
   outage: string | null;
   previousSince: Partial<Record<Family, number>>;
   now: number;
@@ -498,11 +715,18 @@ export function assess(input: {
     return { verdict: null, reason: null, since: {}, thinResidential, blockType: null, outage: input.outage };
   }
 
-  const firing = [client, traffic, probe].filter((f) => f.firing);
+  const firing = [client, traffic, probe, ...(input.inside ? [input.inside] : [])].filter((f) => f.firing);
   const since: Partial<Record<Family, number>> = {};
   for (const f of firing) {
     const previous = input.previousSince[f.family];
     since[f.family] = typeof previous === "number" ? previous : Math.min(f.onset ?? now, now);
+  }
+  // A family that could not be read this time (the network table still
+  // loading after a restart) is not a family that stopped: it keeps its
+  // "since", so a restart does not start its sustain timer again.
+  for (const f of [client, traffic, probe, ...(input.inside ? [input.inside] : [])]) {
+    const previous = input.previousSince[f.family];
+    if (f.unknown && typeof previous === "number") since[f.family] = previous;
   }
   if (firing.length === 0) {
     return { verdict: null, reason: null, since, thinResidential, blockType: null, outage: null };
@@ -511,7 +735,7 @@ export function assess(input: {
   const failingNetworks = client.networks.filter((n) => n.failing).length;
   let reason: string | null = null;
   if (firing.length >= 2) {
-    reason = `${firing.length} independent signals agree (${firing.map((f) => f.family).join(", ")})`;
+    reason = `${firing.length} independent signals agree: ${firing.map((f) => FAMILY_LABELS[f.family]).join(", ")}`;
   } else if (
     client.firing &&
     failingNetworks >= tuning.networksForLikely &&
@@ -530,7 +754,7 @@ export function assess(input: {
     reason,
     since,
     thinResidential,
-    blockType: blockTypeOf(client, traffic, probe),
+    blockType: blockTypeOf(client, traffic, probe, input.inside),
     outage: null,
   };
 }
@@ -542,8 +766,13 @@ export function recoveredFamilies(fired: readonly Family[], results: readonly Fa
   return results.filter((r) => fired.includes(r.family) && r.healthy).map((r) => r.family);
 }
 
-function blockTypeOf(client: FamilyResult, traffic: FamilyResult, probe: FamilyResult): BlockType | null {
-  if (probe.firing) return "address";
+function blockTypeOf(
+  client: FamilyResult,
+  traffic: FamilyResult,
+  probe: FamilyResult,
+  inside?: FamilyResult,
+): BlockType | null {
+  if (probe.firing || inside?.firing) return "address";
   if (client.firing && client.carriedProtocols?.length && client.failedProtocols?.length) return "protocol";
   if ((client.firing || traffic.firing) && probe.tcpOpen === true) return "tunnel";
   return null;

@@ -130,7 +130,11 @@ function IncidentCard({ incident, canAct }: { incident: BlockIncident; canAct: b
   const [pending, startTransition] = useTransition();
   const [note, setNote] = useState("");
   const e = incident.evidenceJson;
-  const likely = incident.verdict === "LIKELY_BLOCKED";
+  // The badge is the latest reading; incident.verdict is only the
+  // strongest one ever reached, and is shown beside it when it differs.
+  const retired = incident.node.status === "DISABLED";
+  const likely = e.current === "LIKELY_BLOCKED";
+  const wasLikely = !likely && incident.verdict === "LIKELY_BLOCKED";
   const snoozed = isFuture(incident.snoozedUntil);
 
   const answer = (action: BlockAction, hours?: number) =>
@@ -140,7 +144,12 @@ function IncidentCard({ incident, canAct }: { incident: BlockIncident; canAct: b
     });
 
   return (
-    <Card className={cn("space-y-3 p-4", likely ? "border-red-500/30 bg-red-500/5" : "border-amber-500/30 bg-amber-500/5")}>
+    <Card
+      className={cn(
+        "space-y-3 p-4",
+        retired ? "border-white/10" : likely ? "border-red-500/30 bg-red-500/5" : "border-amber-500/30 bg-amber-500/5",
+      )}
+    >
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <div className="flex items-center gap-2">
@@ -150,9 +159,19 @@ function IncidentCard({ incident, canAct }: { incident: BlockIncident; canAct: b
               variant="outline"
               className={likely ? "border-red-500/30 text-red-400" : "border-amber-500/30 text-amber-400"}
             >
-              {likely ? "Likely blocked" : "Suspect"}
+              {likely ? "Likely blocked" : e.current === "SUSPECT" ? "Suspect" : "Quiet"}
             </Badge>
-            {e.current === null && !e.outage ? (
+            {retired ? (
+              <Badge variant="outline" className="border-white/20 text-muted-foreground">
+                Server retired
+              </Badge>
+            ) : null}
+            {wasLikely ? (
+              <span className="text-xs text-muted-foreground">
+                was likely blocked{incident.likelyAt ? ` ${ago(incident.likelyAt)}` : ""}
+              </span>
+            ) : null}
+            {e.current === null && !e.outage && !retired ? (
               <span className="text-xs text-muted-foreground">{e.clearing ?? "quiet now"}</span>
             ) : null}
           </div>
@@ -172,7 +191,12 @@ function IncidentCard({ incident, canAct }: { incident: BlockIncident; canAct: b
         </div>
       </div>
 
-      {e.outage ? (
+      {retired ? (
+        <p className="text-sm text-muted-foreground">
+          This server is retired, so it is no longer checked. What follows is how it read at its last check,{" "}
+          {ago(e.evaluatedAt)}. Answer it (Retire) to close it.
+        </p>
+      ) : e.outage ? (
         <p className="text-sm text-amber-300">
           <AlertTriangle className="mr-1 inline h-4 w-4" />
           Right now this is an outage, not a block: {e.outage}.

@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import { Prisma, SubscriptionStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
-import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
+import { isCredentialGone, ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { CreatePaymentDto } from "./dto/create-payment.dto";
 import { NowPaymentsProvider } from "./providers/nowpayments.provider";
 import { PlisioProvider } from "./providers/plisio.provider";
@@ -409,7 +409,13 @@ export class BillingService {
     // leave a disabled row sitting there disabled either way.
     const existingUsers = await this.prisma.protocolUser.findMany({ where: { subscriptionId } });
     for (const user of existingUsers.filter((u) => u.status === "DISABLED")) {
-      await this.protocolUsersService.setEnabled(user.id, true);
+      // A row deleted since it was read (the WireGuard release) is skipped:
+      // provisionAll below gives the subscription a fresh one, and the
+      // renewal must not stop before it, or before the invoice.
+      await this.protocolUsersService.setEnabled(user.id, true).catch((err: unknown) => {
+        if (!isCredentialGone(err)) throw err;
+        this.logger.warn(`Renewal of ${subscriptionId}: credential ${user.id} was removed meanwhile; provisioning replaces it`);
+      });
     }
 
     // Every route the plan allows, not just the plan's default one, so

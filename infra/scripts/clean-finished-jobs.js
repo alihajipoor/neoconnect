@@ -11,10 +11,13 @@
 //   docker exec -i neoxify-backend-1 node - < infra/scripts/clean-finished-jobs.js
 //   docker exec -i -e APPLY=1 neoxify-backend-1 node - < infra/scripts/clean-finished-jobs.js
 //
-// What it removes: on each queue, completed and failed jobs that finished
-// more than a day ago (GRACE_HOURS) -- their entry in the finished set
-// and the job's own keys. Nothing else: no schedule, no job that is
-// waiting, delayed or running, and nothing finished within the day. It
+// What it removes: on each queue, completed jobs that finished more than
+// a day ago (GRACE_HOURS) and failed jobs that finished more than a week
+// ago (FAILED_GRACE_HOURS, default 168) -- their entry in the finished set
+// and the job's own keys. Failures get the longer grace because the
+// backend keeps them for a week to be read; a manual run must not remove
+// what that policy keeps. Nothing else: no schedule, no job that is
+// waiting, delayed or running, and nothing finished within its grace. It
 // goes 1,000 jobs to a call, so Redis is never held for long, and it is
 // safe to stop and run again.
 //
@@ -27,29 +30,39 @@ const { Queue } = require("bullmq");
 const IORedis = require("ioredis");
 
 const QUEUES = ["sweeps", "announcements"];
-const GRACE_MS = Number(process.env.GRACE_HOURS ?? 24) * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const GRACE_MS = {
+  completed: Number(process.env.GRACE_HOURS ?? 24) * HOUR_MS,
+  failed: Number(process.env.FAILED_GRACE_HOURS ?? 168) * HOUR_MS,
+};
 const BATCH = 1000;
 const APPLY = process.env.APPLY === "1";
 
 async function main() {
   if (!process.env.REDIS_URL) throw new Error("REDIS_URL is not set: run this inside the backend container");
-  if (!(GRACE_MS >= 60 * 60 * 1000)) throw new Error("GRACE_HOURS must be at least 1");
+  if (!(GRACE_MS.completed >= HOUR_MS)) throw new Error("GRACE_HOURS must be at least 1");
+  if (!(GRACE_MS.failed >= HOUR_MS)) throw new Error("FAILED_GRACE_HOURS must be at least 1");
   const connection = new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: null });
-  const cutoff = Date.now() - GRACE_MS;
-  console.log(`${APPLY ? "REMOVING" : "Counting (nothing is removed without APPLY=1)"}: jobs finished before ${new Date(cutoff).toISOString()}`);
+  const now = Date.now();
+  console.log(
+    `${APPLY ? "REMOVING" : "Counting (nothing is removed without APPLY=1)"}: completed jobs finished before ` +
+      `${new Date(now - GRACE_MS.completed).toISOString()}, failed jobs finished before ${new Date(now - GRACE_MS.failed).toISOString()}`,
+  );
 
   for (const name of QUEUES) {
     // skipMetasUpdate: a script that only tidies should not write this
     // queue's metadata as though it were the application.
     const queue = new Queue(name, { connection, skipMetasUpdate: true });
     for (const type of ["completed", "failed"]) {
+      const grace = GRACE_MS[type];
+      const cutoff = now - grace;
       const key = queue.toKey(type);
       const total = await connection.zcard(key);
       const old = await connection.zcount(key, "-inf", cutoff);
       let removed = 0;
       if (APPLY) {
         for (;;) {
-          const ids = await queue.clean(GRACE_MS, BATCH, type);
+          const ids = await queue.clean(grace, BATCH, type);
           removed += ids.length;
           if (ids.length === 0) break;
         }

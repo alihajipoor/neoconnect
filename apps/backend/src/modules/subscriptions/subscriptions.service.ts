@@ -2,7 +2,7 @@ import { SubscriptionStatus, type Subscription } from "@prisma/client";
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
-import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
+import { isCredentialGone, ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { CreateSubscriptionDto } from "./dto/create-subscription.dto";
 
 @Injectable()
@@ -247,7 +247,11 @@ export class SubscriptionsService {
       // the node would only have to ignore.
       const alreadyRight = enabled ? user.status === "ACTIVE" : user.status === "DISABLED";
       if (alreadyRight) continue;
-      await this.protocolUsers.setEnabled(user.id, enabled);
+      // Deleted since it was read (the WireGuard release): nothing to switch.
+      await this.protocolUsers.setEnabled(user.id, enabled).catch((err: unknown) => {
+        if (!isCredentialGone(err)) throw err;
+        this.logger.warn(`Subscription ${subscriptionId}: credential ${user.id} was removed meanwhile; skipped`);
+      });
     }
   }
 

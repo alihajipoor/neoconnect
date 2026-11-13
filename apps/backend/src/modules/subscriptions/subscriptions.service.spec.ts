@@ -1,3 +1,4 @@
+import { NotFoundException } from "@nestjs/common";
 import { SubscriptionStatus } from "@prisma/client";
 import { SubscriptionsService } from "./subscriptions.service";
 import { PrismaService } from "../../prisma/prisma.service";
@@ -207,6 +208,33 @@ describe("SubscriptionsService.setStatus", () => {
     await service.setStatus("sub-1", SubscriptionStatus.SUSPENDED);
 
     expect(provisionAll).not.toHaveBeenCalled();
+  });
+
+  it("skips a credential deleted since it was read, and still provisions", async () => {
+    const { service, prisma, provisionAll } = build();
+    prisma.protocolUser.findMany.mockResolvedValue([
+      { id: "pu-wg", status: "DISABLED" },
+      { id: "pu-x", status: "DISABLED" },
+    ]);
+    const setEnabled = jest.fn((id: string) =>
+      id === "pu-wg" ? Promise.reject(new NotFoundException("Protocol user not found")) : Promise.resolve({}),
+    );
+    (service as unknown as { protocolUsers: { setEnabled: unknown } }).protocolUsers.setEnabled = setEnabled;
+    jest.spyOn(service["logger"], "warn").mockImplementation(() => undefined);
+
+    await expect(service.setStatus("sub-1", SubscriptionStatus.ACTIVE)).resolves.toBeDefined();
+    expect(setEnabled).toHaveBeenCalledWith("pu-x", true);
+    expect(provisionAll).toHaveBeenCalledWith("sub-1");
+  });
+
+  it("does not swallow any other failure to switch a credential", async () => {
+    const { service, prisma } = build();
+    prisma.protocolUser.findMany.mockResolvedValue([{ id: "pu-x", status: "DISABLED" }]);
+    (service as unknown as { protocolUsers: { setEnabled: unknown } }).protocolUsers.setEnabled = jest
+      .fn()
+      .mockRejectedValue(new Error("database is down"));
+
+    await expect(service.setStatus("sub-1", SubscriptionStatus.ACTIVE)).rejects.toThrow("database is down");
   });
 
   it("still reactivates when provisioning throws", async () => {

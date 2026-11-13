@@ -58,6 +58,23 @@ function evidenceLines(e: StoredEvidence): string {
   return text;
 }
 
+/** Said in so many words when our own boxes inside the country raised
+ * it: that is the check the owner can repeat himself. Never an address. */
+function insideNote(e: StoredEvidence): string {
+  return e.families.some((f) => f.family === "inside" && f.firing)
+    ? "Raised by our own boxes inside the country: they could not open a connection to this server, while in the same checks they still reached the other servers."
+    : "";
+}
+
+/** What the latest evaluation reads, for a message about an incident
+ * whose strongest verdict may be older than it. */
+function readingNow(e: StoredEvidence): string {
+  if (e.outage) return "an outage, not a block";
+  if (e.current === "LIKELY_BLOCKED") return "likely blocked";
+  if (e.current === "SUSPECT") return "suspect (it was likely blocked earlier)";
+  return "quiet (nothing fires; it was likely blocked earlier)";
+}
+
 function guess(e: StoredEvidence): string {
   return e.blockType ? `Best guess, not proof: it is ${TYPE_WORDS[e.blockType]}.` : "The kind of block is not clear from here.";
 }
@@ -79,6 +96,7 @@ export function likelyBlockedPage(i: IncidentView, now: Date): Page {
     text:
       `${i.nodeName} looks blocked from ${where}, first seen ${since} (about ${hoursSince(i.openedAt, now)} h ago).\n\n` +
       `Why this is a page: ${reasonOf(i.evidence)}.\n\n` +
+      (insideNote(i.evidence) ? `${insideNote(i.evidence)}\n\n` : "") +
       `Evidence:\n${evidenceLines(i.evidence)}\n\n` +
       `${guess(i.evidence)}\n\n${FOOTER}`,
     mail: {
@@ -87,7 +105,10 @@ export function likelyBlockedPage(i: IncidentView, now: Date): Page {
         { label: "What", value: "Likely blocked" },
         { label: "Where", value: `${i.nodeName}, seen from ${where}` },
         { label: "Since", value: `${opsTime(i.openedAt)} (about ${hoursSince(i.openedAt, now)} h ago)` },
-        { label: "How sure", value: `Likely, not proven: ${reasonOf(i.evidence)}. ${guess(i.evidence)}` },
+        {
+          label: "How sure",
+          value: `Likely, not proven: ${reasonOf(i.evidence)}. ${insideNote(i.evidence) ? `${insideNote(i.evidence)} ` : ""}${guess(i.evidence)}`,
+        },
         { label: "What to do", value: WHAT_TO_DO },
       ],
       body: `Evidence:\n${evidenceLines(i.evidence)}`,
@@ -145,17 +166,20 @@ export function remindersPage(incidents: IncidentView[], now: Date): Page {
   if (incidents.length === 1) {
     const [i] = incidents;
     return {
-      subject: `[Neoxify] Reminder: ${i.nodeName} still looks blocked from ${where}`,
-      webhook: `[block] Reminder: ${i.nodeName} still looks blocked from ${where} (${hoursSince(i.openedAt, now)} h)`,
+      subject:
+        i.evidence.current === "LIKELY_BLOCKED"
+          ? `[Neoxify] Reminder: ${i.nodeName} still looks blocked from ${where}`
+          : `[Neoxify] Reminder: ${i.nodeName} was likely blocked from ${where}; right now ${readingNow(i.evidence)}`,
+      webhook: `[block] Reminder: ${i.nodeName} from ${where}, open ${hoursSince(i.openedAt, now)} h, right now ${readingNow(i.evidence)}`,
       context: { event: "block_reminder", nodes: [i.nodeName] },
       text:
-        `${i.nodeName} has looked blocked from ${where} for about ${hoursSince(i.openedAt, now)} h and nobody has answered ` +
-        `in the panel. This is the only reminder.\n\nLatest evidence:\n${evidenceLines(i.evidence)}\n\n${guess(i.evidence)}\n\n${FOOTER}`,
+        `${i.nodeName} has had a block incident open from ${where} for about ${hoursSince(i.openedAt, now)} h and nobody has answered ` +
+        `in the panel. Right now it reads ${readingNow(i.evidence)}. This is the only reminder.\n\nLatest evidence:\n${evidenceLines(i.evidence)}\n\n${guess(i.evidence)}\n\n${FOOTER}`,
       mail: {
         severity: "warning",
         chip: "Reminder",
         facts: [
-          { label: "What", value: "Still looks blocked, and nobody has answered in the panel" },
+          { label: "What", value: `Open, and nobody has answered in the panel. Right now: ${readingNow(i.evidence)}` },
           { label: "Where", value: `${i.nodeName}, seen from ${where}` },
           { label: "Since", value: `${opsTime(i.openedAt)} (about ${hoursSince(i.openedAt, now)} h ago)` },
           { label: "How sure", value: guess(i.evidence) },
@@ -173,10 +197,10 @@ export function remindersPage(incidents: IncidentView[], now: Date): Page {
     webhook: `[block] Reminder: still look blocked from ${where}: ${names.join(", ")}`,
     context: { event: "block_reminder", nodes: names },
     text:
-      `These have looked blocked from ${where} for a day or more and nobody has answered in the panel. ` +
+      `These have had block incidents open from ${where} for a day or more and nobody has answered in the panel. ` +
       "This is the only reminder for each.\n\n" +
       incidents
-        .map((i) => `${i.nodeName} (about ${hoursSince(i.openedAt, now)} h)\n${evidenceLines(i.evidence)}`)
+        .map((i) => `${i.nodeName} (about ${hoursSince(i.openedAt, now)} h; right now ${readingNow(i.evidence)})\n${evidenceLines(i.evidence)}`)
         .join("\n\n") +
       `\n\n${FOOTER}`,
     mail: {
@@ -189,7 +213,7 @@ export function remindersPage(incidents: IncidentView[], now: Date): Page {
         { label: "What to do", value: WHAT_TO_DO },
       ],
       body: incidents
-        .map((i) => `${i.nodeName} (about ${hoursSince(i.openedAt, now)} h)\n${evidenceLines(i.evidence)}`)
+        .map((i) => `${i.nodeName} (about ${hoursSince(i.openedAt, now)} h; right now ${readingNow(i.evidence)})\n${evidenceLines(i.evidence)}`)
         .join("\n\n"),
       panel: PANEL,
       note: `This is the only reminder for each. ${UNCHANGED}`,

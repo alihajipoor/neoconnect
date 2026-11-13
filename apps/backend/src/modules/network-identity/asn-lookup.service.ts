@@ -14,6 +14,13 @@ import { AsnTable, AsnTableBuilder, type AsnInfo } from "./asn-table";
  * day keeps it current at a cost of one download a day. */
 const REFRESH_MS = 24 * 3_600_000;
 
+/** How soon a load is tried again while no table has loaded at all. Until
+ * one has, every customer network reads unknown and the block watch cannot
+ * read the app reports, so waiting the full day after a failed first load
+ * (a download that failed on a re-created container, whose /tmp is empty)
+ * is a day without either. */
+export const ASN_RETRY_MS = 15 * 60_000;
+
 /** A sanity floor on a freshly parsed table.
  *
  * The real file has hundreds of thousands of ranges. A download that was
@@ -42,6 +49,7 @@ export class AsnLookupService implements OnModuleInit, OnModuleDestroy {
   private loadedAt: Date | null = null;
   private timer: NodeJS.Timeout | null = null;
   private refreshing: Promise<void> | null = null;
+  private retry: NodeJS.Timeout | null = null;
 
   constructor(private readonly config: ConfigService) {}
 
@@ -56,6 +64,7 @@ export class AsnLookupService implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy(): void {
     if (this.timer) clearInterval(this.timer);
+    if (this.retry) clearTimeout(this.retry);
   }
 
   /** The network an address belongs to, or null when the table is not
@@ -94,6 +103,18 @@ export class AsnLookupService implements OnModuleInit, OnModuleDestroy {
     this.loadedAt = new Date();
   }
 
+  /** While no table has loaded, one more try in ASN_RETRY_MS. Once one
+   * has, the daily timer alone keeps it fresh. */
+  private retryWhileEmpty(): void {
+    if (this.table || this.retry || !this.timer) return;
+    this.logger.warn(`No ASN table loaded yet; trying again in ${ASN_RETRY_MS / 60_000} minutes`);
+    this.retry = setTimeout(() => {
+      this.retry = null;
+      void this.refresh();
+    }, ASN_RETRY_MS);
+    this.retry.unref();
+  }
+
   private datasetPath(): string {
     return this.config.get<string>("asn.datasetPath") || join(tmpdir(), "neoxify-ip2asn-combined.tsv.gz");
   }
@@ -104,6 +125,7 @@ export class AsnLookupService implements OnModuleInit, OnModuleDestroy {
   refresh(): Promise<void> {
     this.refreshing ??= this.doRefresh().finally(() => {
       this.refreshing = null;
+      this.retryWhileEmpty();
     });
     return this.refreshing;
   }

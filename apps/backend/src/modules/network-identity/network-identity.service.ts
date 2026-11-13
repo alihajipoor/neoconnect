@@ -84,6 +84,13 @@ export class NetworkIdentityService {
     return this.asn.orgOf(asn);
   }
 
+  /** Whether the network table has loaded. Until it has, every network
+   * is unknown -- which a caller counting customers per country must not
+   * read as "no customers". */
+  networksKnown(): boolean {
+    return this.asn.status().loaded;
+  }
+
   /** Where an ASN is registered (ISO alpha-2), or null when unknown. */
   countryOfAsn(asn: number): string | null {
     return this.asn.countryOfAsn(asn);

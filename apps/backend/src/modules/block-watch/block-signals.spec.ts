@@ -283,7 +283,7 @@ describe("assess", () => {
       probe: family("probe", { firing: true, onset: NOW - HOUR, tcpOpen: false }),
     });
     expect(a.verdict).toBe("LIKELY_BLOCKED");
-    expect(a.reason).toContain("traffic, probe");
+    expect(a.reason).toContain("the server's own traffic, the outside TCP check");
     expect(a.blockType).toBe("address");
   });
 
