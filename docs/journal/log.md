@@ -9470,3 +9470,60 @@ finland-3 itself is unchanged and waits on the owner.
 **Unverified.** A first page raised by the inside family on a new block
 (none has happened since); the next daily digest's wording; the release
 sweep in `dry` or `on` (never run in production).
+
+---
+
+## 2026-11-13 — desktop 0.9.64: the app lays out on an out-of-date Windows web component
+
+**Status:** released from main.
+**Touches:** `apps/desktop-windows` (merge `d540ca13` of
+`claude/desktop-old-webview`, version `8acd7e31`), tag `desktop-v0.9.64`,
+`CLAUDE.md`
+
+**Cause.** A customer's app drew a broken screen. Their Microsoft Edge
+WebView2 Runtime is older than Chromium 105 (their reports say 100).
+Since desktop 0.9.53 every layout lives in CSS container queries, and an
+engine before 105 ignores them. Reproduced on engine 100 with 0.9.63.
+
+**What the fix does.**
+- A build step (`scripts/old-engine-css.mjs`) adds fallback rules behind
+  `@supports not (container-type:size)` guards, so engines 99 to 108 lay
+  out like current ones; current engines never read them.
+- Below 99 (no cascade layers) a Rust start-up check (`webview_floor.rs`)
+  opens a plain page (`public/webview-too-old.html`) instead of the app.
+- Support diagnostics gain a `webview2:` line.
+- The first connection report of an app start carries `; webview <version>`
+  when the engine is below 111.
+- The installer's WebView2 settings are unchanged.
+
+**Proven, and where.**
+- Playwright Chromium 100, 104, 105, 110 and current, rendering the built
+  stylesheet (builder and an independent verifier): correct on the old
+  ones, identical on the current one.
+- The VM, current engine, local build: starts, lays out correctly,
+  connects, exit matched.
+- The VM, real app on WebView2 100.0.1185.27 (Chromium 100.0.4896.60,
+  from the Microsoft Update Catalog, Authenticode-signed by Microsoft):
+  correct. Main screen, Support (two cards side by side, normal and
+  maximized), Settings and Activity in two columns, no horizontal scroll,
+  diagnostics line present. Below the floor: the plain page is shown.
+  Released 0.9.63 drew the broken screen on the same runtime.
+- Main CI on `8acd7e31` green on all four jobs; release run
+  `43359503303` green; the updater offers 0.9.64 to 0.9.62 and 0.9.63
+  and nothing to 0.9.64, and the installer link points at it.
+
+**Not proven.**
+- The released 0.9.64 installer itself was not run on an old engine;
+  the VM runs were on the local build.
+- Engines 101 to 103 and 106 to 109 inside the real app; dark theme and
+  display scaling above 100% on old engines.
+- The `; webview` note arriving at the backend.
+- That the customer's machine is fixed: their engine is still inferred
+  from their reports.
+
+**Left with the owner.** Two installer questions, both untouched:
+whether the installer should require a minimum WebView2 version
+(`minimumWebview2Version`, so an out-of-date runtime is updated at
+install), and whether it should carry or fetch the runtime differently
+(`webviewInstallMode`, today the default download bootstrapper, which
+needs Microsoft's servers reachable).

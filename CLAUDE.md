@@ -229,7 +229,7 @@ Tag prefixes are load-bearing and must not be shared: `desktop-v*`,
 prefix, and a desktop release once hijacked the agent installer's
 download URL precisely because they collided.
 
-Current: desktop `0.9.63`, mobile `0.2.40`, agent `v0.2.12` — each
+Current: desktop `0.9.64`, mobile `0.2.40`, agent `v0.2.12` — each
 matching its latest released tag.
 
 **The production backend tracks `main`** as of 2026-11-11 (`8b2ca7b4`,
