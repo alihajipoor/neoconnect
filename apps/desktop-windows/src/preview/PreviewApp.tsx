@@ -325,6 +325,21 @@ const SLOT: SlotNotice = {
   refusal: { limit: 2, holders: [{ handle: "h1", label: "Pixel 7", platform: "android", since: new Date(Date.now() - 3_600_000).toISOString() }] },
 } as SlotNotice;
 
+const FILL = typeof location !== "undefined" && new URLSearchParams(location.search).has("fill");
+
+/** The browser window's size while `on`, kept as it changes. */
+function useWindowSize(on: boolean): [number, number] | null {
+  const read = (): [number, number] => [window.innerWidth, window.innerHeight];
+  const [size, setSize] = useState<[number, number] | null>(on ? read : null);
+  useEffect(() => {
+    if (!on) return;
+    const update = () => setSize(read());
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [on]);
+  return size;
+}
+
 export function PreviewApp() {
   const { t, language, setLanguage } = useI18n();
   const [key, setKey] = useState("connected");
@@ -337,7 +352,13 @@ export function PreviewApp() {
   const [logo, setLogo] = useState(true);
   const [logoTone, setLogoTone] = useState<LogoTone>(MARK_TONE);
   const sc = SCENARIOS[key];
-  const [w, h, safeT = 0, safeB = 0] = SIZES[size];
+  // `?fill`: the frame is the whole browser window, with the controls out
+  // of sight (still there for a script to set), so the window is the
+  // Windows window as the app sees it -- the media queries an engine
+  // without container queries falls back to measure the window, not a
+  // frame inside it (scripts/check-old-webview.mjs).
+  const filled = useWindowSize(FILL);
+  const [w, h, safeT = 0, safeB = 0] = filled ?? SIZES[size];
   const [askOpen, setAskOpen] = useState(false);
   const [sheet, setSheet] = useState(false);
   /** The shell's nav works in the preview: each press changes the screen
@@ -480,17 +501,15 @@ export function PreviewApp() {
   );
 
   return (
-    <div style={{ minHeight: "100vh", background: "#d9dde5", overflow: "auto", userSelect: "text" }}>
-      {controls}
+    <div style={{ minHeight: "100vh", background: "#d9dde5", overflow: FILL ? "hidden" : "auto", userSelect: "text" }}>
+      {FILL ? <div style={{ display: "none" }}>{controls}</div> : controls}
       <div
         style={{
           width: w,
           height: h,
-          margin: "0 16px 24px",
-          position: "relative",
-          borderRadius: 12,
+          ...(FILL ? { position: "fixed", inset: 0 } : { margin: "0 16px 24px", position: "relative", borderRadius: 12 }),
           overflow: "hidden",
-          boxShadow: "0 30px 80px -30px rgba(20,30,60,.45), 0 0 0 1px rgba(20,30,60,.12)",
+          boxShadow: FILL ? "none" : "0 30px 80px -30px rgba(20,30,60,.45), 0 0 0 1px rgba(20,30,60,.12)",
           // A containing block for the app's fixed overlays.
           transform: "translateZ(0)",
           ...({ "--pv-safe-t": `${safeT}px`, "--pv-safe-b": `${safeB}px` } as React.CSSProperties),
