@@ -9428,3 +9428,45 @@ needed and was not run.
 
 **Unverified.** The daily digest line for retired servers; the end state
 of the drain (expected ~870 completed, memory well under today's).
+
+## 2026-11-13 — block watch reads our inside boxes; expired WireGuard release rule merged switched off
+
+**Merged** `claude/block-watch-inside-signal` (19d61f7a, on e4a3d49e) as
+`38d8ce24`; tree identical to the CI-tested commit. CI on `38d8ce24`: all
+four jobs green. Contents: a fourth block-watch signal family, `inside`
+(our two boxes inside the country, `inside_probe_checks`), a guard so a
+round before the network (ASN) table loads cannot page, the current
+reading beside the strongest verdict, plainer alert text, a "Server
+retired" label on the panel card, the failed-job grace in
+`clean-finished-jobs.js`, and the expired-WireGuard release sweep. No
+migration. Rule in `docs/block-watch.md`.
+
+**Replay.** Over the inside-probe data kept from 2026-10-27, the inside
+family fires for the three real address blocks (germany-1 10-28,
+finland-2 11-07, finland-3 11-12), each two hours after the first lost
+round, and for nothing else.
+
+**`WG_EXPIRED_RELEASE` is OFF and NOT approved by the owner.** Not set in
+the panel host's `infra/.env` (0 matching lines before the deploy); blank
+means the sweep does nothing. WireGuard rows before the deploy:
+turkey-1 190, uk-1 174, finland-3 119, netherlands-1 119, germany-3 107,
+france-2 93, sweden-1 93.
+
+**Deployed** 2026-11-13, backend container started 02:15:20Z (was
+`b41151a7`). No new dump: this session's `pre-bw-sweeps-20261112T235706Z`
+(64 MB, gzip intact) covers it. "No pending migrations"; started 02:15:26Z;
+ASN table loaded 02:15:32Z (579,453 ranges); 0 error lines; 14 repeat
+schedules, 0 failed jobs; all eight live servers ONLINE with fresh
+heartbeats, ir2 among them (reconnected within a minute); health 200;
+API through nginx since the deploy 110 2xx, 2 4xx, no 5xx. Build cache
+pruned (3.2 GB): disk 43% -> 34%.
+
+**First round after the table loaded (02:32Z).** finland-3
+LIKELY_BLOCKED, address block, firing `probe` + `inside` (client and
+traffic quiet); every other server quiet, no new or reopened incident, no
+page or digest since the deploy (finland-3's page was 00:01Z, before).
+finland-3 itself is unchanged and waits on the owner.
+
+**Unverified.** A first page raised by the inside family on a new block
+(none has happened since); the next daily digest's wording; the release
+sweep in `dry` or `on` (never run in production).
