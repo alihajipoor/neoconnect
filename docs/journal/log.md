@@ -9722,3 +9722,59 @@ server. The website's location list still names Finland. The Pro
 plan's new default (germany-3) was chosen to match Starter and Trial,
 not measured. Only REALITY was dialled over the relay routes; the other
 three relay shapes per exit were not.
+
+## 2026-11-13 — Expired subscriptions' WireGuard addresses released (WG_EXPIRED_RELEASE=on)
+
+**Status:** done — production switch, `infra/.env` on the panel host
+**Touches:** nothing in the repo; the rule is `releaseExpiredWireGuard()` from 38d8ce24 (`docs/device-slots.md`)
+
+**Why.** Each server has one WireGuard pool of 253 addresses; 63 are
+kept for subscription credentials, so new device credentials are
+refused once 190 are used. turkey-1 had 191 WireGuard rows and the
+backend was logging "Device credential not created ... WireGuard pool is
+down to the addresses kept for subscription credentials" (29 times
+overnight, 12 more at 04:57Z); uk-1 had 177. Expired subscriptions kept
+their rows as DISABLED for ever. The owner was asked whether to free the
+addresses of subscriptions that ended more than 7 days ago (a renewal
+gets a new key) and answered "fix the wireguard issue".
+
+**Pre-count (own read-only SELECT from the rule as coded, 04:47Z).** 62
+rows: turkey-1 40 (34 shared, 6 device), uk-1 22 (17 shared, 5 device),
+from 34 subscriptions of 34 customers; all 62 DISABLED. Rows whose
+subscription was not EXPIRED, expired under 7 days or auto-renewing: 0.
+Selected subscriptions with any upload in the last 7 days: 0. One of
+the 34 customers has another ACTIVE subscription. Peers on the servers
+(`wg show`, count only): turkey-1 135, uk-1 140, equal to their ACTIVE
+rows, so the DISABLED rows were already off the servers. ACTIVE
+subscriptions whose plan has a WireGuard route on turkey-1/uk-1 with no
+shared row: 0 of 50 on each.
+
+**Deploy.** main beyond 38d8ce24 touched nothing under apps/backend,
+apps/panel or infra (desktop, phone and journal only), so the usual
+`git pull --ff-only` (to d07db2cd) and rebuild went ahead. One line
+added to infra/.env (backup `/root/infra-env-pre-wgrelease-*`),
+WG_EXPIRED_RELEASE_DAYS left unset (7).
+
+**Report-only run.** `WG_EXPIRED_RELEASE=dry`, backend recreated 04:51Z
+(started, ASN table loaded, 14 repeat schedules, 7 servers ONLINE, ir2
+back). The 05:00Z hourly device-credentials sweep logged "would free 62
+(turkey-1 40, uk-1 22)"; the same SELECT at that moment gave 62, 40, 22.
+
+**Real run.** Switched in place to `on` (one line), recreated 05:03Z,
+same health. The 06:00Z sweep logged "freed 62 address(es) ... (turkey-1
+40, uk-1 22)", no failures. 62 DELETE_USER commands (40 turkey-1, 22
+uk-1), all ACKED within 4 s, none with an error. The rule now selects 0
+rows. WireGuard rows after: turkey-1 154 (36 under the 190 limit),
+uk-1 161 (29 under); three new subscriptions arrived between the runs
+(+3 shared rows on every server). Peers after: turkey-1 138, uk-1 146,
+again equal to ACTIVE rows. Missing shared rows on ACTIVE subscriptions:
+0 of 53 on each. No backend ERROR lines since the switch. No pool
+warnings since 06:00Z.
+
+**Not proven.** No device fetched a new credential on turkey-1 WireGuard
+in the 30 minutes watched (06:00-06:30Z), so a device credential being created there
+again is not yet seen. A renewed customer's app fetching its new key
+and connecting on a real server is not proven (only the CI database
+test shows the renewal provisions a new row). A second sweep doing
+nothing more (07:00Z) was not watched. Build cache prune freed 4.1 GB (image prune 0 B); panel
+host disk 34%.
