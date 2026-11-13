@@ -197,10 +197,22 @@ function shadowsocksOutbound(user: ProtocolUser, params: Record<string, unknown>
           // customer; keeping them apart until now means rotating the
           // server key does not have to rewrite every credential.
           password: `${String(params.serverKey)}:${String(user.credentials.userKey)}`,
-          uot: true,
         },
       ],
     },
+    // UDP inside TCP, so DNS, calls and games are not lost where UDP is
+    // blocked. This was `uot: true` until the engine moved to xray-core
+    // v26.6.27 (the TUN crash fix), which dropped Shadowsocks'
+    // UDP-over-TCP (#6286) and ignores that key without a word -- every
+    // UDP flow, DNS included, would have gone to the node as plain UDP.
+    // Upstream's answer is XUDP over Xray's mux, the same shape the
+    // Windows client has sent since 0.9.49 (engines/xray.rs): TCP stays
+    // one connection each (`concurrency: -1`), UDP rides one muxed TCP
+    // connection, and UDP/443 (QUIC) is carried as UoT carried it. The
+    // nodes' Shadowsocks inbound dispatches through mux.Server, and
+    // plugins/vpn/xray's engine tests carry UDP this way against a
+    // 26.3.27 server, the version the nodes run.
+    mux: { enabled: true, concurrency: -1, xudpConcurrency: 16, xudpProxyUDP443: "allow" },
   };
 }
 

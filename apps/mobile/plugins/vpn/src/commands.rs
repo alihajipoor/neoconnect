@@ -6,7 +6,7 @@
 //! Tauri plugins put their commands in a submodule for the same reason.
 
 use crate::{
-    AppleIdentity, Apps, Empty, Granted, IapProducts, IapPurchase, IapUnfinished, Ikev2Profile, Notices,
+    AppleIdentity, Apps, Empty, Granted, IapProducts, IapPurchase, IapUnfinished, Ikev2Profile, LastRunFiles, Notices,
     NotificationState, TunnelGone, VpnStatus, WireGuardProfile, XrayProfile,
 };
 // Only the mobile branch of vpn_open_auth_session names this; the
@@ -206,6 +206,26 @@ pub async fn vpn_tunnel_gone<R: Runtime>(app: AppHandle<R>) -> Result<TunnelGone
             .map_err(|e| e.to_string())
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = app;
+        Err(unavailable())
+    }
+}
+
+/// What the iOS packet tunnel left about how its runs ended, for the report
+/// the app sends when it sees a drop. iOS only: Android's plugin has no
+/// such command, and the call there rejects, which the app reads as "no
+/// record".
+#[tauri::command]
+pub async fn vpn_last_run<R: Runtime>(app: AppHandle<R>) -> Result<LastRunFiles, String> {
+    #[cfg(target_os = "ios")]
+    {
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<LastRunFiles>("lastRun", ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "ios"))]
     {
         let _ = app;
         Err(unavailable())

@@ -54,6 +54,13 @@ gomobile init
 mkdir -p "$libs"
 cd "$src"
 
+# Android keeps upstream xray-core. A replace here is an iOS patch run
+# (xray-core-patch.sh) that was killed before it put go.mod back.
+if grep -q "github.com/xtls/xray-core .*=>" go.mod; then
+  echo "error: go.mod replaces xray-core; a killed iOS patch run left it. Undo it: git checkout -- go.mod" >&2
+  exit 1
+fi
+
 # arm64 only by default, deliberately: it is every Android device sold
 # for years, and each extra ABI adds ~46MB of compiled Go to the APK for
 # hardware nobody is running this on.
@@ -92,11 +99,19 @@ echo "Building the Xray engine for $target"
 # is a reproducibility fix rather than a size one: without it the .so
 # differs between two otherwise identical builds purely by the checkout
 # directory, which makes "did this change?" unanswerable by comparison.
+#
+# -checklinkname=0: xray-core v26.6.27 (the TUN crash fix) pulls in
+# github.com/wlynxg/anet through pion/stun (transport/internet/finalmask,
+# registered by infra/conf whether used or not). On Android anet reaches
+# into the standard library with go:linkname (net.zoneCache), which the
+# Go 1.23+ linker refuses unless this check is off -- the link fails with
+# "invalid reference to net.zoneCache", on 1.26.5 (CI's) and 1.27 alike.
+# anet's own documented requirement; it touches no other package.
 gomobile bind \
   -target="$target" \
   -androidapi 24 \
   -trimpath \
-  -ldflags="-s -w" \
+  -ldflags="-s -w -checklinkname=0" \
   -o "$aar" .
 
 # Unpacked, because an Android *library* module cannot depend on a local

@@ -23,6 +23,31 @@ pub use commands::*;
 #[serde(rename_all = "camelCase")]
 pub struct TunnelGone {
     pub gone: bool,
+    /// iOS: the state of the connection of ours that is not down, named as
+    /// `vpn_status` names it. Absent from Android, whose answer is about
+    /// every VPN network rather than a connection of ours.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Whether `gone` sees other apps' VPNs too: false on iOS, which shows
+    /// an app only its own; absent from Android, where it does.
+    #[serde(default)]
+    pub sees_others: Option<bool>,
+}
+
+/// Answer to `vpn_last_run`: the text of the files the iOS packet tunnel
+/// keeps about how its runs ended (plugins/vpn/xray/diagnostics.go), each
+/// null when absent. Raw -- the app cleans them before anything is sent.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastRunFiles {
+    #[serde(default)]
+    pub last_end: Option<String>,
+    #[serde(default)]
+    pub run: Option<String>,
+    #[serde(default)]
+    pub heartbeat: Option<String>,
+    #[serde(default)]
+    pub fatal_tail: Option<String>,
 }
 
 use serde::{Deserialize, Serialize};
@@ -122,6 +147,10 @@ pub struct VpnStatus {
     /// -- the app adopts it rather than starting a clock from nothing.
     #[serde(default)]
     pub session_secs: Option<i64>,
+    /// iOS: the connection's state, one word (`TunnelPhase` in the plugin).
+    /// For the report a drop sends; nothing decides on it.
+    #[serde(default)]
+    pub state: Option<String>,
 }
 
 /// The words the tunnel's own notifications use, in the app's language,

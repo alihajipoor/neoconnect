@@ -191,7 +191,15 @@ import { HEADLINE_HINTS, headlineFor, isTunnelUp } from "@shared/lib/connection-
 import { pressFor } from "@shared/lib/connect-intent";
 import { ladderPass } from "@shared/lib/ladder-pass";
 import { withTimeout } from "@shared/lib/service-call";
-import { droppedWhileAway, reconnectPreflight, rungAccess } from "../lib/reconnect-steps";
+import {
+  droppedWhileAway,
+  reconnectPreflight,
+  rungAccess,
+  waitOutTeardown,
+  type PreflightNote,
+  type TeardownWait,
+} from "../lib/reconnect-steps";
+import { dropReason, pendingRunReason, preflightReason, readRunFiles, runEndOwed } from "../lib/run-diagnostics";
 import {
   beginPass,
   connectPending,
@@ -223,6 +231,7 @@ import {
   disconnect,
   forgetProfiles,
   tunnelGone,
+  tunnelReading,
   hasVpnPermission,
   requestVpnPermission,
   vpnAccess,
@@ -340,6 +349,62 @@ async function waitForTeardown(): Promise<boolean> {
     await new Promise((r) => setTimeout(r, TEARDOWN_POLL_MS));
   }
   return false;
+}
+
+/** The same bounded wait, for an automatic reconnect's preflight, which
+ * also has to know whose VPN is still up when the wait runs out: our own
+ * tunnel still on its way down is a reason to try again on the next step,
+ * and only a VPN that is none of ours a reason to stop (`waitOutTeardown`). */
+function reconnectTeardownWait(): Promise<TeardownWait> {
+  return waitOutTeardown({
+    read: tunnelReading,
+    ownUp: () => vpnStatus().then((s) => s.connected),
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    timeoutMs: TEARDOWN_WAIT_MS,
+    pollMs: TEARDOWN_POLL_MS,
+  });
+}
+
+/** A preflight that did not clear its attempt says which check, and the
+ * tunnel state it saw. Never a word on screen: for the reports. */
+function reportPreflight(note: PreflightNote) {
+  void reportAttempt({ kind: "CONNECT", outcome: "OTHER", reason: preflightReason(note) });
+}
+
+/** A drop, said to the backend with how the tunnel extension's run
+ * ended (run-diagnostics.ts): a stop reason, or none -- a crash or a
+ * memory kill -- with the footprint's high-water mark, the engine's
+ * version and, for a run that died, the cleaned panic line. Nothing on
+ * screen, and nothing here may hold up the drop it reports. */
+async function reportDropSeen(protocol: string | undefined) {
+  try {
+    const [files, status] = await Promise.all([
+      readRunFiles().catch(() => null),
+      vpnStatus().catch(() => null),
+    ]);
+    void reportAttempt({
+      kind: "CONNECT",
+      outcome: "OTHER",
+      ...(protocol ? { protocol } : {}),
+      reason: dropReason(files, status?.state, Date.now() / 1000, protocol),
+    });
+  } catch {
+    // A report that could not be made is not the drop's concern.
+  }
+}
+
+/** After a tunnel lands: the extension's own summary of a run that a drop
+ * could only call possibly still running (`pendingRunReason`), which the
+ * start just made has written. Nothing when nothing is owed. */
+async function reportRunEndOwed() {
+  if (!runEndOwed()) return;
+  try {
+    const reason = pendingRunReason(await readRunFiles());
+    if (reason !== null) void reportAttempt({ kind: "CONNECT", outcome: "OTHER", reason });
+  } catch {
+    // Not the landing's concern.
+  }
 }
 
 /** The subscription worth showing. PENDING and CANCELLED entitle nobody
@@ -1460,6 +1525,7 @@ export function Dashboard({
     setConnectionState("disconnected");
     setConnectedAt(null);
     setTunnelDropped(true);
+    void reportDropSeen(protocolUserRef.current?.protocol);
     if (autoReconnect.dropped({ exclusion: reconnectExclusion() }) === "lost") void deviceSlot.release();
   }
 
@@ -1628,9 +1694,10 @@ export function Dashboard({
     return autoReconnect.bind(async (attempt) => {
       const cleared = await reconnectPreflight({
         exclusion: reconnectExclusion,
-        vpnGone: waitForTeardown,
+        vpnGone: reconnectTeardownWait,
         access: vpnAccess,
         live: attempt.live,
+        noted: reportPreflight,
       });
       if (cleared.kind !== "clear") return cleared;
       passResultRef.current = { routeId: null, errorKind: null };
@@ -2985,6 +3052,9 @@ export function Dashboard({
                 options.reconnect,
               ),
             );
+            // After the landing's own report: the run a drop could not
+            // yet sum up, now that this start has.
+            void reportRunEndOwed();
           });
           // A tunnel to reconnect if it drops. A reconnect's own landing
           // is armed by the episode, which carries its count of quick

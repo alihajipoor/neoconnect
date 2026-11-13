@@ -86,6 +86,7 @@ pub fn run() {
             tauri_plugin_neoxify_vpn::vpn_disconnect,
             tauri_plugin_neoxify_vpn::vpn_forget_profiles,
             tauri_plugin_neoxify_vpn::vpn_tunnel_gone,
+            tauri_plugin_neoxify_vpn::vpn_last_run,
             tauri_plugin_neoxify_vpn::vpn_status,
             tauri_plugin_neoxify_vpn::vpn_list_apps,
             tauri_plugin_neoxify_vpn::vpn_set_notices,

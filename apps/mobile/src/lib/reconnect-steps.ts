@@ -1,5 +1,5 @@
 import type { ReconnectOutcome, ReconnectStop } from "@shared/lib/auto-reconnect";
-import type { VpnAccess } from "./vpn";
+import type { TunnelReading, VpnAccess } from "./vpn";
 
 /** The phone's half of the automatic reconnect after a drop.
  *
@@ -20,10 +20,11 @@ import type { VpnAccess } from "./vpn";
  * anything on screen:
  *
  *  - **Another VPN holds the device.** Asked first, by waiting (bounded)
- *    for the device to be out of every VPN. Android reports any VPN
- *    network, not only ours, so a takeover by another app is seen here,
- *    and the attempt stops -- before the permission is so much as asked
- *    about, because on Android asking (`VpnService.prepare`) can itself
+ *    for the device to be out of every VPN (`waitOutTeardown`). Android
+ *    reports any VPN network, not only ours, so a takeover by another app
+ *    is seen here -- a VPN still up at the end of the wait while none of
+ *    our engines is -- and the attempt stops before the permission is so
+ *    much as asked about, because on Android asking (`VpnService.prepare`) can itself
  *    move the VPN back to an app the customer once allowed. That is read
  *    from AOSP's `Vpn.prepare`, not observed on a device.
  *
@@ -64,15 +65,17 @@ import type { VpnAccess } from "./vpn";
 export interface ReconnectPreflight {
   /** What the screen knows rules a reconnect out right now. */
   exclusion: () => ReconnectStop | null;
-  /** Waits, bounded, for the device to be out of every VPN. False when
-   * one is still up at the end of the wait. */
-  vpnGone: () => Promise<boolean>;
+  /** Waits, bounded, for the device to be out of every VPN, and says whose
+   * is still up when it is not (`waitOutTeardown`). */
+  vpnGone: () => Promise<TeardownWait>;
   /** What this app may start without asking (`vpnAccess`). Must never
    * raise a dialog. */
   access: () => Promise<VpnAccess>;
   /** Whether the attempt is still the episode's current one
    * (`ReconnectAttempt.live`). */
   live: () => boolean;
+  /** Told which check ended a preflight that did not clear, for the report. */
+  noted?: (note: PreflightNote) => void;
 }
 
 /** A preflight that found nothing in the way, and what the pass it lets
@@ -90,6 +93,75 @@ export interface ReconnectClearance {
  * nothing is dialled. */
 const OVERTAKEN: ReconnectOutcome = { kind: "stop", why: "customer" };
 
+/** What the wait for the device to be out of every VPN found.
+ *
+ * `ours` says whose VPN was still up when the wait ended: true, a
+ * connection of ours still on its way down; false, a VPN that is none of
+ * ours; null, not known. Only false is a sign of another app's VPN. An
+ * iPhone sees only its own connections, so there a tunnel not gone is
+ * always ours -- and reading it as another VPN is what stopped iPhone
+ * reconnects after one attempt, nothing dialled, behind an extension stuck
+ * between up and down (five of five such stops in production followed an
+ * Xray landing). */
+export interface TeardownWait {
+  gone: boolean;
+  ours: boolean | null;
+  /** The state the platform named (iOS), for the report. */
+  state: string | null;
+}
+
+/** Waits, up to `timeoutMs`, for the device to be out of every VPN, and
+ * if it is not, asks whose VPN is still up. `read` is `tunnelReading`;
+ * `ownUp` whether one of our own engines is up (`vpnStatus`), asked
+ * only where the reading sees other apps' VPNs too (Android). A reading
+ * that could not be made is not knowing, never "gone". */
+export async function waitOutTeardown(deps: {
+  read: () => Promise<TunnelReading>;
+  ownUp: () => Promise<boolean>;
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  timeoutMs: number;
+  pollMs: number;
+}): Promise<TeardownWait> {
+  const deadline = deps.now() + deps.timeoutMs;
+  let last: TunnelReading | null = null;
+  while (deps.now() < deadline) {
+    try {
+      last = await deps.read();
+      if (last.gone) return { gone: true, ours: null, state: last.state ?? null };
+    } catch {
+      // Not knowing is not the same as knowing it is down.
+    }
+    await deps.sleep(deps.pollMs);
+  }
+  if (last === null) return { gone: false, ours: null, state: null };
+  const state = last.state ?? null;
+  if (last.seesOthers === false) return { gone: false, ours: true, state };
+  let ours: boolean | null;
+  try {
+    ours = await deps.ownUp();
+  } catch {
+    ours = null;
+  }
+  return { gone: false, ours, state };
+}
+
+/** Which check a preflight that did not clear its attempt stopped at, for
+ * the report it sends (run-diagnostics.ts `preflightReason`): the branch,
+ * what came of it, and the tunnel state the wait saw. */
+export interface PreflightNote {
+  branch:
+    | "otherVpnUp"
+    | "ownStillStopping"
+    | "unknownStillUp"
+    | "waitFailed"
+    | "permission"
+    | "chosenElsewhere"
+    | "accessFailed";
+  outcome: "stop" | "retry";
+  state: string | null;
+}
+
 /** A clearance to go ahead and dial; otherwise the attempt's outcome. A
  * check that could not be made is a failed attempt rather than a reason
  * to stop: the next attempt asks again, and the episode is bounded.
@@ -105,24 +177,52 @@ export async function reconnectPreflight(deps: ReconnectPreflight): Promise<Reco
   const excluded = deps.exclusion();
   if (excluded !== null) return { kind: "stop", why: excluded };
 
-  let gone: boolean;
+  const note = (branch: PreflightNote["branch"], outcome: PreflightNote["outcome"], state: string | null) => {
+    try {
+      deps.noted?.({ branch, outcome, state });
+    } catch {
+      // A report is never a reason to change what the attempt does.
+    }
+  };
+
+  let wait: TeardownWait;
   try {
-    gone = await deps.vpnGone();
+    wait = await deps.vpnGone();
   } catch {
+    if (!deps.live()) return OVERTAKEN;
+    note("waitFailed", "retry", null);
     return { kind: "failed" };
   }
   if (!deps.live()) return OVERTAKEN;
-  if (!gone) return { kind: "stop", why: "otherVpn" };
+  if (!wait.gone) {
+    // Another VPN only on a sign of one: a VPN up, and none of it ours.
+    if (wait.ours === false) {
+      note("otherVpnUp", "stop", wait.state);
+      return { kind: "stop", why: "otherVpn" };
+    }
+    // Our own tunnel not yet down, or not known whose: the next attempt,
+    // on the episode's next step, waits again. The episode is bounded.
+    note(wait.ours === true ? "ownStillStopping" : "unknownStillUp", "retry", wait.state);
+    return { kind: "failed" };
+  }
 
   let access: VpnAccess;
   try {
     access = await deps.access();
   } catch {
+    if (!deps.live()) return OVERTAKEN;
+    note("accessFailed", "retry", wait.state);
     return { kind: "failed" };
   }
   if (!deps.live()) return OVERTAKEN;
-  if (!access.granted) return { kind: "stop", why: "permission" };
-  if (access.chosenElsewhere === true) return { kind: "stop", why: "otherVpn" };
+  if (!access.granted) {
+    note("permission", "stop", wait.state);
+    return { kind: "stop", why: "permission" };
+  }
+  if (access.chosenElsewhere === true) {
+    note("chosenElsewhere", "stop", wait.state);
+    return { kind: "stop", why: "otherVpn" };
+  }
   // Only a platform that says IKEv2 is not installed holds it back;
   // Android says nothing of it.
   return { kind: "clear", ikev2: access.ikev2 !== false };

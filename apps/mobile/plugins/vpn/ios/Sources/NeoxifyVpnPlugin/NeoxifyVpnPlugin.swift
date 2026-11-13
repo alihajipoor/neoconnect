@@ -345,13 +345,69 @@ class NeoxifyVpnPlugin: Plugin {
     /// Anything that is not fully down counts as still up, including
     /// .disconnecting: that state is exactly the window this is meant to
     /// wait out.
+    ///
+    /// With the state it saw, named as `status` names it (`TunnelPhase`),
+    /// and `seesOthers` false: on iOS a tunnel that is not gone is always
+    /// one of ours, still on its way down. An automatic reconnect used to
+    /// read the end of an eight-second wait as "another VPN holds the
+    /// device", and stopped, while `status` was already calling the same
+    /// tunnel down -- one stuck between the two, .connecting or
+    /// .disconnecting, was neither.
     @objc public func tunnelGone(_ invoke: Invoke) {
         Task {
             let managers = (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? []
-            let down: (NEVPNStatus) -> Bool = { $0 == .disconnected || $0 == .invalid }
-            let providerDown = managers.allSatisfy { down($0.connection.status) }
-            let ikev2Down = down(await Ikev2Engine.status())
-            invoke.resolve(["gone": providerDown && ikev2Down])
+            let ikev2 = await Ikev2Engine.status()
+            let all = managers.map { $0.connection.status } + [ikev2]
+            let gone = all.allSatisfy { TunnelPhase.down($0) }
+            // The one still not down, if any: that is the state worth naming.
+            let seen = all.first(where: { !TunnelPhase.down($0) }) ?? (managers.first?.connection.status ?? .invalid)
+            invoke.resolve([
+                "gone": gone,
+                "state": TunnelPhase.name(seen),
+                "seesOthers": false,
+            ])
+        }
+    }
+
+    /// What the extension left about how its runs ended, for a report the
+    /// app sends when it sees a drop: the files RunDiagnostics keeps in the
+    /// app group's `diagnostics` folder (plugins/vpn/xray/diagnostics.go),
+    /// returned as their text. The app cleans and cuts them before anything
+    /// leaves the phone (run-diagnostics.ts); the fatal output here is raw,
+    /// so only its last few KiB are read.
+    ///
+    /// `lastEnd` is the run before the current record, made at the next
+    /// start; `run` and `heartbeat` are the latest run's own, which is the
+    /// run that just dropped when the app asks right after a drop -- a
+    /// crash or a memory kill leaves `run` with no stop reason.
+    @objc public func lastRun(_ invoke: Invoke) {
+        Task {
+            guard let dir = FileManager.default
+                .containerURL(forSecurityApplicationGroupIdentifier: TunnelLastStop.suite)?
+                .appendingPathComponent("diagnostics", isDirectory: true)
+            else {
+                invoke.resolve(["lastEnd": NSNull(), "run": NSNull(), "heartbeat": NSNull(), "fatalTail": NSNull()])
+                return
+            }
+            func text(_ name: String, tail: Int = 16 * 1024, fromStart: Bool = false) -> Any {
+                guard let handle = try? FileHandle(forReadingFrom: dir.appendingPathComponent(name)) else { return NSNull() }
+                defer { try? handle.close() }
+                let size = (try? handle.seekToEnd()) ?? 0
+                let from = !fromStart && size > UInt64(tail) ? size - UInt64(tail) : 0
+                try? handle.seek(toOffset: from)
+                guard let data = try? handle.read(upToCount: tail) else { return NSNull() }
+                return String(decoding: data, as: UTF8.self)
+            }
+            invoke.resolve([
+                "lastEnd": text("tunnel-last-end.json"),
+                "run": text("tunnel-run.json"),
+                "heartbeat": text("engine-heartbeat.json"),
+                // The head, not the end: the file is truncated at every
+                // start and only crash output reaches it, so its "panic:"
+                // or "fatal error:" line comes first, and a long trace
+                // would push it out of the last few KiB.
+                "fatalTail": text("engine-fatal.log", tail: 4096, fromStart: true),
+            ])
         }
     }
 
@@ -550,7 +606,7 @@ class NeoxifyVpnPlugin: Plugin {
             // on carrying traffic. The poll's egress check still decides
             // whether it is carrying; tunnelGone already counts it as not
             // gone.
-            let up: (NEVPNStatus) -> Bool = { $0 == .connected || $0 == .reasserting }
+            let up = TunnelPhase.up
             // Whichever is actually up. Only one can be at a time, so
             // preferring the live one cannot mask the other; taking the
             // tunnel-provider state unconditionally would report a live
@@ -572,7 +628,7 @@ class NeoxifyVpnPlugin: Plugin {
             }
             var answer: JsonObject = [
                 "connected": up(state),
-                "state": String(describing: state),
+                "state": TunnelPhase.name(state),
                 "protocol": running,
             ]
             // How long the live connection has been up, from the system's
@@ -867,6 +923,30 @@ enum ProviderStart {
 /// our packet tunnel was still up -- the ladder waits for that tunnel to be
 /// gone first, and a landing on IKEv2 clears it -- and then a reconnect
 /// errs the safe way: "VPN connection lost", nothing dialled.
+/// The one reading of a connection's state that `status` and `tunnelGone`
+/// share. Up is .connected or .reasserting; down is .disconnected or
+/// .invalid; .connecting and .disconnecting are neither -- not up, so
+/// `status` does not vouch for them, and not gone, so a teardown is waited
+/// out. Each used to spell its own half, and the app could not tell a
+/// tunnel of ours stuck between them from another app's VPN.
+enum TunnelPhase {
+    static func up(_ s: NEVPNStatus) -> Bool { s == .connected || s == .reasserting }
+    static func down(_ s: NEVPNStatus) -> Bool { s == .disconnected || s == .invalid }
+    /// A fixed word per state: `String(describing:)` of an imported enum
+    /// is not one.
+    static func name(_ s: NEVPNStatus) -> String {
+        switch s {
+        case .invalid: return "invalid"
+        case .disconnected: return "disconnected"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .reasserting: return "reasserting"
+        case .disconnecting: return "disconnecting"
+        @unknown default: return "unknown"
+        }
+    }
+}
+
 enum TunnelLastStop {
     static let suite = "group.com.neoxify.mobile"
     static let key = "tunnelLastStopReason"
