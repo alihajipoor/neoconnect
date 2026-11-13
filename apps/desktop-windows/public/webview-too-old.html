@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neoxify</title>
+<!--
+  Shown instead of the app when the Windows web component that draws it is
+  older than the stylesheet can handle (src-tauri/src/webview_floor.rs).
+  Everything here is plain on purpose: inline CSS of the kind any engine
+  draws, ES5, no fonts or files to load, nothing it asks of the network,
+  and nothing about the connection, which this page has not checked.
+-->
+<style>
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: #f1f3f6;
+    color: #14171f;
+    font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 620px; margin: 0 auto; padding: 40px 24px; }
+  .lang { background: #ffffff; border: 1px solid #d5dae3; border-radius: 12px; padding: 24px 28px; margin-bottom: 20px; }
+  .lang[dir="rtl"] { font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 15.5px; line-height: 1.9; }
+  h1 { font-size: 21px; line-height: 1.35; margin: 0 0 12px; }
+  h2 { font-size: 16px; margin: 20px 0 6px; }
+  p, ol { margin: 0 0 10px; }
+  ol { padding-left: 22px; }
+  .lang[dir="rtl"] ol { padding-left: 0; padding-right: 22px; list-style-type: persian; }
+  .name { font-weight: bold; direction: ltr; unicode-bidi: embed; }
+  .v { display: none; }
+  .known .v { display: inline; }
+  .ver { direction: ltr; unicode-bidi: embed; }
+  .hidden { display: none; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #0b0e15; color: #e8ebf2; }
+    .lang { background: #151a24; border-color: #2a3140; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap" id="page">
+  <div class="lang" id="en" lang="en" dir="ltr">
+    <h1>Neoxify can't show its screen</h1>
+    <p>The part of Windows that draws this app, <span class="name">Microsoft Edge WebView2 Runtime</span>, is out of date on this computer<span class="v"> (version <span class="ver"></span>)</span>. Neoxify can't show its screen correctly until it is updated.</p>
+    <h2>What to do</h2>
+    <ol>
+      <li>Update Microsoft Edge, or download the WebView2 Runtime from Microsoft's website and install it.</li>
+      <li>Close this window and open Neoxify again.</li>
+    </ol>
+    <p>If the update doesn't work, contact Neoxify support and we'll help you.</p>
+  </div>
+  <div class="lang" id="fa" lang="fa" dir="rtl">
+    <h1>نئوکسیفای نمی‌تواند صفحه‌اش را نشان دهد</h1>
+    <p>بخشی از ویندوز که صفحهٔ این برنامه را نمایش می‌دهد، یعنی <span class="name">Microsoft Edge WebView2 Runtime</span>، روی این کامپیوتر قدیمی است<span class="v"> (نسخهٔ <span class="ver"></span>)</span>. تا وقتی به‌روز نشود، نئوکسیفای نمی‌تواند صفحه‌اش را درست نشان دهد.</p>
+    <h2>چه کار کنید</h2>
+    <ol>
+      <li>مرورگر Microsoft Edge را به‌روز کنید، یا WebView2 Runtime را از سایت مایکروسافت دانلود و نصب کنید.</li>
+      <li>این پنجره را ببندید و نئوکسیفای را دوباره باز کنید.</li>
+    </ol>
+    <p>اگر به‌روزرسانی درست نشد، به پشتیبانی نئوکسیفای پیام بدهید تا کمکتان کنیم.</p>
+  </div>
+</div>
+<script>
+  (function () {
+    var query = location.search.substring(1).split("&");
+    var version = "";
+    var language = "";
+    for (var i = 0; i < query.length; i++) {
+      var pair = query[i].split("=");
+      if (pair[0] === "v") version = decodeURIComponent(pair[1] || "");
+      if (pair[0] === "lang") language = pair[1] || "";
+    }
+    version = version.replace(/[^0-9A-Za-z.]/g, "").substring(0, 40);
+    if (version) {
+      var spans = document.getElementsByClassName("ver");
+      for (var j = 0; j < spans.length; j++) spans[j].textContent = version;
+      document.getElementById("page").className += " known";
+    }
+    // The app's saved language, when it could be read; else both.
+    if (language === "fa" || language === "en") {
+      document.getElementById(language === "fa" ? "en" : "fa").className += " hidden";
+      document.documentElement.lang = language;
+      if (language === "fa") document.documentElement.dir = "rtl";
+    }
+  })();
+</script>
+</body>
+</html>
