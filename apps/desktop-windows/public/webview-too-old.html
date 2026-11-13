@@ -31,7 +31,7 @@
   .name { font-weight: bold; direction: ltr; unicode-bidi: embed; }
   .v { display: none; }
   .known .v { display: inline; }
-  .ver { direction: ltr; unicode-bidi: embed; }
+  .ver, .ltr { direction: ltr; unicode-bidi: embed; }
   .hidden { display: none; }
   @media (prefers-color-scheme: dark) {
     body { background: #0b0e15; color: #e8ebf2; }
@@ -42,24 +42,24 @@
 <body>
 <div class="wrap" id="page">
   <div class="lang" id="en" lang="en" dir="ltr">
-    <h1>Neoxify can't show its screen</h1>
-    <p>The part of Windows that draws this app, <span class="name">Microsoft Edge WebView2 Runtime</span>, is out of date on this computer<span class="v"> (version <span class="ver"></span>)</span>. Neoxify can't show its screen correctly until it is updated.</p>
+    <h1>Neoxify can't open properly on this computer</h1>
+    <p>Neoxify draws its window with a part of Windows called <span class="name">Microsoft Edge WebView2 Runtime</span>. On this computer it is out of date<span class="v"> (version <span class="ver"></span>)</span>, so the app can't be shown correctly.</p>
     <h2>What to do</h2>
     <ol>
-      <li>Update Microsoft Edge, or download the WebView2 Runtime from Microsoft's website and install it.</li>
+      <li>Download the WebView2 Runtime from Microsoft's website and install it.</li>
       <li>Close this window and open Neoxify again.</li>
     </ol>
-    <p>If the update doesn't work, contact Neoxify support and we'll help you.</p>
+    <p>If that doesn't help, message Neoxify support and we'll help you.</p>
   </div>
   <div class="lang" id="fa" lang="fa" dir="rtl">
-    <h1>نئوکسیفای نمی‌تواند صفحه‌اش را نشان دهد</h1>
-    <p>بخشی از ویندوز که صفحهٔ این برنامه را نمایش می‌دهد، یعنی <span class="name">Microsoft Edge WebView2 Runtime</span>، روی این کامپیوتر قدیمی است<span class="v"> (نسخهٔ <span class="ver"></span>)</span>. تا وقتی به‌روز نشود، نئوکسیفای نمی‌تواند صفحه‌اش را درست نشان دهد.</p>
-    <h2>چه کار کنید</h2>
+    <h1>نئوکسیفای روی این کامپیوتر درست باز نمی‌شود</h1>
+    <p>نئوکسیفای پنجره‌اش را با بخشی از ویندوز به نام <span class="name">Microsoft Edge WebView2 Runtime</span> نمایش می‌دهد. این بخش روی کامپیوتر شما قدیمی است<span class="v"> (نسخهٔ <span class="ver"></span>)</span> و تا به‌روز نشود، برنامه درست نمایش داده نمی‌شود.</p>
+    <h2>چه باید کرد</h2>
     <ol>
-      <li>مرورگر Microsoft Edge را به‌روز کنید، یا WebView2 Runtime را از سایت مایکروسافت دانلود و نصب کنید.</li>
+      <li><span class="ltr">WebView2 Runtime</span> را از سایت مایکروسافت دانلود و نصب کنید.</li>
       <li>این پنجره را ببندید و نئوکسیفای را دوباره باز کنید.</li>
     </ol>
-    <p>اگر به‌روزرسانی درست نشد، به پشتیبانی نئوکسیفای پیام بدهید تا کمکتان کنیم.</p>
+    <p>اگر باز هم درست نشد، به پشتیبانی نئوکسیفای پیام بدهید تا کمکتان کنیم.</p>
   </div>
 </div>
 <script>
