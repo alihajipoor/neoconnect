@@ -10,6 +10,8 @@ import {
 } from "../lib/customer";
 import { collectDiagnostics, diagnosticsToText } from "../lib/repair";
 import { loadFlagSet } from "../lib/flag-art";
+import { reportedPlatform } from "../lib/attempts";
+import { chromiumFromUserAgent, engineLine, webviewVersion } from "../lib/webview-engine";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { swapView } from "../lib/view-transition";
@@ -180,12 +182,18 @@ function DiagnosticsCard() {
       // And the flag set is read here, on demand like any row that needs
       // it: the count in the text is the proof that this installed app
       // can read it (see diagnosticsToText).
-      const [snapshot, appVersion, flags] = await Promise.all([
+      // And the Windows web component's version: an old one draws the
+      // app from fallbacks, and nothing else in the text would say so.
+      const [snapshot, appVersion, flags, engine] = await Promise.all([
         collectDiagnostics(),
         getVersion().catch(() => "unknown"),
         loadFlagSet(),
+        reportedPlatform().then(
+          async (platform) => (platform === "windows" ? engineLine(await webviewVersion(), chromiumFromUserAgent()) : undefined),
+          () => undefined,
+        ),
       ]);
-      setText(diagnosticsToText(snapshot, appVersion, flags ? Object.keys(flags).length : null));
+      setText(diagnosticsToText(snapshot, appVersion, flags ? Object.keys(flags).length : null, engine));
     } catch {
       // Nothing partial. A snapshot missing the half the service
       // answers is worse than none: it would read as "everything is

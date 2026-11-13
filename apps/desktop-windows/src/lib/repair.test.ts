@@ -229,6 +229,13 @@ describe("the diagnostics text a customer pastes", () => {
     expect(diagnosticsToText(EMPTY, "0.9.63")).not.toContain("flag set");
   });
 
+  /** An old one draws the app from fallbacks; nothing else says which. */
+  it("names the Windows web component's version after the app's, when given", () => {
+    const line = "webview2: 100.0.1185.36 (Chromium 100.0.4896.75)";
+    expect(diagnosticsToText(EMPTY, "0.9.63", null, line)).toContain(`\napp: 0.9.63\n${line}\n`);
+    expect(diagnosticsToText(EMPTY, "0.9.63")).not.toContain("webview2");
+  });
+
   /** The privacy boundary, asserted from the outside.
    *
    * The service composes this from named fields and never from a
