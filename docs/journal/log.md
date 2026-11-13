@@ -9644,3 +9644,81 @@ there was only one such row ever (2026-10-27), so build 20 has none yet.
   release has been cut from this.
 - The new engine and the XUDP change against censored networks beyond
   the owner's own line, and against the live nodes under load.
+
+## 2026-11-13 — finland-3 retired; the fleet tool's first run that writes
+
+**Status:** done (the owner still deletes the VPS)
+**Touches:** production database, the panel's plans, the relay box's routes (through the API), one node zone in Cloudflare; no repository code
+
+**Why.** finland-3's address has been blocked from inside the restricted
+country since 2026-11-12 02:00Z: every port and ping dead from both of
+our inside boxes and from every inside checker, while the server itself
+was healthy. No customer moved traffic through it for about a day and a
+half. The owner was asked whether to retire it or give it a new address
+and said to retire it; he will add another server soon. The fleet is
+now six exits (france-2, germany-3, netherlands-1, sweden-1, turkey-1,
+uk-1) and the relay box.
+
+**What was done (03:49-04:11Z).** With `scripts/fleet/fleet retire`,
+step by step with `--only`, from a worktree at origin/main:
+- Snapshot and guards. The plan guard refused at first, correctly: the
+  Pro plan's default route was on finland-3. Run again with
+  `--default-to germany-3`.
+- Plans, one PATCH each, smallest first, heartbeats and transaction
+  errors checked after each: Ultimate (-4 relay routes), Ultimate Max,
+  Pro (default moved to germany-3's OpenVPN route), Trial, Starter
+  (-8 each). Each edit took under 1 to 15 s; every server stayed fresh;
+  no pool or transaction error in the backend log. 812 active
+  credentials revoked; no customer had a live session on it (0 with
+  upload in the last 2 h).
+- Its 4 relay routes deleted through the API; the relay box's Xray the
+  same process before and after. Block incident closed as retired.
+  Agent stopped and disabled, OFFLINE in about a minute.
+- Server row DISABLED, its routes off, agent key and mirror host
+  cleared, its reachability alert resolved: by hand, with the tool's own
+  SQL blocks (see below for why).
+- Its 2 DNS names deleted; no-such-name confirmed. It had no relay hop
+  entry anywhere (the relay box reached it directly), so nothing changed
+  on the relay box's firewall or the hop server.
+- usage_records for it kept: 69,703 rows, unchanged after its last
+  report.
+
+**After.** Relay tunnel from the relay box to each of the six remaining
+exits (REALITY, 256 KB both ways): 6 of 6 left from the exit's own
+address. Six exits and the relay box ONLINE with fresh heartbeats; no
+failed backend jobs.
+
+**The tool, first real run.** Plans, revocation check, relay route
+deletion, incident, agent stop, OFFLINE wait, DNS, hop and leftovers
+steps all did what the hand procedure does, and its guards caught the
+one thing that would have gone wrong (a default route with nowhere to
+go). What it got wrong or could not do:
+1. It takes a fresh full database dump at `retire.dump`, again
+   unconditionally at `retire.disable`, and again at `retire.keys` and
+   `retire.alerts` when the last is over 20 minutes old; every write
+   query refuses without a dump from the last 30 minutes. That breaks
+   the one-dump-per-session rule, which came from these dumps filling
+   the panel host's disk. Worked round with `--waive retire.dump` and
+   doing the three write steps by hand. It needs a way to name an
+   existing dump of the session.
+2. The DNS verify runs seconds after the delete and fails on resolver
+   caches every time; it passed on a re-run three minutes later.
+3. The revocation check counts only shared credentials; device
+   credentials are not counted (they were all removed here too).
+4. The run log records `--default-to` and `--waive` without their
+   values, the incident's UNDO line has a placeholder instead of the id,
+   the plan UNDO lines point at helpers in a RAM directory that is gone
+   after the run, and the `/dev/shm/nxf` directories it leaves on the
+   panel host, the relay box and the hop server were removed by hand.
+5. Its masked DNS lines print the first two octets of the address.
+6. A dry run cannot show the plan-guard refusal (it skips the
+   computation).
+None of these was fixed in this step.
+
+**Not proven.** That nothing on a customer's device still tries
+finland-3: the signed endpoint lists still carry its mirror (a name that
+no longer resolves) until they are re-signed with the owner's next
+server. The website's location list still names Finland. The Pro
+plan's new default (germany-3) was chosen to match Starter and Trial,
+not measured. Only REALITY was dialled over the relay routes; the other
+three relay shapes per exit were not.
