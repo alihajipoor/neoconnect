@@ -9388,3 +9388,43 @@ not changed; check under CONCURRENCY_CUT=enforce).
 
 **Lesson.** When the desktop takes an engine fix, the phones need it too.
 This one sat on mobile for a month after the journal named it.
+
+## 2026-11-12 (night) — block watch skips retired servers; finished jobs leave Redis
+
+**Merged** to main as `b41151a7`: `claude/block-watch-skip-retired`
+(87a8eb4b, merge 1e11b2b6) and `claude/sweeps-remove-finished` (97902c4a,
+merge b41151a7). No conflicts. CI on `b41151a7`: all four jobs green.
+
+**Deployed** 2026-11-13 00:01:48Z (was `8b2ca7b4`). One dump first,
+`pre-bw-sweeps-20261112T235706Z.sql.gz`. No new migration ("No pending
+migrations"). Health 200, all eight live servers ONLINE with fresh
+heartbeats, the relay box among them, 0 ERROR lines, 14 sweep schedules
+still registered (data-retention, block-watch, quota and the rest). Builder
+and image prune: 0 B to free; disk 35% before and after.
+
+**Block watch.** Before: every round's warn line named five retired
+servers as `outage` beside the one live finding. First round after the
+deploy (00:02Z) named only the live server. No incident was OPEN on a
+retired server, so nothing needed closing. Not yet seen: the next daily
+digest.
+
+**Jobs (sweeps queue; announcements held none).**
+
+| | before | +6 min |
+|---|---|---|
+| completed | 66,336 | 59,355 |
+| failed | 0 | 0 |
+| wait / active / paused | 0 / 0 / 0 | 0 / 0 / 0 |
+| delayed | 14 | 14 |
+| repeat schedules | 14 | 14 |
+| Redis keys | 66,396 | 59,417 |
+| Redis memory | 96.3 MB | 87.0 MB |
+
+The running backend removes about 1,000 old completed jobs per finished
+run, so the pile drains by itself within about an hour, to about one day
+of runs (~870). The script's dry run counted 64,478 older than a day and
+no failed jobs anywhere, so the one-time `APPLY=1` clean-up was not
+needed and was not run.
+
+**Unverified.** The daily digest line for retired servers; the end state
+of the drain (expected ~870 completed, memory well under today's).
