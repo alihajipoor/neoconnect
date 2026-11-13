@@ -21,14 +21,17 @@ import {
   DAY,
   DEFAULT_TUNING,
   FAMILIES,
+  insideFamily,
   parseTuning,
   probeFamily,
   recoveredFamilies,
   trafficFamily,
+  unknownClientFamily,
   type Assessment,
   type BlockTuning,
   type Family,
   type FamilyResult,
+  type InsideCheck,
   type NodeDial,
   type ProbeCheck,
   type TrafficCounts,
@@ -63,6 +66,9 @@ export const REOPEN_WITHIN_MS = 48 * 3_600_000;
 /** Tries at a page that reaches nobody before it is left to the digest. */
 export const MAX_PAGE_ATTEMPTS = 3;
 const PROBE_LOOKBACK_MS = 12 * 3_600_000;
+/** The inside probe keeps 30 days (inside-probe.service.ts); a box's
+ * "normally reaches it" is never read from further back than that. */
+const INSIDE_LOOKBACK_MAX_MS = 30 * 86_400_000;
 const CONTROL_TIMEOUT_MS = 5_000;
 const MAX_SNOOZE_HOURS = 7 * 24;
 /** For the incidents a message may be about. A retired (DISABLED) server
@@ -116,6 +122,7 @@ const FAMILY_WORDS: Record<Family, string> = {
   client: "networks that had failed carry again in the app reports",
   traffic: "traffic is back near usual",
   probe: "the probes connect again",
+  inside: "our boxes inside the country connect to it again",
 };
 
 /**
@@ -237,7 +244,16 @@ export class BlockWatchService {
       watched.push({ node, floor, open: openIncident, reopenable, anchor });
     }
 
-    const [dials, checks] = await Promise.all([this.loadDials(t, tuning), this.loadChecks(t)]);
+    // Which networks are in the country comes from the network table,
+    // loaded in the background after a start. Until it is, the app
+    // reports cannot be read at all -- counting them would see nobody,
+    // and "nobody" let the probe-alone rule page on a restart.
+    const networksKnown = this.identity.networksKnown();
+    const [dials, checks, inside] = await Promise.all([
+      networksKnown ? this.loadDials(t, tuning) : Promise.resolve(new Map<string, NodeDial[]>()),
+      this.loadChecks(t),
+      this.loadInside(t, watched, tuning),
+    ]);
     const traffic = await this.loadTraffic(t, watched, tuning);
     const carried = await this.loadCarriedBefore(t, watched, dials, tuning);
 
@@ -246,16 +262,19 @@ export class BlockWatchService {
       const { node } = w;
       try {
         const incident = w.open ?? w.reopenable;
-        const client = clientFamily(dials.get(node.id) ?? [], t, w.floor, carried.get(node.id) ?? new Set(), tuning, {
-          failedAsns: incident?.failedAsns ?? [],
-          orgOf: (asn) => this.identity.orgOf(asn),
-        });
+        const client = networksKnown
+          ? clientFamily(dials.get(node.id) ?? [], t, w.floor, carried.get(node.id) ?? new Set(), tuning, {
+              failedAsns: incident?.failedAsns ?? [],
+              orgOf: (asn) => this.identity.orgOf(asn),
+            })
+          : unknownClientFamily("the network table has not loaded yet");
         const trafficResult = trafficFamily(
           trafficSince(traffic.get(node.id), t, w.floor, tuning, w.anchor === null ? undefined : firstDayOf(w.anchor, t, tuning)),
           tuning,
         );
         const probe = probeFamily(checks.get(node.id) ?? [], t, w.floor, tuning);
-        const results = [client, trafficResult, probe];
+        const insideResult = insideFamily(inside, node.id, t, w.floor, tuning);
+        const results = [client, trafficResult, probe, insideResult];
 
         let outage: string | null = null;
         if (node.status !== NodeStatus.ONLINE) {
@@ -276,6 +295,7 @@ export class BlockWatchService {
           client,
           traffic: trafficResult,
           probe,
+          inside: insideResult,
           outage,
           previousSince: w.open ? sinceOf(w.open.evidenceJson) : {},
           now: t,
@@ -818,6 +838,25 @@ export class BlockWatchService {
       byNode.set(row.nodeId, list);
     }
     return byNode;
+  }
+
+  /** Every server's inside-probe rows, far enough back for each watched
+   * server's "normally reaches it": the baseline window, and for a server
+   * with an incident, that window before the incident began -- so a block
+   * that lasts never becomes what the box normally sees. */
+  private async loadInside(now: number, watched: Watched[], tuning: BlockTuning): Promise<InsideCheck[]> {
+    if (!watched.length) return [];
+    const earliest = Math.min(...watched.map((w) => Math.min(w.anchor ?? now, now))) - tuning.baselineWindow;
+    const rows = await this.prisma.insideProbeCheck.findMany({
+      where: { checkedAt: { gte: new Date(Math.max(earliest, now - INSIDE_LOOKBACK_MAX_MS)) } },
+      select: { nodeId: true, vantage: true, connectMs: true, checkedAt: true },
+    });
+    return rows.map((r) => ({
+      nodeId: r.nodeId,
+      vantage: r.vantage,
+      connected: r.connectMs !== null && r.connectMs > 0,
+      checkedAt: r.checkedAt.getTime(),
+    }));
   }
 
   /** People who sent at least a little upstream through each server, in

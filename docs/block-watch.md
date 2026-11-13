@@ -27,6 +27,25 @@ Only what the backend already records, on the sweep cadence:
 - **Traffic** -- how many people sent data upstream through the server
   lately, against the same hours on earlier days.
 - **Probes** -- the reachability checks (`node_reachability_checks`).
+- **Our own boxes inside** -- the inside probe (`inside_probe_checks`;
+  see `modules/inside-probe`). Only whether a box opened a
+  TCP connection counts, never whether data then moved: one box connects
+  and moves nothing to several healthy servers as its normal state. A
+  round counts for a box only if that box reached some other server in
+  it (a box that reaches nothing is the box's problem), and a box counts
+  for a server only if it normally connects to it (a server a box never
+  reached says nothing from that box). It fires when every box that
+  normally reaches the server has lost it for several rounds in a row
+  (`insideRounds`). With the outside probe failing too, that is two
+  signals: likely blocked within a couple of hours instead of the day it
+  took on 2026-11-12. On its own it is a suspicion.
+
+The app reports are read only once the network table (which says what
+networks are in the country) has loaded. Before that -- the first
+minutes after a backend start -- that signal reads "unknown", which is
+neither evidence nor "too little data": on 2026-11-13 a round two
+seconds before the table loaded saw no customers at all, called the
+residential data thin, and paged.
 
 A server whose agent is offline, whose camouflage destination is down, or
 whose port does not answer from the panel host either is an **outage**,
@@ -47,6 +66,12 @@ about it.
   several networks for a while, while the server's own traffic is not as
   usual; or probes alone for hours with too little residential data to
   contradict them (the page says so).
+
+An incident keeps the strongest verdict it reached, and its evidence has
+the latest reading. The panel's badge and the reminder show the latest
+reading, with "was likely blocked" beside it when the two differ, so an
+incident that fell back to a suspicion is not shown as a likely block.
+A page goes out only while the latest reading is likely.
 
 ## How an incident ends
 

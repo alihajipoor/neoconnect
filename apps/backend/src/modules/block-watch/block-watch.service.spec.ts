@@ -63,6 +63,8 @@ interface World {
   hourly?: [string, string, number, number][];
   incidents: Row[];
   alerts: Row[];
+  /** inside_probe_checks rows. */
+  inside?: Row[];
 }
 
 /** latestDialsSql, as Postgres answers it: per customer, network and
@@ -197,7 +199,9 @@ function fakePrisma(world: World) {
           .sort((a, b) => b.checkedAt.getTime() - a.checkedAt.getTime()),
       ),
     },
-    insideProbeCheck: { findMany: jest.fn(async () => []) },
+    insideProbeCheck: {
+      findMany: jest.fn(async ({ where }: Row) => (world.inside ?? []).filter((r) => matches(r, where)).map(withNode)),
+    },
     nodeReachabilityAlert: {
       findMany: jest.fn(async ({ where }: Row) => world.alerts.filter((a) => matches(a, where)).map(withNode)),
     },
@@ -206,7 +210,7 @@ function fakePrisma(world: World) {
   };
 }
 
-function build(mode: string, world: Partial<World> = {}, opts: { tuning?: string } = {}) {
+function build(mode: string, world: Partial<World> = {}, opts: { tuning?: string; networksKnown?: boolean } = {}) {
   const w: World = {
     nodes: [{ id: "n1", name: "germany-1", status: "ONLINE", publicIp: "192.0.2.10", realityDestReachable: true }],
     attempts: [],
@@ -229,6 +233,7 @@ function build(mode: string, world: Partial<World> = {}, opts: { tuning?: string
   const identity = {
     countryOfAsn: jest.fn((asn: number) => (asn === FOREIGN_ASN ? "DE" : "IR")),
     orgOf: jest.fn(() => "Example Carrier"),
+    networksKnown: jest.fn(() => opts.networksKnown ?? true),
   };
   const pages: { subject: string; text: string }[] = [];
   let delivered = true;
@@ -740,6 +745,87 @@ describe("BlockWatchService", () => {
     await service.runCycle(new Date(T0 + 130 * MIN));
     expect(world.incidents[0].evidenceJson.current).toBe("SUSPECT");
     expect(alerts()).toHaveLength(0);
+  });
+
+  describe("our own boxes inside the country", () => {
+    const nodes = [
+      { id: "n1", name: "finland-9", status: "ONLINE", publicIp: "192.0.2.10", realityDestReachable: true },
+      { id: "n2", name: "germany-9", status: "ONLINE", publicIp: "192.0.2.20", realityDestReachable: true },
+    ];
+    /** Two boxes, every 30 minutes for a day; from `lostFrom` on, neither
+     * connects to n1 while both still reach n2. */
+    function insideRows(now: number, lostFrom: number): Row[] {
+      const rows: Row[] = [];
+      for (let at = now - DAY; at <= now - 5 * MIN; at += 30 * MIN) {
+        for (const vantage of ["box-a", "box-b"]) {
+          rows.push({ nodeId: "n1", vantage, connectMs: at >= lostFrom ? null : 90, checkedAt: new Date(at) });
+          rows.push({ nodeId: "n2", vantage, connectMs: 85, checkedAt: new Date(at) });
+        }
+      }
+      return rows;
+    }
+
+    it("pages an address-level block within about two hours, and says the boxes raised it", async () => {
+      const blockAt = T0 - 2 * HOUR;
+      const { service, world, alerts } = build("notify", {
+        nodes,
+        inside: insideRows(T0, blockAt),
+        checks: unreachableChecks("n1", T0),
+      });
+      await service.runCycle(new Date(T0));
+      expect(world.incidents).toHaveLength(1);
+      expect(world.incidents[0].evidenceJson.current).toBe("LIKELY_BLOCKED");
+      expect(world.incidents[0].firedFamilies).toEqual(expect.arrayContaining(["probe", "inside"]));
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0].text).toContain("Raised by our own boxes inside the country");
+      expect(alerts()[0].text).not.toContain("192.0.2.");
+    });
+
+    it("is only a suspicion while the outside check still connects", async () => {
+      const { service, world, alerts } = build("notify", {
+        nodes,
+        inside: insideRows(T0, T0 - 3 * HOUR),
+        checks: reachableChecks("n1", T0),
+      });
+      await service.runCycle(new Date(T0));
+      expect(world.incidents[0].evidenceJson.current).toBe("SUSPECT");
+      expect(alerts()).toHaveLength(0);
+    });
+  });
+
+  it("does not read the app reports before the network table has loaded, and so does not page a restart", async () => {
+    // The outside check has failed for a day; nobody is in the reports.
+    // With the table loaded, that is "probe alone, residential data thin".
+    const checks = Array.from({ length: 40 }, (_, i) => ({
+      ...unreachableChecks("n1", T0, 1)[0],
+      checkedAt: new Date(T0 - i * 30 * MIN - MIN),
+    }));
+    const restarted = build("notify", { checks }, { networksKnown: false });
+    await restarted.service.runCycle(new Date(T0));
+    const incident = restarted.world.incidents[0];
+    expect(incident.evidenceJson.current).toBe("SUSPECT");
+    expect(incident.evidenceJson.thinResidential).toBe(false);
+    const client = incident.evidenceJson.families.find((f: Row) => f.family === "client");
+    expect(client).toMatchObject({ unknown: true, thin: false, firing: false });
+    expect(client.summary).toContain("network table has not loaded");
+    expect(restarted.prisma.clientAttempt.groupBy).not.toHaveBeenCalled();
+    expect(restarted.alerts()).toHaveLength(0);
+  });
+
+  it("says the current reading in a reminder for an incident that fell back to a suspicion", async () => {
+    const { service, world, alerts } = build("notify", { ...blocked(T0), checks: unreachableChecks("n1", T0) });
+    await service.runCycle(new Date(T0));
+    expect(alerts()).toHaveLength(1);
+    // A day on only one network still fails: suspect now, likely before.
+    const at = T0 + 25 * HOUR;
+    world.attempts = reports(ASN_A, 4, false, at - 20 * MIN, "now");
+    world.checks = [];
+    await service.runCycle(new Date(at));
+    expect(world.incidents[0].verdict).toBe("LIKELY_BLOCKED");
+    expect(world.incidents[0].evidenceJson.current).toBe("SUSPECT");
+    const reminder = alerts()[1];
+    expect(reminder.subject).toBe("[Neoxify] Reminder: germany-1 was likely blocked from IR; right now suspect (it was likely blocked earlier)");
+    expect(reminder.text).toContain("Right now it reads suspect");
   });
 
   it("takes Replaced only once the server has a new address, and then starts over", async () => {

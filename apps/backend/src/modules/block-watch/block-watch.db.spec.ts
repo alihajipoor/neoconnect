@@ -122,7 +122,7 @@ describeDb("BlockWatchService against Postgres", () => {
     });
     ids.route = route.id;
 
-    const identity = { countryOfAsn: () => "IR", orgOf: () => "Example Carrier" };
+    const identity = { countryOfAsn: () => "IR", orgOf: () => "Example Carrier", networksKnown: () => true };
     const pager = {
       page: async (p: { subject: string }) => {
         pages.push(p);
