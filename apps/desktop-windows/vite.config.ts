@@ -3,7 +3,6 @@ import react from "@vitejs/plugin-react";
 // Layouts for a Windows web component without container queries
 // (Chromium 99-104): see scripts/old-engine-css.mjs.
 import { oldEngineCss } from "./scripts/old-engine-css.mjs";
-import { HAS_COSMETIC, HAS_FALLBACKS } from "./src/lib/old-engine-has";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -42,7 +41,7 @@ export default defineConfig(async () => ({
   plugins: [
     react(),
     ...(previewMocks ? [previewMockPlugin()] : []),
-    oldEngineCss({ has: HAS_FALLBACKS, cosmetic: HAS_COSMETIC }),
+    oldEngineCss(),
   ],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

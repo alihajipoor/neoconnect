@@ -52,6 +52,10 @@
 // fails old-engine-css.test.ts.
 
 import postcss from "postcss";
+// The `:has()` table is the app's own, shared with the code that keeps the
+// stand-in attributes (imported from here, not from vite.config.ts, so the
+// config's TypeScript project does not take in a file of the app's).
+import { HAS_COSMETIC, HAS_FALLBACKS } from "../src/lib/old-engine-has.ts";
 
 /** The condition the old-engine rules are kept behind. */
 export const NO_CONTAINER = "not (container-type:size)";
@@ -261,8 +265,8 @@ function tight(node) {
  * @returns {{ css: string, problems: string[], twins: number, fallbacks: number, hasCopies: number }}
  */
 export function transformCss(css, options = {}) {
-  const fallbacks = options.has ?? [];
-  const cosmetic = (options.cosmetic ?? []).map(squash);
+  const fallbacks = options.has ?? HAS_FALLBACKS;
+  const cosmetic = (options.cosmetic ?? HAS_COSMETIC).map(squash);
   const inner = options.inner ?? INNER;
   const problems = [];
   const root = postcss.parse(css);
