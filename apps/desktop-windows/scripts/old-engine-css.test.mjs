@@ -60,6 +60,8 @@ describe("the shipped stylesheet", () => {
     expect(again.problems).toEqual([]);
     // So the step is wired into vite.config.ts, and ran last.
     expect(shipped).toBe(again.css);
+    // The two-card column break found its rule in the real build.
+    expect(shipped).toContain(".nx-cols>:first-child:nth-last-child(2){-webkit-column-break-after:always;break-after:column}");
   });
 
   it("is the stylesheet from before for any engine with container queries", () => {
@@ -190,6 +192,13 @@ describe("transformCss", () => {
     const { css } = transformCss(".h{min-height:3lh;line-height:1.8}.s{min-height:calc(2lh - 4px)}", {});
     expect(css).toContain("@supports not (width:1lh){.h{min-height:5.4em;line-height:1.8}}");
     expect(css).toContain("@supports not (width:1lh){.s{min-height:calc(2.9em - 4px)}}");
+  });
+
+  it("breaks a column after the first of two cards, in a wide window", () => {
+    const { css } = transformCss("@layer c{.nx-cols{columns:2 340px}.nx-cols>*{break-inside:avoid}}", {});
+    expect(css).toBe(
+      "@layer c{.nx-cols{columns:2 340px}.nx-cols>*{break-inside:avoid}@supports not (container-type:size){@media (min-width:940px){.nx-cols>:first-child:nth-last-child(2){-webkit-column-break-after:always;break-after:column}}}}",
+    );
   });
 
   it("writes cqmin and cqmax as min() and max() of both", () => {

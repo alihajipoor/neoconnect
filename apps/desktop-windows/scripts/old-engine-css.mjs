@@ -417,6 +417,25 @@ export function transformCss(css, options = {}) {
     twins++;
   }
 
+  // 4. Two cards in `.nx-cols` (Support, and any page with two): a forced
+  // column break after the first. Chromium before 102 lays out columns the
+  // old way, and with `break-inside: avoid` and only two cards it put both
+  // in the first column and a sliver of the second card's edge at the top
+  // of the second (Support on Chromium 100, in the app, 2026-11-13). Seven
+  // cards balance correctly there, and a new engine always puts two
+  // unbreakable cards one per column, so the break is the same layout.
+  // From a window of 940px only: the page's two columns of 340px start at
+  // about 915px (sidebar 150px, a 17px scrollbar, 3vw sides), and a forced
+  // break in a single column would push the second card off to the side.
+  root.walkRules((rule) => {
+    if (inside(rule, isOurs) || inside(rule, isContainer) || squash(rule.selector) !== ".nx-cols>*") return;
+    const media = postcss.atRule({ name: "media", params: "(min-width:940px)" });
+    media.append(postcss.rule({ selector: ".nx-cols>:first-child:nth-last-child(2)" }).append({ prop: "-webkit-column-break-after", value: "always" }, { prop: "break-after", value: "column" }));
+    const wrap = postcss.atRule({ name: "supports", params: NO_CONTAINER });
+    wrap.append(media);
+    rule.after(tight(wrap));
+  });
+
   // Containers declared that no model covers: their cq units would be read
   // against the window.
   root.walkDecls(/^container(-name)?$/, (d) => {
