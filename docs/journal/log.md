@@ -9597,3 +9597,50 @@ whether the installer should require a minimum WebView2 version
 install), and whether it should carry or fetch the runtime differently
 (`webviewInstallMode`, today the default download bootstrapper, which
 needs Microsoft's servers reachable).
+
+## 2026-11-13 — iPhone build 20: the owner's test, merged to main, outside testers
+
+**The owner's test.** He ran TestFlight 1.0.2 (20) (mobile 0.2.41) and
+reported it "seems to be ok". The reports from iOS 0.2.41 since it went
+on TestFlight (00:59Z), read at 03:53Z: 2 rows, 1 account, 1 address,
+both CONNECT SUCCESS on Shadowsocks with the same occurredAt (03:45:37Z),
+arriving 11 s apart, so most likely one connect reported twice. One rung,
+carried=true, 13235 kbps down / 1025 kbps up. No drop, no reconnect, no
+drop or preflight reason text, no SESSION row, so no memory peak either
+(a peak only travels with a drop reason). The same account on 0.2.39 the
+day before dropped twice within about 3 minutes of connecting. That is
+one connect, about 8 minutes old at the check, with nothing on how long
+it lasted: encouraging, not proof.
+
+**Android compile proof before the merge.** `debug-android.yml` on
+`claude/phone-engine-fix` (74197e64), aarch64, run `43361993765`: green.
+It builds the engine with the same `scripts/build-xray-aar.sh` as
+`release-android.yml` and produced the release-variant APK (throwaway
+key, not publishable).
+
+**Merged** to main as `51c28959`. One conflict, this log (both sides
+appended entries), resolved by keeping both in date order. CI on
+`51c28959`: `ci.yml` green on all four jobs; `ci-ios.yml` builds for the
+simulator only and says nothing about a tunnel.
+
+**Outside testers.** Build 20's What to Test replaced (the old text named
+protocols) with: "This build fixes the VPN disconnecting by itself.
+Connect, use it normally, and run a speed test including the upload
+part. If it ever drops, leave it for a moment and see whether it
+reconnects by itself." Added to external group "Neoxify" and submitted
+for Beta App Review: WAITING_FOR_REVIEW (submitted 04:05Z). Internal
+stays IN_BETA_TESTING. No App Store version was touched by this step
+(build 20 is attached to version 1.0.2, staged separately).
+
+**App Store submission pending a purchase proof.** The standing rule
+holds: no App Review submission without a TestFlight sandbox purchase on
+this exact build and an APPLE_IAP CONFIRMED row on the server. At 03:49Z
+there was only one such row ever (2026-10-27), so build 20 has none yet.
+
+**Not proven.**
+- The new engine over a long session, a heavy upload, or on any phone
+  but the owner's; the memory ceiling on a real iPhone.
+- Android on a device: compiled only, nothing has run. No Android
+  release has been cut from this.
+- The new engine and the XUDP change against censored networks beyond
+  the owner's own line, and against the live nodes under load.
