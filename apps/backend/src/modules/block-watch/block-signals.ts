@@ -41,7 +41,7 @@ export const FAMILY_LABELS: Record<Family, string> = {
  * it still reaches other servers, before that box's evidence counts. Four
  * rounds span 1.5 hours from the first lost one, so with the block watch's
  * own 30-minute cadence an address-level block is told in 1.5 to 2 hours
- * of the first lost round -- against the 22 hours finland-3 waited on
+ * of the first lost round -- against the 22 hours a blocked server waited on
  * 2026-11-12. Fewer would page on a routing blip of an hour; the boxes'
  * connects to healthy servers fail far less often than that. */
 export const INSIDE_LOST_ROUNDS = 4;
