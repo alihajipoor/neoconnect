@@ -464,6 +464,64 @@ is active while its usage shows bytes.
 Switch to `enforce` only after a week of shadow logs shows no "would
 hold" against a device that holds a slot, and after the rig tests below.
 
+### Should fix: a held device on a shared WireGuard fallback
+
+When a server's WireGuard pool is down to the addresses kept for shared
+credentials, a device gets no WireGuard credential of its own there and
+is handed the subscription's shared one instead (`deviceView`). A hold
+then has two gaps on that route, read from the code (2026-11-13), not
+seen on a node:
+
+- Holding the device (`hold`) switches off only rows carrying its own
+  `sessionId`. Its shared WireGuard row stays on, so the held device
+  keeps a working WireGuard route there. Its traffic on it is the
+  shared pseudo-device's, so a later reading can hold that too -- but
+- if a slot holder named that same shared row in its claim, the row is
+  credited to the holder: its traffic counts as the holder's, and
+  holding the shared pseudo-device skips it. The held device then keeps
+  it for as long as the holder does.
+
+There is no small fix inside the backstop: one WireGuard key cannot be
+switched off for one device and on for another. The fix is for the
+device to have its own WireGuard row, which is the pool's problem --
+reclaiming addresses (below), or a larger pool. Today it reaches almost
+nobody (WireGuard on the full server carried no customer traffic in the
+24 hours read), and two devices on one key also knock each other off.
+
+## WireGuard addresses of expired subscriptions
+
+Every WireGuard credential holds one address of its server's /24 (253
+usable), and a device credential is refused once the pool is down to the
+quarter kept for shared credentials. An EXPIRED subscription's rows are
+only switched off, so a renewal can switch the same ones back on, and so
+every lapsed trial held an address on every WireGuard server for ever:
+on 2026-11-13 the fullest server was at the cut-off.
+
+`WG_EXPIRED_RELEASE` (in the hourly device-credentials sweep):
+
+| Value | Effect |
+|---|---|
+| blank / `off` | Nothing (default). |
+| `dry` | Logs how many rows per server it would release; deletes nothing. |
+| `on` | Deletes them, and sends each node `DELETE_USER` as any deletion does. |
+
+What it takes: the WireGuard rows, shared and device, of subscriptions
+`EXPIRED` more than `WG_EXPIRED_RELEASE_DAYS` (default 7) ago with
+auto-renew off. Never `SUSPENDED` (a data cap, possibly paying), never
+`ACTIVE`, never another protocol's rows. At most 200 rows a run; a second
+run finds nothing. Each delete re-checks the subscription in the same
+statement, so a renewal at the same moment either keeps the row (switched
+back on) or finds it gone and provisions a fresh one.
+
+A renewal after a release: `renewSubscription` switches the remaining
+rows back on and `provisionAll` creates the missing WireGuard credential
+-- a new key and address. The customer's app must fetch its credentials
+once before WireGuard works again; every other protocol keeps the same
+credential. Proven against Postgres (`expired-wireguard-release.db.spec.ts`,
+CI); not seen on a real node or device.
+
+Run `dry` first and compare its counts with the database before `on`.
+
 ## What is unverified
 
 Everything that is not a unit test. Proven: backend unit tests of the
