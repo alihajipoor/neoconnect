@@ -28,24 +28,36 @@ Only what the backend already records, on the sweep cadence:
   lately, against the same hours on earlier days.
 - **Probes** -- the reachability checks (`node_reachability_checks`).
 - **Our own boxes inside** -- the inside probe (`inside_probe_checks`;
-  see `modules/inside-probe`). Only whether a box opened a
-  TCP connection counts, never whether data then moved: one box connects
-  and moves nothing to several healthy servers as its normal state. A
-  round counts for a box only if that box reached some other server in
-  it (a box that reaches nothing is the box's problem), and a box counts
-  for a server only if it normally connects to it (a server a box never
-  reached says nothing from that box). It fires when every box that
-  normally reaches the server has lost it for several rounds in a row
-  (`insideRounds`). With the outside probe failing too, that is two
-  signals: likely blocked within a couple of hours instead of the day it
-  took on 2026-11-12. On its own it is a suspicion.
+  see `modules/inside-probe`). Losing the TCP connection is the
+  evidence. A round counts for a box only if that box reached at least
+  half of the other servers it usually reaches in a round: a box that
+  reaches nothing, or far less than usual, is its own network failing,
+  and counting it would fire for every server at once. A box counts
+  against a server only if it normally connects to it. It fires when a
+  box that normally reaches the server has lost it for several rounds in
+  a row (`insideRounds`) and no box shows it working. A box shows it
+  working only by connecting and moving data in its latest round, or by
+  connecting where it normally moves data. A bare connect is no proof:
+  one box connects and moves nothing to several healthy servers as its
+  normal state, and kept doing exactly that through the address blocks
+  of 2026-10-28 and 2026-11-07, while the other box lost the connection.
+  Replayed over the inside-probe data kept on 2026-11-13 (from
+  2026-10-27), it fires for those two and for 2026-11-12, each at 04:01Z,
+  two hours after the first lost round, and for nothing else. With the
+  outside probe failing too, that is two signals: likely blocked within a
+  couple of hours instead of the day it took on 2026-11-12. On its own it
+  is a suspicion. Not covered: a block of most of the fleet at once looks
+  the same as the boxes' own networks failing, and is skipped.
 
 The app reports are read only once the network table (which says what
 networks are in the country) has loaded. Before that -- the first
 minutes after a backend start -- that signal reads "unknown", which is
 neither evidence nor "too little data": on 2026-11-13 a round two
 seconds before the table loaded saw no customers at all, called the
-residential data thin, and paged.
+residential data thin, and paged. An unknown signal keeps the time it
+started firing, so a restart does not start its one-hour wait again. A
+table that has not loaded is tried again every 15 minutes until one
+does, not only on the daily refresh.
 
 A server whose agent is offline, whose camouflage destination is down, or
 whose port does not answer from the panel host either is an **outage**,
@@ -106,7 +118,11 @@ for new pages. A page counts as sent only when it reached somebody;
 otherwise it is tried again a few times, and then listed in the digest.
 While an incident is open for a server, the reachability monitor's own
 alert for it is held (the incident carries the same probe evidence) and
-listed in the digest instead.
+listed in the digest instead. That includes an incident our boxes inside
+opened alone, as a suspicion: such an incident now opens earlier than
+the outside probe alone would have opened one, and from then on that
+server's reachability outage email goes to the digest, not straight to
+the owner.
 
 `BLOCK_WATCH_TUNING` -- the thresholds, as `name=value` pairs separated
 by commas (the names are in `parseTuning`, `block-signals.ts`). Blank is

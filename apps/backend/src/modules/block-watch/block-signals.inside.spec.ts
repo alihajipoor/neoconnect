@@ -14,23 +14,25 @@ const NOW = Date.parse("2026-10-19T12:00:00Z");
 
 describe("insideFamily", () => {
   // Rounds every 30 minutes, as the panel host's cron runs them. Two boxes
-  // and three servers: "blocked" is the one under watch, "other-a" and
-  // "other-b" stay reachable. Box "relay" moves data; box "signin"
-  // connects and moves nothing to healthy servers, which is its normal
-  // state -- only the connect is an input at all.
+  // and six servers: "blocked" is the one under watch, "other-a" to
+  // "other-e" stay reachable. Box "relay" moves data wherever it connects;
+  // box "signin" connects and moves nothing, which is its normal state for
+  // several healthy servers (and was, through two real blocks).
   const ROUND = 30 * MIN;
-  const SERVERS = ["blocked", "other-a", "other-b"];
+  const OTHERS = ["other-a", "other-b", "other-c", "other-d", "other-e"];
+  const SERVERS = ["blocked", ...OTHERS];
   type RoundState = Partial<Record<string, Partial<Record<string, boolean>>>>;
 
   /** `rounds` oldest first, the last just before NOW. A server a box has no
    * entry for connects. */
-  function series(rounds: RoundState[], boxes = ["relay", "signin"]): InsideCheck[] {
+  function series(rounds: RoundState[], boxes = ["relay", "signin"], movers = ["relay"]): InsideCheck[] {
     const out: InsideCheck[] = [];
     rounds.forEach((state, i) => {
       const at = NOW - (rounds.length - 1 - i) * ROUND - 5 * MIN;
       for (const box of boxes) {
         for (const nodeId of SERVERS) {
-          out.push({ nodeId, vantage: box, connected: state[box]?.[nodeId] ?? true, checkedAt: at });
+          const connected = state[box]?.[nodeId] ?? true;
+          out.push({ nodeId, vantage: box, connected, moved: connected && movers.includes(box), checkedAt: at });
         }
       }
     });
@@ -40,7 +42,7 @@ describe("insideFamily", () => {
   const lost = (n: number, boxes = ["relay", "signin"]): RoundState[] =>
     Array.from({ length: n }, () => Object.fromEntries(boxes.map((b) => [b, { blocked: false }])));
   const boxDown = (n: number, box: string): RoundState[] =>
-    Array.from({ length: n }, () => ({ [box]: { blocked: false, "other-a": false, "other-b": false } }));
+    Array.from({ length: n }, () => ({ [box]: Object.fromEntries(SERVERS.map((s) => [s, false])) }));
 
   it("is quiet and healthy while both boxes connect", () => {
     const f = insideFamily(series(healthy(48)), "blocked", NOW, 0);
@@ -55,16 +57,62 @@ describe("insideFamily", () => {
     const f = insideFamily(series([...healthy(48), ...lost(INSIDE_LOST_ROUNDS)]), "blocked", NOW, 0);
     expect(f.firing).toBe(true);
     expect(f.summary).toContain("relay and signin");
-    expect(f.summary).toContain("still reached other servers");
+    expect(f.summary).toContain("still reached most of the other servers");
     // Onset is the first lost round: 1.5 h before the fourth.
     expect(f.onset).toBe(NOW - (INSIDE_LOST_ROUNDS - 1) * ROUND - 5 * MIN);
     expect(f.summary).not.toMatch(/\d+\.\d+\.\d+\.\d+/);
   });
 
-  it("does not fire while one box that normally reaches it still connects", () => {
-    const f = insideFamily(series([...healthy(48), ...lost(8, ["relay"])]), "blocked", NOW, 0);
+  it("does not fire while a box that moves data to it still connects", () => {
+    const f = insideFamily(series([...healthy(48), ...lost(8, ["signin"])]), "blocked", NOW, 0);
     expect(f.firing).toBe(false);
     expect(f.healthy).toBe(false);
+    // Nor on a round where that box connected but, for once, moved nothing:
+    // it normally moves data, so its connect still counts.
+    const once = series([...healthy(48), ...lost(8, ["signin"])]).map((c) =>
+      c.vantage === "relay" && c.nodeId === "blocked" && c.checkedAt === NOW - 5 * MIN ? { ...c, moved: false } : c,
+    );
+    expect(insideFamily(once, "blocked", NOW, 0).firing).toBe(false);
+  });
+
+  it("fires when the box that moves data loses it while the other only connects with nothing moving (10-28, 11-07)", () => {
+    // The shape of both missed blocks: one box lost the connect for hours
+    // while the sign-in box kept connecting with 0 bytes, its normal.
+    const f = insideFamily(series([...healthy(48), ...lost(INSIDE_LOST_ROUNDS, ["relay"])]), "blocked", NOW, 0);
+    expect(f.firing).toBe(true);
+    expect(f.summary).toContain("relay could not open a connection");
+    expect(f.summary).toContain("signin still connects but moves no data to it");
+    expect(insideFamily(series([...healthy(48), ...lost(INSIDE_LOST_ROUNDS - 1, ["relay"])]), "blocked", NOW, 0).firing).toBe(
+      false,
+    );
+    // A box that connects AND moves data in its latest round is proof,
+    // even one that did not move data before.
+    const signinMovesNow = series([...healthy(48), ...lost(INSIDE_LOST_ROUNDS, ["relay"])]).map((c) =>
+      c.vantage === "signin" && c.nodeId === "blocked" && c.checkedAt === NOW - 5 * MIN ? { ...c, moved: true } : c,
+    );
+    expect(insideFamily(signinMovesNow, "blocked", NOW, 0).firing).toBe(false);
+  });
+
+  it("does not fire for the fleet when a box's own network partly fails", () => {
+    // From some round on, relay reaches only one server and signin nothing.
+    // Every server then looks lost from both boxes; none of it is a block.
+    const partial = (n: number): RoundState[] =>
+      Array.from({ length: n }, () => ({
+        relay: Object.fromEntries(SERVERS.filter((s) => s !== "other-a").map((s) => [s, false])),
+        signin: Object.fromEntries(SERVERS.map((s) => [s, false])),
+      }));
+    const rows = series([...healthy(48), ...partial(12)]);
+    for (const server of SERVERS.filter((s) => s !== "other-a")) {
+      expect(insideFamily(rows, server, NOW, 0).firing).toBe(false);
+    }
+    // Both boxes reaching only one server each: the same.
+    const one = (n: number): RoundState[] =>
+      Array.from({ length: n }, () => ({
+        relay: Object.fromEntries(SERVERS.filter((s) => s !== "other-a").map((s) => [s, false])),
+        signin: Object.fromEntries(SERVERS.filter((s) => s !== "other-b").map((s) => [s, false])),
+      }));
+    const both = series([...healthy(48), ...one(12)]);
+    for (const server of SERVERS) expect(insideFamily(both, server, NOW, 0).firing).toBe(false);
   });
 
   it("does not fire on a box that reaches nothing: that is the box, not a block", () => {
@@ -167,5 +215,30 @@ describe("unknownClientFamily", () => {
     });
     expect(a.thinResidential).toBe(false);
     expect(a.verdict).toBe("SUSPECT");
+  });
+});
+
+describe("assess keeps a family's start through a reading it could not make", () => {
+  it("carries the app reports' since over a restart, so the sustain timer does not start again", () => {
+    const quiet = { firing: false, thin: true, healthy: false, onset: null, summary: "", networks: [] };
+    const a = assess({
+      client: unknownClientFamily("the network table has not loaded yet"),
+      traffic: { family: "traffic", ...quiet },
+      probe: { family: "probe", ...quiet, firing: true, thin: false, onset: NOW - HOUR },
+      outage: null,
+      previousSince: { client: NOW - 50 * MIN, probe: NOW - HOUR },
+      now: NOW,
+    });
+    expect(a.since.client).toBe(NOW - 50 * MIN);
+    // A family that was read and is quiet loses it, as before.
+    const b = assess({
+      client: { family: "client", ...quiet, thin: false },
+      traffic: { family: "traffic", ...quiet },
+      probe: { family: "probe", ...quiet, firing: true, thin: false, onset: NOW - HOUR },
+      outage: null,
+      previousSince: { client: NOW - 50 * MIN, probe: NOW - HOUR },
+      now: NOW,
+    });
+    expect(b.since.client).toBeUndefined();
   });
 });

@@ -31,6 +31,7 @@ function world(subs: Sub[], rows: Row[]) {
   const matches = (row: Row, where: Record<string, any>) => {
     if (where.id !== undefined && row.id !== where.id) return false;
     if (where.protocol !== undefined && row.protocol !== where.protocol) return false;
+    if (where.node?.status?.not !== undefined && nodeStatus(row.nodeId) === where.node.status.not) return false;
     const s = where.subscription;
     if (s) {
       const sub = subOf(row.subscriptionId);
@@ -40,6 +41,7 @@ function world(subs: Sub[], rows: Row[]) {
     }
     return true;
   };
+  const nodeStatus = (id: string) => (id === "node-retired" ? "DISABLED" : "ONLINE");
   const nodeName = (id: string) => ({ "node-a": "alpha-1", "node-b": "beta-1" })[id] ?? id;
   const prisma = {
     protocolUser: {
@@ -178,6 +180,14 @@ describe("ProtocolUsersService.releaseExpiredWireGuard", () => {
     });
     expect(await service.releaseExpiredWireGuard(NOW)).toMatchObject({ matched: 2, released: 0 });
     expect(rows).toHaveLength(8);
+    expect(commands).toHaveLength(0);
+  });
+
+  it("leaves rows on a retired server alone: its command queue is never read", async () => {
+    process.env.WG_EXPIRED_RELEASE = "on";
+    const { service, rows, commands } = world([sub("lapsed", "EXPIRED", 30)], [row("w-old", "lapsed", "WIREGUARD", "node-retired")]);
+    expect(await service.releaseExpiredWireGuard(NOW)).toMatchObject({ matched: 0, released: 0 });
+    expect(rows).toHaveLength(1);
     expect(commands).toHaveLength(0);
   });
 

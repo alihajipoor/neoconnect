@@ -519,40 +519,63 @@ export interface InsideCheck {
   nodeId: string;
   /** The box ("ir2", "signin"): each is its own series. */
   vantage: string;
-  /** Whether a TCP connection opened (the probe's connectMs). Only this is
-   * evidence. Whether data then moved is not: one box connects and moves
-   * nothing to several healthy servers as its normal state. */
+  /** Whether a TCP connection opened (the probe's connectMs). Losing it is
+   * the evidence of a block. */
   connected: boolean;
+  /** Whether any data then moved (down or up bytes above zero). Not
+   * evidence of a block on its own -- one box connects and moves nothing
+   * to several healthy servers as its normal state -- but it is what makes
+   * a box's connection count AGAINST a block: a bare connect from a box
+   * that never moves data to the server is what that box saw both before
+   * and during the blocks of 2026-10-28 and 2026-11-07. */
+  moved: boolean;
   /** The round's time; every row of one round carries the same one (ms). */
   checkedAt: number;
 }
+
+/** A box's round counts only when it connected to at least this share of
+ * the other servers it usually connects to in a round (its median), and
+ * to at least one. A box whose own network is partly failing, reaching one
+ * server where it usually reaches eight, says nothing about the other
+ * seven: counted, it would fire for each of them at once. */
+export const INSIDE_ALIVE_SHARE = 0.5;
 
 interface BoxReading {
   vantage: string;
   /** Normally connects to this server. */
   qualified: boolean;
+  /** Normally moves data to this server. */
+  mover: boolean;
   /** Latest alive rounds in a row with no connection to it. */
   streak: number;
   /** Connected in its latest alive round. */
   connectedNow: boolean;
+  /** Data moved in its latest alive round. */
+  movedNow: boolean;
   /** The first round of the streak (ms). */
   streakStart: number | null;
 }
 
 /** Our own boxes inside the country, read for one server.
  *
- * A round counts for a box only when that box opened a connection to at
- * least one OTHER server in it: a box that reaches nothing is a box or
- * network problem, not a block, and its round is skipped, never counted
- * either way. Each box's own rounds are then read newest first: how many
- * in a row had no connection to this server (the streak), and, before
- * that, whether it normally connected at all (INSIDE_BASELINE_*). A box
- * that never reached the server gives no evidence about it.
+ * A round counts for a box only when that box connected to most of the
+ * OTHER servers it usually reaches in a round (INSIDE_ALIVE_SHARE): a box
+ * that reaches nothing, or far less than usual, is a box or network
+ * problem, not a block, and its round is skipped, never counted either
+ * way. Each box's own rounds are then read newest first: how many in a
+ * row had no connection to this server (the streak), and, before that,
+ * whether it normally connected at all and whether it normally moved data
+ * (INSIDE_BASELINE_*). A box that never reached the server gives no
+ * evidence of a block.
  *
- * Fires when every box that normally reaches the server and has a fresh
- * round has lost it for `insideRounds` rounds in a row. Healthy when a
- * box connects again and none that normally reaches it is losing it.
- * `checks` is every server's rows (the other servers are how a box is
+ * Fires when at least one box that normally reaches the server has lost
+ * it for `insideRounds` rounds in a row and no box shows it working. A box
+ * shows it working only by connecting in its latest round AND either
+ * moving data in it or normally moving data to it: a bare connect from a
+ * box that never moves data to the server is no proof (the sign-in box
+ * kept such connects through the real blocks of 10-28 and 11-07). Healthy
+ * when a box connects again and none that normally reaches it is losing
+ * it. `checks` is every server's rows (the other servers are how a box is
  * known to be alive), from `floor` on. */
 export function insideFamily(
   checks: InsideCheck[],
@@ -561,22 +584,26 @@ export function insideFamily(
   floor: number,
   tuning: BlockTuning = DEFAULT_TUNING,
 ): FamilyResult {
-  type Round = { self: boolean | null; others: boolean };
+  type Round = { self: boolean | null; moved: boolean; others: number };
   const byBox = new Map<string, Map<number, Round>>();
   for (const c of checks) {
     if (c.checkedAt < floor || c.checkedAt > now) continue;
     let rounds = byBox.get(c.vantage);
     if (!rounds) byBox.set(c.vantage, (rounds = new Map<number, Round>()));
-    const round = rounds.get(c.checkedAt) ?? { self: null, others: false };
-    if (c.nodeId === nodeId) round.self = c.connected;
-    else if (c.connected) round.others = true;
+    const round = rounds.get(c.checkedAt) ?? { self: null, moved: false, others: 0 };
+    if (c.nodeId === nodeId) {
+      round.self = c.connected;
+      round.moved = c.connected && c.moved;
+    } else if (c.connected) round.others += 1;
     rounds.set(c.checkedAt, round);
   }
 
   const boxes: BoxReading[] = [];
   for (const [vantage, rounds] of [...byBox.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const usual = median([...rounds.values()].map((r) => r.others));
+    const needed = Math.max(1, Math.ceil(INSIDE_ALIVE_SHARE * usual));
     const alive = [...rounds.entries()]
-      .filter(([, r]) => r.others && r.self !== null)
+      .filter(([, r]) => r.others >= needed && r.self !== null)
       .sort(([a], [b]) => b - a);
     if (!alive.length || now - alive[0][0] > tuning.probeFresh) continue;
     let streak = 0;
@@ -587,22 +614,37 @@ export function insideFamily(
       streakStart = at;
     }
     const before = alive.slice(streak);
+    const enough = before.length >= INSIDE_BASELINE_ROUNDS;
     const connects = before.filter(([, r]) => r.self).length;
-    const qualified = before.length >= INSIDE_BASELINE_ROUNDS && connects >= INSIDE_BASELINE_SHARE * before.length;
-    boxes.push({ vantage, qualified, streak, connectedNow: alive[0][1].self === true, streakStart });
+    const moves = before.filter(([, r]) => r.moved).length;
+    boxes.push({
+      vantage,
+      qualified: enough && connects >= INSIDE_BASELINE_SHARE * before.length,
+      mover: enough && moves >= INSIDE_BASELINE_SHARE * before.length,
+      streak,
+      connectedNow: alive[0][1].self === true,
+      movedNow: alive[0][1].moved,
+      streakStart,
+    });
   }
 
   const qualified = boxes.filter((b) => b.qualified);
   const lost = qualified.filter((b) => b.streak >= tuning.insideRounds);
-  const firing = qualified.length > 0 && lost.length === qualified.length;
+  const working = boxes.filter((b) => b.connectedNow && (b.movedNow || b.mover));
+  const firing = lost.length > 0 && working.length === 0;
   const healthy = !firing && boxes.some((b) => b.connectedNow) && !qualified.some((b) => b.streak > 0);
   const names = (list: BoxReading[]) => list.map((b) => b.vantage).join(" and ");
   let summary: string;
   if (firing) {
     const rounds = Math.min(...lost.map((b) => b.streak));
+    const bare = boxes.filter((b) => b.connectedNow);
+    const one = bare.length === 1;
     summary =
       `Our boxes inside the country: ${names(lost)} could not open a connection to this server for ${rounds} checks in a row, ` +
-      "while in the same checks they still reached other servers";
+      `while in the same checks ${lost.length === 1 ? "it" : "they"} still reached most of the other servers ${lost.length === 1 ? "it usually reaches" : "they usually reach"}` +
+      (bare.length
+        ? `; ${names(bare)} still connect${one ? "s" : ""} but move${one ? "s" : ""} no data to it, as usual, which is no proof it works`
+        : "");
   } else if (!boxes.length) {
     summary = "Our boxes inside the country: no recent check in which a box reached any server";
   } else if (!qualified.length) {
@@ -624,6 +666,13 @@ export function insideFamily(
     networks: [],
     tcpOpen: qualified.length ? qualified.some((b) => b.connectedNow) : null,
   };
+}
+
+function median(values: number[]): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 export interface Assessment {
@@ -671,6 +720,13 @@ export function assess(input: {
   for (const f of firing) {
     const previous = input.previousSince[f.family];
     since[f.family] = typeof previous === "number" ? previous : Math.min(f.onset ?? now, now);
+  }
+  // A family that could not be read this time (the network table still
+  // loading after a restart) is not a family that stopped: it keeps its
+  // "since", so a restart does not start its sustain timer again.
+  for (const f of [client, traffic, probe, ...(input.inside ? [input.inside] : [])]) {
+    const previous = input.previousSince[f.family];
+    if (f.unknown && typeof previous === "number") since[f.family] = previous;
   }
   if (firing.length === 0) {
     return { verdict: null, reason: null, since, thinResidential, blockType: null, outage: null };

@@ -575,7 +575,17 @@ export class BlockWatchService {
       (i) => i.reopenedAt !== null && i.reopenedAt >= since && !undelivered.includes(i),
     );
     const listed = new Set([...undelivered, ...reopened].map((i) => i.id));
-    const open = allOpen.filter((i) => !listed.has(i.id) && (!notify || i.verdict === BlockVerdict.SUSPECT));
+    // In notify mode, every open incident no page reached and none is about
+    // to: the suspects, and one whose column says likely but whose reading
+    // fell back before a page got through (page() sends only on a current
+    // likely reading, and undelivered needs every try spent), which would
+    // otherwise be in no page and no digest. One that reads likely now and
+    // has no page yet is the pager's, tried again next cycle.
+    const open = allOpen.filter(
+      (i) =>
+        !listed.has(i.id) &&
+        (!notify || (i.pagedAt === null && evidenceOf(i)?.current !== BlockVerdict.LIKELY_BLOCKED)),
+    );
     const cleared = await this.prisma.blockIncident.findMany({
       where: {
         status: BlockIncidentStatus.CLEARED,
@@ -672,6 +682,14 @@ export class BlockWatchService {
         take: 50,
       }),
     ]);
+    // By the current reading, as the badge shows it, not by the column
+    // (the strongest verdict ever reached): one that was likely blocked and
+    // reads suspect now sorts below those likely blocked right now.
+    const rank = (i: (typeof open)[number]) => {
+      const current = (i.evidenceJson as { current?: string | null } | null)?.current;
+      return current === BlockVerdict.LIKELY_BLOCKED ? 0 : current === BlockVerdict.SUSPECT ? 1 : 2;
+    };
+    open.sort((a, b) => rank(a) - rank(b) || a.openedAt.getTime() - b.openedAt.getTime());
     return { mode: this.mode, country: this.country, lastCycleAt: this.lastCycleAt, open, closed };
   }
 
@@ -849,12 +867,13 @@ export class BlockWatchService {
     const earliest = Math.min(...watched.map((w) => Math.min(w.anchor ?? now, now))) - tuning.baselineWindow;
     const rows = await this.prisma.insideProbeCheck.findMany({
       where: { checkedAt: { gte: new Date(Math.max(earliest, now - INSIDE_LOOKBACK_MAX_MS)) } },
-      select: { nodeId: true, vantage: true, connectMs: true, checkedAt: true },
+      select: { nodeId: true, vantage: true, connectMs: true, downBytes: true, upBytes: true, checkedAt: true },
     });
     return rows.map((r) => ({
       nodeId: r.nodeId,
       vantage: r.vantage,
       connected: r.connectMs !== null && r.connectMs > 0,
+      moved: r.downBytes > 0 || r.upBytes > 0,
       checkedAt: r.checkedAt.getTime(),
     }));
   }

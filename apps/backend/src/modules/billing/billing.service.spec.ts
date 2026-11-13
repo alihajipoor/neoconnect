@@ -1,3 +1,4 @@
+import { NotFoundException } from "@nestjs/common";
 import { SubscriptionStatus } from "@prisma/client";
 import { BillingService } from "./billing.service";
 
@@ -288,6 +289,58 @@ describe("BillingService.confirmPayment when provisioning fails", () => {
     await expect(service.confirmPayment("txn-1", {})).resolves.toBeUndefined();
 
     expect(prisma.subscription.update).toHaveBeenCalled();
+    expect(invoices.issueForPayment).toHaveBeenCalledWith("txn-1");
+  });
+});
+
+describe("BillingService.confirmPayment when a credential vanishes mid-renewal", () => {
+  // The WireGuard release can delete a long-expired subscription's row in
+  // the moment its renewal re-enables the rows it read: setEnabled then
+  // finds nothing. The renewal goes on to provisioning and the invoice.
+  it("skips the vanished row, provisions, and issues the invoice", async () => {
+    const prisma = {
+      paymentTransaction: {
+        findUnique: jest.fn().mockResolvedValue({ id: "txn-1", status: "PENDING", subscriptionId: "sub-1", provider: "STRIPE" }),
+        update: jest.fn(),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      subscription: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: "sub-1",
+          status: SubscriptionStatus.EXPIRED,
+          expireAt: new Date(Date.now() - 10 * DAY_MS),
+          plan: { durationDays: 30 },
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      protocolUser: {
+        findMany: jest.fn().mockResolvedValue([
+          { id: "pu-wg", status: "DISABLED" },
+          { id: "pu-x", status: "DISABLED" },
+        ]),
+      },
+    };
+    const setEnabled = jest.fn((id: string) =>
+      id === "pu-wg" ? Promise.reject(new NotFoundException("Protocol user not found")) : Promise.resolve({}),
+    );
+    const provisionAll = jest.fn().mockResolvedValue({ created: [], revoked: [], failed: [] });
+    const invoices = { issueForPayment: jest.fn().mockResolvedValue({}) };
+    const service = new BillingService(
+      prisma as never,
+      { setEnabled, provisionAll } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: jest.fn() } as never,
+      { availableProviders: jest.fn().mockResolvedValue([]) } as never,
+      invoices as never,
+      {} as never,
+    );
+    jest.spyOn(service["logger"], "warn").mockImplementation(() => undefined);
+
+    await expect(service.confirmPayment("txn-1", {})).resolves.toBeUndefined();
+    expect(setEnabled).toHaveBeenCalledWith("pu-x", true);
+    expect(provisionAll).toHaveBeenCalledWith("sub-1");
     expect(invoices.issueForPayment).toHaveBeenCalledWith("txn-1");
   });
 });

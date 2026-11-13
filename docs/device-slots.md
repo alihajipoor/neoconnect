@@ -475,7 +475,10 @@ seen on a node:
 - Holding the device (`hold`) switches off only rows carrying its own
   `sessionId`. Its shared WireGuard row stays on, so the held device
   keeps a working WireGuard route there. Its traffic on it is the
-  shared pseudo-device's, so a later reading can hold that too -- but
+  shared pseudo-device's, so a later reading can hold that too. That
+  hold switches the shared WireGuard key off for every device on it,
+  the customer's own legitimate one included, since they share the one
+  key -- and
 - if a slot holder named that same shared row in its claim, the row is
   credited to the holder: its traffic counts as the holder's, and
   holding the shared pseudo-device skips it. The held device then keeps

@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException, Optional, UnauthorizedException } from "@nestjs/common";
-import { Prisma, Protocol, SubscriptionStatus } from "@prisma/client";
+import { NodeStatus, Prisma, Protocol, SubscriptionStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
 import { after, forEachBatch } from "../../common/batching";
@@ -57,6 +57,18 @@ const DEFAULT_DEVICE_CREDENTIAL_LIMIT = 10;
 const DEVICE_CREDENTIAL_LIMIT_CEILING = 50;
 /** Each rejected value is reported once, not on every fetch. */
 const warnedLimitValues = new Set<string>();
+
+/** Whether setEnabled failed because the row is no longer there: deleted
+ * between a caller reading it and switching it (the WireGuard release of a
+ * long-expired subscription can land in the moment a renewal re-enables
+ * its rows). A caller looping over a subscription's rows skips such a row
+ * rather than abandoning the rest; a renewal then provisions a fresh one. */
+export function isCredentialGone(err: unknown): boolean {
+  return (
+    err instanceof NotFoundException ||
+    (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025")
+  );
+}
 
 /** WG_EXPIRED_RELEASE: whether the hourly sweep gives the WireGuard
  * addresses of long-expired subscriptions back (releaseExpiredWireGuard).
@@ -815,7 +827,11 @@ export class ProtocolUsersService {
    * Each row goes in one statement that re-checks the subscription, so a
    * renewal landing at the same moment either sees the row (and the
    * delete then matches nothing, the subscription being ACTIVE) or does
-   * not (and provisions a fresh one). The node is then told DELETE_USER,
+   * not (and provisions a fresh one). Not quite either way under READ
+   * COMMITTED: a renewal can read the row just before this delete commits
+   * and then find it gone when it re-enables it, so the re-enable loops
+   * skip a vanished row (isCredentialGone) and provisioning replaces it.
+   * The node is then told DELETE_USER,
    * as any other deletion; the peer is normally gone already, since the
    * row was switched off at expiry. At most WG_RELEASE_PER_RUN rows a
    * run; running it again does nothing more. Never throws. */
@@ -832,7 +848,10 @@ export class ProtocolUsersService {
     let failed = 0;
     try {
       const rows = await this.prisma.protocolUser.findMany({
-        where: { protocol: Protocol.WIREGUARD, subscription: lapsed },
+        // Not on a retired server: its queue is never read, and a command
+        // for it would only sit there (its plan routes are revoked at
+        // retirement, so this is belt and braces).
+        where: { protocol: Protocol.WIREGUARD, subscription: lapsed, node: { status: { not: NodeStatus.DISABLED } } },
         select: {
           id: true,
           nodeId: true,

@@ -663,6 +663,47 @@ describe("BlockWatchService", () => {
     expect(pages).toHaveLength(1);
   });
 
+  it("sorts the panel's open incidents by the current reading, not by the strongest verdict reached", async () => {
+    const { service, world } = build("record", {
+      nodes: [
+        { id: "n1", name: "alpha-9", status: "ONLINE", publicIp: "192.0.2.10", realityDestReachable: true },
+        { id: "n2", name: "beta-9", status: "ONLINE", publicIp: "192.0.2.20", realityDestReachable: true },
+      ],
+    });
+    const incident = (id: string, nodeId: string, verdict: string, current: string, openedAt: number) => ({
+      id,
+      nodeId,
+      status: "OPEN",
+      verdict,
+      openedAt: new Date(openedAt),
+      evidenceJson: { current },
+    });
+    world.incidents.push(
+      incident("i1", "n1", "LIKELY_BLOCKED", "SUSPECT", T0 - 2 * HOUR),
+      incident("i2", "n2", "LIKELY_BLOCKED", "LIKELY_BLOCKED", T0 - HOUR),
+    );
+    const overview = await service.overview(new Date(T0));
+    expect(overview.open.map((i) => i.id)).toEqual(["i2", "i1"]);
+  });
+
+  it("lists in the digest a likely block no page reached, once its reading fell back to a suspicion", async () => {
+    const { service, world, alerts, digests } = build("notify", { ...blocked(T0), checks: unreachableChecks("n1", T0) });
+    const budget = (service as unknown as { budget: { take(now: number): boolean } }).budget;
+    for (let i = 0; i < PAGES_PER_HOUR; i += 1) budget.take(T0 - MIN);
+    await service.runCycle(new Date(T0));
+    expect(world.incidents[0]).toMatchObject({ verdict: "LIKELY_BLOCKED", pagedAt: null });
+    expect(world.incidents[0].pageAttempts).toBeLessThan(MAX_PAGE_ATTEMPTS);
+
+    // A day on, only one network still fails: suspect now, never paged.
+    const at = T0 + 25 * HOUR;
+    world.attempts = reports(ASN_A, 4, false, at - 20 * MIN, "now");
+    world.checks = [];
+    await service.runCycle(new Date(at));
+    expect(world.incidents[0].evidenceJson.current).toBe("SUSPECT");
+    expect(alerts()).toHaveLength(0);
+    expect(digests().at(-1)!.text).toContain("germany-1 -- suspect");
+  });
+
   it("keeps budget for new pages: reminders wait while it runs low", async () => {
     const { service, world, alerts } = build("notify", { ...blocked(T0), checks: unreachableChecks("n1", T0) });
     await service.runCycle(new Date(T0));
