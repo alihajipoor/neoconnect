@@ -11,6 +11,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { I18nProvider } from "../lib/i18n";
 import { startEffects } from "../lib/effects";
+import { startHasFallback } from "../lib/old-engine-has";
 import { PreviewApp } from "./PreviewApp";
 import { PREVIEW_RUNNING_APPS } from "./PreviewPages";
 import "../globals.css";
@@ -60,6 +61,8 @@ window.__TAURI_INTERNALS__ = {
 };
 
 startEffects();
+// As the app does (main.tsx): `:has()` kept in step on an old engine.
+startHasFallback();
 // The preview frames stand in for the Windows window, title strip and all.
 document.documentElement.dataset.titlebar = "1";
 
