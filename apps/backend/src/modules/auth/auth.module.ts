@@ -9,9 +9,18 @@ import { AdminsModule } from "../admins/admins.module";
 import { AlertingModule } from "../alerting/alerting.module";
 import { EmailModule } from "../email/email.module";
 import { NetworkIdentityModule } from "../network-identity/network-identity.module";
+import { TrustedDevicesModule } from "../trusted-devices/trusted-devices.module";
 
 @Module({
-  imports: [PassportModule, JwtModule.register({}), AdminsModule, AlertingModule, EmailModule, NetworkIdentityModule],
+  imports: [
+    PassportModule,
+    JwtModule.register({}),
+    AdminsModule,
+    AlertingModule,
+    EmailModule,
+    NetworkIdentityModule,
+    TrustedDevicesModule,
+  ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy, AdminSignInAlertsService],
   exports: [AuthService],

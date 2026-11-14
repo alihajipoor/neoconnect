@@ -4,7 +4,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { AlertingService } from "../alerting/alerting.service";
 import { EmailService } from "../email/email.service";
 import { NetworkIdentityService } from "../network-identity/network-identity.service";
-import { signInAlert, wrongPasswordsAlert, type SignInAlert } from "./admin-sign-in-alerts.emails";
+import { signInAlert, wrongPasswordsAlert, type SecondStep, type SignInAlert } from "./admin-sign-in-alerts.emails";
 
 /** Failed password counts for one admin account, within LoginGuard's
  * window, at which the owner is told -- the counts LoginGuard already
@@ -45,8 +45,9 @@ export class AdminSignInAlertsService {
   ) {}
 
   /** An admin finished signing in: tokens were issued. `withMfa` when the
-   * second step was a TOTP code. */
-  async signedIn(email: string, ip: string | undefined, withMfa: boolean, now: Date = new Date()): Promise<void> {
+   * second step was a TOTP code, "trusted-device" when a browser trusted at
+   * an earlier code step stood in for it. */
+  async signedIn(email: string, ip: string | undefined, withMfa: SecondStep, now: Date = new Date()): Promise<void> {
     try {
       const admin = await this.adminByEmail(email);
       if (!admin || admin.role === AdminRole.RESELLER) return;

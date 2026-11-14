@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { apiMutate, type MutationResult } from "@/lib/api";
+import { clearTrustedDevice, currentTrustedDeviceId } from "@/lib/trusted-device";
 
 export interface MfaSetupResult {
   secret: string;
@@ -27,7 +28,31 @@ export async function disableMfaAction(password: string): Promise<MutationResult
     method: "POST",
     body: JSON.stringify({ password }),
   });
-  if (result.ok) revalidatePath("/settings");
+  if (result.ok) {
+    // The backend has dropped every trusted device of the account.
+    await clearTrustedDevice();
+    revalidatePath("/settings");
+  }
+  return result;
+}
+
+/** Removes one of the caller's trusted devices; this browser's own cookies
+ * go too when it is this one. */
+export async function removeTrustedDeviceAction(id: string): Promise<MutationResult<void>> {
+  const result = await apiMutate<void>(`/auth/trusted-devices/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (result.ok) {
+    if ((await currentTrustedDeviceId()) === id) await clearTrustedDevice();
+    revalidatePath("/settings/account");
+  }
+  return result;
+}
+
+export async function removeAllTrustedDevicesAction(): Promise<MutationResult<void>> {
+  const result = await apiMutate<void>("/auth/trusted-devices", { method: "DELETE" });
+  if (result.ok) {
+    await clearTrustedDevice();
+    revalidatePath("/settings/account");
+  }
   return result;
 }
 

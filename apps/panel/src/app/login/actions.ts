@@ -1,10 +1,13 @@
 "use server";
 
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { backendUrl } from "@/lib/backend";
 import { forwardedClientHeaders } from "@/lib/client-address";
 import { parseSolution, type Challenge } from "@/lib/pow";
 import { setSessionCookies } from "@/lib/session";
+import { readTrustedToken, setTrustedDevice } from "@/lib/trusted-device";
+import { grantOf } from "@/lib/trusted-device-cookie";
 import { type Counted, mfaFailure, passwordFailure } from "./outcome";
 
 export interface LoginState {
@@ -67,12 +70,21 @@ async function passwordStep(formData: FormData): Promise<LoginState> {
   }
 
   const forwarded = await forwardedClientHeaders();
+  // This browser's trusted-device token, if it has one: after a right
+  // password the backend lets it stand in for the code. Never shown to
+  // the page; it goes from the HttpOnly cookie to the backend and back.
+  const trustedDevice = await readTrustedToken();
   let res: Response;
   try {
     res = await fetch(`${backendUrl()}/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...forwarded },
-      body: JSON.stringify({ email, password, ...(challenge ? { challenge } : {}) }),
+      body: JSON.stringify({
+        email,
+        password,
+        ...(challenge ? { challenge } : {}),
+        ...(trustedDevice ? { trustedDevice } : {}),
+      }),
       cache: "no-store",
     });
   } catch {
@@ -83,15 +95,27 @@ async function passwordStep(formData: FormData): Promise<LoginState> {
     return { error: passwordFailure(res.status, await res.json().catch(() => null), countedAs(forwarded)) };
   }
 
-  const body = (await res.json()) as
-    | { accessToken: string; refreshToken: string }
-    | { mfaRequired: true; mfaToken: string };
+  const body = (await res.json()) as SignedIn | { mfaRequired: true; mfaToken: string };
 
   if ("mfaRequired" in body) {
     return { mfaToken: body.mfaToken };
   }
 
-  await setSessionCookies(body);
+  return signIn(body);
+}
+
+/** Tokens from the backend, and the browser's next trusted-device token
+ * when this sign-in trusted it or spent the old one. */
+interface SignedIn {
+  accessToken: string;
+  refreshToken: string;
+  trustedDevice?: unknown;
+}
+
+async function signIn(body: SignedIn): Promise<never> {
+  await setSessionCookies({ accessToken: body.accessToken, refreshToken: body.refreshToken });
+  const grant = grantOf(body.trustedDevice);
+  if (grant) await setTrustedDevice(grant);
   redirect("/overview");
 }
 
@@ -102,12 +126,16 @@ async function verifyMfaStep(mfaToken: string, formData: FormData): Promise<Logi
   }
 
   const forwarded = await forwardedClientHeaders();
+  // "Trust this device for 30 days": off unless ticked. The browser's own
+  // User-Agent goes along only to name the device in the account's list.
+  const trustDevice = formData.get("trustDevice") === "on";
+  const userAgent = trustDevice ? ((await headers()).get("user-agent") ?? "").slice(0, 512) : "";
   let res: Response;
   try {
     res = await fetch(`${backendUrl()}/auth/mfa/verify`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...forwarded },
-      body: JSON.stringify({ mfaToken, code }),
+      body: JSON.stringify({ mfaToken, code, ...(trustDevice ? { trustDevice, ...(userAgent ? { userAgent } : {}) } : {}) }),
       cache: "no-store",
     });
   } catch {
@@ -122,9 +150,7 @@ async function verifyMfaStep(mfaToken: string, formData: FormData): Promise<Logi
     return failure.keepToken ? { error: failure.error, mfaToken } : { error: failure.error };
   }
 
-  const { accessToken, refreshToken } = (await res.json()) as { accessToken: string; refreshToken: string };
-  await setSessionCookies({ accessToken, refreshToken });
-  redirect("/overview");
+  return signIn((await res.json()) as SignedIn);
 }
 
 /** Whether the backend's per-address limits were this browser's or the
