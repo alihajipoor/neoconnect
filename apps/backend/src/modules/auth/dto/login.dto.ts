@@ -1,5 +1,5 @@
 import { NormalizedEmail } from "../../../common/decorators/normalized-email.decorator";
-import { IsOptional, IsString, MinLength, ValidateNested } from "class-validator";
+import { IsOptional, IsString, MaxLength, MinLength, ValidateNested } from "class-validator";
 import { Type } from "class-transformer";
 import { ChallengeSolutionDto } from "../../login-guard/dto/challenge-solution.dto";
 
@@ -24,4 +24,12 @@ export class LoginDto {
   @ValidateNested()
   @Type(() => ChallengeSolutionDto)
   challenge?: ChallengeSolutionDto;
+
+  /** The token from the browser's trusted-device cookie, sent on by the
+   * panel's server. Stands in for the code only after a right password
+   * (AuthService.login). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  trustedDevice?: string;
 }

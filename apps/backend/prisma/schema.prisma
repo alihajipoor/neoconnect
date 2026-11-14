@@ -220,8 +220,33 @@ model AdminUser {
   /// Only ever populated for RESELLER accounts.
   resellerBalances ResellerTokenBalance[]
   issuedVouchers   Voucher[]              @relation("VoucherIssuer")
+  trustedDevices   AdminTrustedDevice[]
 
   @@map("admin_users")
+}
+
+/// A browser an admin chose to trust at the two-factor step, so that
+/// signing in there asks for the password but not the code
+/// (TrustedDevicesService). Only the SHA-256 of the browser's token is
+/// kept; the token itself is in an HttpOnly cookie and nowhere else. The
+/// token is replaced every time it is used; the expiry is fixed at
+/// creation and never moves. All of an account's rows go when its
+/// password, role or two-factor changes.
+model AdminTrustedDevice {
+  id         String   @id @default(uuid())
+  adminId    String
+  /// sha256(token), hex.
+  tokenHash  String   @unique
+  /// "Chrome on Windows", from the browser's User-Agent. Display only.
+  label      String
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+  expiresAt  DateTime
+
+  admin AdminUser @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId, createdAt])
+  @@map("admin_trusted_devices")
 }
 
 /// How many vouchers of one plan a reseller may still mint.

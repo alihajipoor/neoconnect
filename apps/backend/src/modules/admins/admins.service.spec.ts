@@ -17,6 +17,7 @@ function buildAdmin(overrides: Partial<Record<string, unknown>> = {}) {
 
 describe("AdminsService", () => {
   let service: AdminsService;
+  let trusted: { revokeAll: jest.Mock };
   let prisma: { adminUser: { findMany: jest.Mock; findUnique: jest.Mock; create: jest.Mock; update: jest.Mock; delete: jest.Mock } };
 
   beforeEach(() => {
@@ -29,7 +30,8 @@ describe("AdminsService", () => {
         delete: jest.fn(),
       },
     };
-    service = new AdminsService(prisma as any);
+    trusted = { revokeAll: jest.fn().mockResolvedValue(0) };
+    service = new AdminsService(prisma as any, trusted as any);
   });
 
   describe("list", () => {

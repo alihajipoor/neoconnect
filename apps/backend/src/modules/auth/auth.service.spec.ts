@@ -36,6 +36,7 @@ describe("AuthService", () => {
   };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
   let config: { get: jest.Mock };
+  let trusted: { redeem: jest.Mock; trust: jest.Mock; revokeAll: jest.Mock };
 
   beforeAll(async () => {
     PASSWORD_HASH = await argon2.hash(PASSWORD);
@@ -54,7 +55,13 @@ describe("AuthService", () => {
     jwt = { signAsync: jest.fn(), verifyAsync: jest.fn() };
     config = { get: jest.fn((key: string) => `config:${key}`) };
 
-    service = new AuthService(prisma as any, jwt as unknown as JwtService, config as unknown as ConfigService);
+    trusted = { redeem: jest.fn().mockResolvedValue(null), trust: jest.fn(), revokeAll: jest.fn().mockResolvedValue(0) };
+    service = new AuthService(
+      prisma as any,
+      jwt as unknown as JwtService,
+      config as unknown as ConfigService,
+      trusted as any,
+    );
   });
 
   describe("validateCredentials", () => {

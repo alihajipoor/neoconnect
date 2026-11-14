@@ -1,6 +1,7 @@
 import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import * as argon2 from "argon2";
 import { PrismaService } from "../../prisma/prisma.service";
+import { TrustedDevicesService } from "../trusted-devices/trusted-devices.service";
 import { CreateAdminDto } from "./dto/create-admin.dto";
 import { UpdateAdminDto } from "./dto/update-admin.dto";
 
@@ -15,7 +16,10 @@ const SAFE_SELECT = {
 
 @Injectable()
 export class AdminsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly trustedDevices: TrustedDevicesService,
+  ) {}
 
   list() {
     return this.prisma.adminUser.findMany({ select: SAFE_SELECT, orderBy: { createdAt: "asc" } });
@@ -42,7 +46,7 @@ export class AdminsService {
   }
 
   async update(id: string, dto: UpdateAdminDto) {
-    await this.get(id);
+    const before = { ...(await this.get(id)) };
     const data: { passwordHash?: string; role?: UpdateAdminDto["role"]; tokenVersion?: { increment: number } } = {};
     if (dto.password) {
       data.passwordHash = await argon2.hash(dto.password);
@@ -52,7 +56,12 @@ export class AdminsService {
     if (dto.role) {
       data.role = dto.role;
     }
-    return this.prisma.adminUser.update({ where: { id }, data, select: SAFE_SELECT });
+    const updated = await this.prisma.adminUser.update({ where: { id }, data, select: SAFE_SELECT });
+    // A browser trusted to skip the code was trusted for this password and
+    // this role. Either changing ends that trust everywhere.
+    const reason = dto.password ? "password changed" : dto.role && dto.role !== before.role ? "role changed" : null;
+    if (reason) await this.trustedDevices.revokeAll(before, reason);
+    return updated;
   }
 
   async remove(id: string) {

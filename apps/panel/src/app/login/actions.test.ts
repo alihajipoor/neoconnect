@@ -9,6 +9,12 @@ vi.mock("next/navigation", () => ({
   },
 }));
 vi.mock("@/lib/session", () => ({ setSessionCookies: vi.fn(async () => undefined) }));
+// The browser's trusted-device cookie, as the action reads and writes it.
+const jar = vi.hoisted(() => ({ token: undefined as string | undefined, set: [] as unknown[] }));
+vi.mock("@/lib/trusted-device", () => ({
+  readTrustedToken: async () => jar.token,
+  setTrustedDevice: async (grant: unknown) => void jar.set.push(grant),
+}));
 
 import { loginAction, requestLoginChallenge } from "./actions";
 
@@ -23,6 +29,8 @@ let reply: { status: number; body: unknown };
 
 beforeEach(() => {
   sent = [];
+  jar.token = undefined;
+  jar.set = [];
   reply = { status: 200, body: {} };
   // Behind nginx, as installer/assets/nginx-panel.conf.template sets it up.
   incoming.headers = new Headers({ "x-real-ip": "203.0.113.7", "x-forwarded-for": "203.0.113.7" });
@@ -184,6 +192,54 @@ describe("the code step", () => {
     const expired = await loginAction({}, code());
     expect(expired.mfaToken).toBeUndefined();
     expect(expired.error).toMatch(/expired/);
+  });
+});
+
+describe("trust this device", () => {
+  const grant = { token: "secret-token-value", id: "dev-1", expiresAt: "2026-12-14T00:00:00.000Z" };
+
+  it("sends the browser's token with the password, and stores the replacement", async () => {
+    jar.token = "old-token";
+    reply = { status: 200, body: { accessToken: "a", refreshToken: "r", trustedDevice: grant } };
+    await expect(loginAction({}, form({ email: "a@b.co", password: "right-password" }))).rejects.toThrow(
+      "redirect:/overview",
+    );
+    expect(sent[0].body.trustedDevice).toBe("old-token");
+    expect(jar.set).toEqual([grant]);
+  });
+
+  it("sends no token when the browser has none, and never puts one in the page's state", async () => {
+    reply = { status: 200, body: { mfaRequired: true, mfaToken: "mfa-token" } };
+    const state = await loginAction({}, form({ email: "a@b.co", password: "right-password" }));
+    expect(sent[0].body).not.toHaveProperty("trustedDevice");
+    expect(state).toEqual({ mfaToken: "mfa-token" });
+  });
+
+  it("asks the backend to trust the browser only when the box is ticked", async () => {
+    incoming.headers.set("user-agent", "Mozilla/5.0 (Windows NT 10.0) Chrome/142.0");
+    reply = { status: 200, body: { accessToken: "a", refreshToken: "r" } };
+    await expect(loginAction({}, form({ mfaToken: "mfa-token", code: "123456" }))).rejects.toThrow("redirect:");
+    expect(sent[0].body).toEqual({ mfaToken: "mfa-token", code: "123456" });
+    expect(jar.set).toEqual([]);
+
+    reply = { status: 200, body: { accessToken: "a", refreshToken: "r", trustedDevice: grant } };
+    await expect(
+      loginAction({}, form({ mfaToken: "mfa-token", code: "123456", trustDevice: "on" })),
+    ).rejects.toThrow("redirect:");
+    expect(sent[1].body).toEqual({
+      mfaToken: "mfa-token",
+      code: "123456",
+      trustDevice: true,
+      userAgent: "Mozilla/5.0 (Windows NT 10.0) Chrome/142.0",
+    });
+    expect(jar.set).toEqual([grant]);
+  });
+
+  it("returns no token to the page when a ticked code step fails", async () => {
+    reply = { status: 401, body: { message: "Invalid MFA code" } };
+    const state = await loginAction({}, form({ mfaToken: "mfa-token", code: "123456", trustDevice: "on" }));
+    expect(JSON.stringify(state)).not.toContain("secret-token-value");
+    expect(jar.set).toEqual([]);
   });
 });
 

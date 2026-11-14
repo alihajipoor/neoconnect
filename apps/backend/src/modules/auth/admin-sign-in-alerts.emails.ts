@@ -21,8 +21,17 @@ const PANEL = { path: "/settings/account", label: "Open account security" };
 
 /** An admin finished signing in. `where` is the address and, when known,
  * its network: "203.0.113.10 (Example ISP, DE)". */
-export function signInAlert(admin: Admin, where: string, withMfa: boolean, now: Date): SignInAlert {
-  const factor = withMfa ? "with two-factor" : "with a password only -- this account has no two-factor";
+/** The second step of a completed sign-in: a code, a browser trusted at
+ * an earlier code step, or none. */
+export type SecondStep = boolean | "trusted-device";
+
+export function signInAlert(admin: Admin, where: string, withMfa: SecondStep, now: Date): SignInAlert {
+  const factor =
+    withMfa === "trusted-device"
+      ? "with two-factor, from a browser trusted for 30 days at an earlier code step"
+      : withMfa
+        ? "with two-factor"
+        : "with a password only -- this account has no two-factor";
   const text =
     `${admin.email} (${admin.role}) signed in to the Neoxify admin panel ${factor}, ` +
     `at ${now.toISOString()} from ${where}.\n\n` +
@@ -44,7 +53,12 @@ export function signInAlert(admin: Admin, where: string, withMfa: boolean, now: 
         { label: "From", value: where },
         {
           label: "Second step",
-          value: withMfa ? "A two-factor code" : "None: password only. This account has no two-factor.",
+          value:
+            withMfa === "trusted-device"
+              ? "A trusted browser (trusted after a two-factor code on it)"
+              : withMfa
+                ? "A two-factor code"
+                : "None: password only. This account has no two-factor.",
         },
         {
           label: "What to do",
