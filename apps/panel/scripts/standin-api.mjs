@@ -55,22 +55,22 @@ const email = (i) => {
 };
 
 const NODE_NAMES = [
-  "germany-3",
-  "finland-4",
-  "turkey-1",
-  "netherlands-2",
-  "uk-1",
-  "france-1",
-  "sweden-1",
-  "ir-relay-2-tehran-backup-route",
-  "germany-2",
-  "singapore-1",
+  "oakridge-3",
+  "pinecrest-4",
+  "harbor-1",
+  "meadowbrook-2",
+  "elm-1",
+  "aspen-1",
+  "cedar-1",
+  "relay-2-northgate-backup-route",
+  "oakridge-2",
+  "lighthouse-1",
 ];
 const nodes = NODE_NAMES.map((name, i) => ({
   id: `node_standin_${pad(i)}`,
   name,
   role: i === 7 ? "RELAY" : i % 3 === 0 ? "EXIT" : "STANDALONE",
-  region: ["eu-central", "eu-north", "tr-istanbul", "eu-west", "uk-south", "eu-west-paris", "eu-north-stockholm", "ir-tehran", "eu-central", "ap-southeast"][i],
+  region: ["eu-central", "eu-north", "eu-southeast", "eu-west", "uk-south", "eu-west-paris", "eu-north-stockholm", "zz-relay", "eu-central", "ap-southeast"][i],
   publicIp: `192.0.2.${10 + i}`,
   status: ["ONLINE", "ONLINE", "OFFLINE", "PENDING", "ONLINE", "DISABLED", "ONLINE", "ONLINE", "ONLINE", "OFFLINE"][i],
   lastHeartbeatAt: i === 3 ? null : iso(-60_000 * (i + 1) * (i === 2 || i === 9 ? 600 : 1)),
@@ -105,7 +105,7 @@ nodes.forEach((node, n) => {
 
 const routes = protocolConfigs.slice(0, 18).map((pc, i) => ({
   id: `route_standin_${pad(i)}`,
-  name: i === 0 ? "Backup route via germany-3 to finland-4 exit, REALITY over TCP" : `${nodes.find((n) => n.id === pc.nodeId).name} ${["Stealth", "TLS", "VMess", "Trojan", "Shadowsocks", "WireGuard", "OpenVPN"][i % 7]}`,
+  name: i === 0 ? "Backup route via oakridge-3 to pinecrest-4 exit, REALITY over TCP" : `${nodes.find((n) => n.id === pc.nodeId).name} ${["Stealth", "TLS", "VMess", "Trojan", "Shadowsocks", "WireGuard", "OpenVPN"][i % 7]}`,
   entryProtocolConfigId: pc.id,
   exitProtocolConfigId: i % 4 === 0 ? protocolConfigs[(i + 9) % protocolConfigs.length].id : null,
   isEnabled: i % 5 !== 4,
@@ -267,7 +267,7 @@ const clientAttempts = Array.from({ length: 100 }, (_, i) => ({
   reason: i % 5 === 1 ? "Engine exited with code 23: failed to listen on 127.0.0.1:10808, address already in use by another process" : null,
   ip: `192.0.2.${100 + (i % 100)}`,
   occurredAt: i % 3 === 0 ? iso(-i * 600_000 - 7_200_000) : null,
-  asn: i % 4 ? 197207 + i : null,
+  asn: i % 4 ? 64496 + i : null,
   sessionSeconds: i % 4 === 3 ? 98765 : null,
   createdAt: iso(-i * 600_000),
 }));
@@ -294,7 +294,7 @@ const activity = () => ({
     outcome: OUTCOMES[i % OUTCOMES.length],
     platform: PLATFORMS[i % PLATFORMS.length],
     appVersion: "0.9.64",
-    network: i % 4 ? { asn: 197207, name: "Mobile Communication Company of a Very Long Operator Name PJS" } : null,
+    network: i % 4 ? { asn: 64496, name: "Example Mobile Communications of a Very Long Operator Name Co" } : null,
     ip: i % 5 === 0 ? null : `192.0.2.${150 + (i % 50)}`,
     throughServer: i % 10 === 5 ? NODE_NAMES[0] : null,
     noAddress: i % 5 === 0 ? (i % 10 ? "relay" : "erased") : null,
@@ -342,8 +342,8 @@ const isp = () => ({
   windowHours: 72,
   truncated: true,
   networks: Array.from({ length: 12 }, (_, n) => ({
-    asn: 197207 + n * 1000,
-    org: n === 0 ? "Mobile Communication Company of a Very Long Operator Name PJS" : n % 4 === 3 ? null : ["Example Telecom", "Northwind Mobile", "Contoso Fibre", "Fabrikam Net"][n % 4],
+    asn: 64496 + n * 1000,
+    org: n === 0 ? "Example Mobile Communications of a Very Long Operator Name Co" : n % 4 === 3 ? null : ["Example Telecom", "Northwind Mobile", "Contoso Fibre", "Fabrikam Net"][n % 4],
     routes: Array.from({ length: 6 }, (_, r) => ({
       ...ispRoute(r + n),
       tried: [48, 31, 12, 7, 5, 2][r],
@@ -373,8 +373,8 @@ const reachability = () =>
     port: 443,
     detail: Array.from({ length: i % 5 === 0 ? 0 : 7 }, (_, p) => ({
       vantage: `ir${p + 1}.vantage-point-with-a-long-hostname.example.net`,
-      asn: p % 2 ? `AS${197207 + p}` : null,
-      city: p % 3 ? "Tehran" : null,
+      asn: p % 2 ? `AS${64496 + p}` : null,
+      city: p % 3 ? "Springfield" : null,
       ok: p % 2 === 0,
       latencyMs: p % 2 === 0 ? 234 : null,
       error: p % 2 ? "Connection timed out after 10000 ms while waiting for the TCP handshake" : null,
@@ -397,7 +397,7 @@ const incident = (i, open) => ({
   evidenceJson: {
     evaluatedAt: iso(-600_000),
     current: i % 2 ? "LIKELY_BLOCKED" : "SUSPECT",
-    reason: "Connects fail on 7 of 9 Iranian networks while the same networks reach other servers; probes from inside time out",
+    reason: "Connects fail on 7 of 9 restricted networks while the same networks reach other servers; probes from inside time out",
     since: { client: iso(-3 * DAY), probe: iso(-2 * DAY) },
     families: FAMILIES.map((family, f) => ({
       family,
@@ -406,8 +406,8 @@ const incident = (i, open) => ({
       healthy: f === 1,
       summary: `${family}: 1234 tried, 987 failed against a baseline of 12 percent over the last six hours`,
       networks: Array.from({ length: 4 }, (_, n) => ({
-        asn: 197207 + n,
-        org: n === 0 ? "Mobile Communication Company of a Very Long Operator Name PJS" : n === 3 ? null : `Operator ${n}`,
+        asn: 64496 + n,
+        org: n === 0 ? "Example Mobile Communications of a Very Long Operator Name Co" : n === 3 ? null : `Operator ${n}`,
         tried: 1234,
         failed: 987,
         baseline: n % 2 ? 0.12 : null,
@@ -440,7 +440,7 @@ const gameProfileRows = Array.from({ length: 100 }, (_, i) => ({
   publisher: i % 4 ? ["Northwind Games", "Example Interactive", "Some Publisher Interactive Entertainment Worldwide Ltd."][i % 3] : null,
   hostnames: ["launcher.game.example.com", "login.game.example.com", "store.game.example.com", "account-management.game.example.com"],
   excludeHostnames: i % 2 ? ["cdn-patch-download.game.example.com"] : [],
-  destinationAsn: i % 5 ? null : "AS57976",
+  destinationAsn: i % 5 ? null : "AS64511",
   prefixComplete: i % 2 === 0,
   canaryHostname: i % 3 ? "login.game.example.com" : null,
   sortOrder: i,
@@ -514,8 +514,8 @@ const relayAuth = () => ({
     refusals: 1234,
     rows: Array.from({ length: 10 }, (_, i) => ({
       box: `relay-box-${i}.example.net`,
-      asn: 197207 + i,
-      org: i === 0 ? "Mobile Communication Company of a Very Long Operator Name PJS" : i % 3 ? `Operator ${i}` : null,
+      asn: 64496 + i,
+      org: i === 0 ? "Example Mobile Communications of a Very Long Operator Name Co" : i % 3 ? `Operator ${i}` : null,
       signups: 12345,
       signIns: 54321,
       refusals: 123,
