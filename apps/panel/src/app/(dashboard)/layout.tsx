@@ -29,7 +29,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
           stretching the page past the window. */}
       <div className="flex min-w-0 flex-1 flex-col">
         <DashboardHeader session={session} />
-        <main className="flex-1 p-6 max-sm:pt-5 max-sm:pr-[max(1rem,env(safe-area-inset-right))] max-lg:pb-[max(1.5rem,env(safe-area-inset-bottom))] max-sm:pl-[max(1rem,env(safe-area-inset-left))]">
+        <main className="flex-1 p-6 max-sm:pt-5 max-sm:pr-[max(1rem,env(safe-area-inset-right))] max-lg:pb-[max(1.5rem,env(safe-area-inset-bottom))] max-sm:pl-[max(1rem,env(safe-area-inset-left))] sm:max-lg:pr-[max(1.5rem,env(safe-area-inset-right))] sm:max-lg:pl-[max(1.5rem,env(safe-area-inset-left))]">
           {children}
         </main>
       </div>

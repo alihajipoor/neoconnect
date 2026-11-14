@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Menu, XIcon } from "lucide-react";
@@ -23,6 +23,18 @@ export function MobileNav({ role, email }: { role: AdminRole; email: string }) {
   const [openOn, setOpenOn] = useState<string | null>(null);
   const open = openOn === pathname;
   const setOpen = (next: boolean) => setOpenOn(next ? pathname : null);
+
+  // A drawer still open when the window grows to lg (a tablet turned, a
+  // window resized) would be hidden by lg:hidden while Radix keeps the page
+  // locked: no scroll, no clicks. Close it as soon as lg starts to match.
+  useEffect(() => {
+    const wide = window.matchMedia("(min-width: 1024px)");
+    const onChange = (e: MediaQueryListEvent) => {
+      if (e.matches) setOpenOn(null);
+    };
+    wide.addEventListener("change", onChange);
+    return () => wide.removeEventListener("change", onChange);
+  }, []);
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={setOpen}>
