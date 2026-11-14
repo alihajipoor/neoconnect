@@ -67,16 +67,16 @@ func (w *linkWatch) silentFor(now time.Time) time.Duration {
 
 // watchdogLoop returns an error once the server has been silent past the
 // limit; runStream then cancels the stream, which unblocks Recv.
-func watchdogLoop(ctx context.Context, w *linkWatch) error {
-	ticker := time.NewTicker(watchdogTick)
+func watchdogLoop(ctx context.Context, w *linkWatch, limit, tick time.Duration) error {
+	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if silent := w.silentFor(time.Now()); silent > serverSilenceLimit {
-				return fmt.Errorf("dead link: nothing from the control plane for %s (limit %s)", silent.Round(time.Second), serverSilenceLimit)
+			if silent := w.silentFor(time.Now()); silent > limit {
+				return fmt.Errorf("dead link: nothing from the control plane for %s (limit %s)", silent.Round(time.Second), limit)
 			}
 		}
 	}

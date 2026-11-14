@@ -250,7 +250,10 @@ func runStream(
 	go func() { errCh <- statsLoop(streamCtx, snd, dispatcher) }()
 	watch := &linkWatch{}
 	go func() { errCh <- receiveLoop(streamCtx, stream, snd, dispatcher, watch) }()
-	go func() { errCh <- watchdogLoop(streamCtx, watch) }()
+	// Read here, on the caller's goroutine, not in the loop: tests shorten
+	// them, and the loop can outlive runStream by a moment.
+	limit, tick := serverSilenceLimit, watchdogTick
+	go func() { errCh <- watchdogLoop(streamCtx, watch, limit, tick) }()
 
 	err = <-errCh
 	cancel()
