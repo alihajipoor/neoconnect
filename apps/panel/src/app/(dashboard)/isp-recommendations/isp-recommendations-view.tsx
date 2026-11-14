@@ -83,25 +83,29 @@ function SortHead({
   );
 }
 
-/** An enum name that may break after each underscore when its cell is
- * allowed to wrap (a phone); where it is not, it reads exactly as before. */
+/** An enum name that may break after each underscore. Phone only: Chrome
+ * breaks at <wbr> even in a nowrap cell, so on a desktop it would rewrap
+ * the table. */
 function Breakable({ text }: { text: string }) {
-  return (
-    <>
-      {text.split("_").map((part, i) => (
-        <Fragment key={i}>
-          {i > 0 && (
-            <>
-              _<wbr />
-            </>
-          )}
-          {part}
-        </Fragment>
-      ))}
-    </>
-  );
+  return text.split("_").map((part, i) => (
+    <Fragment key={i}>
+      {i > 0 && (
+        <>
+          _<wbr />
+        </>
+      )}
+      {part}
+    </Fragment>
+  ));
 }
 
+function protocolText(route: IspRoute) {
+  return route.transport && route.transport !== "TCP" ? ` / ${route.transport}` : "";
+}
+
+/** Under 640px the Protocol column is dropped and the protocol is said in
+ * the route's own (fixed) cell instead, so the number columns -- the point
+ * of the table -- have the width. */
 function RouteCells({ route }: { route: IspRoute }) {
   return (
     <>
@@ -109,10 +113,14 @@ function RouteCells({ route }: { route: IspRoute }) {
         {route.routeName ?? <span className="text-muted-foreground">deleted route</span>}
         {route.nodeName ? <span className="ml-1 text-xs text-muted-foreground">{route.nodeName}</span> : null}
         {route.isRelay ? <span className="ml-1 text-xs text-muted-foreground">(relay)</span> : null}
+        <span className="mt-0.5 block text-xs text-muted-foreground sm:hidden">
+          {route.protocol ? <Breakable text={route.protocol} /> : "--"}
+          {protocolText(route)}
+        </span>
       </TableCell>
-      <TableCell className="text-sm text-muted-foreground max-sm:max-w-28 max-sm:text-xs max-sm:whitespace-normal">
-        {route.protocol ? <Breakable text={route.protocol} /> : "--"}
-        {route.transport && route.transport !== "TCP" ? ` / ${route.transport}` : ""}
+      <TableCell hideOnPhone className="text-sm text-muted-foreground">
+        {route.protocol ?? "--"}
+        {protocolText(route)}
       </TableCell>
     </>
   );
@@ -233,7 +241,7 @@ export function IspRecommendationsView({ summary }: { summary: IspRecommendation
               <TableHeader>
                 <TableRow>
                   <TableHead>Route</TableHead>
-                  <TableHead>Protocol</TableHead>
+                  <TableHead hideOnPhone>Protocol</TableHead>
                   <SortHead sortKey="tried" current={sortBy} onSort={setSortBy} title="Distinct customers who dialled this route">
                     Tried
                   </SortHead>
@@ -293,7 +301,7 @@ export function IspRecommendationsView({ summary }: { summary: IspRecommendation
               <TableHeader>
                 <TableRow>
                   <TableHead>Route</TableHead>
-                  <TableHead>Protocol</TableHead>
+                  <TableHead hideOnPhone>Protocol</TableHead>
                   <TableHead className="text-right" title={TRAFFIC_TITLE}>
                     Traffic
                   </TableHead>
