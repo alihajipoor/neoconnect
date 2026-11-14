@@ -31,6 +31,156 @@ host. The first one is a supervised run. Until then everything below
 about what a step that writes "proves" describes what it checks, not
 something that has been seen to work.
 
+**2026-11-13/14, the first real runs** (finland-3 retired, finland-4
+added) went step by step with `--only`, because the tool could not be
+trusted to run through. What each needed by hand is now fixed in the
+tool or the installer (next section). A run straight through, as one
+command, has **not** happened yet; the next server is its first.
+
+## One command
+
+```bash
+scripts/fleet/fleet add <name> <address> --region <cc-country> --yes
+```
+
+From an empty Ubuntu box to a server in the customer plans, with no
+agent or person in the middle unless one of the stops below is hit.
+`retire <name> --yes` and `replace <old> <address> --yes` the same.
+
+**Every stop prints the exact line to continue**, naming the run
+directory and never an address:
+
+```bash
+scripts/fleet/fleet continue ~/.neoxify/runs/add-<name>-<time> [--the-flag-it-names]
+```
+
+`continue` runs the command the run was started with (kept in the run
+directory as `argv`). A decision given once (`--accept-held`,
+`--hop no`, `--dest`, `--proven-elsewhere`, ...) stays with the run and
+is never asked again; a plain re-run of the first command carries it
+over too.
+
+What can still stop a `--yes` run, each with its continue line:
+
+| Stop | Why | To go on |
+|---|---|---|
+| a gate: `pre.verdict`, `add.inside-probe` | the address is held from inside | `--accept-held`, the owner's call |
+| a gate: `add.zone-inside` | names under the node zone are rewritten inside | `--accept-blocked-zone` |
+| a gate: `add.dest` | the disguise site fails its audit or the REALITY trial | `--dest <another site>:443` (`--accept-weak-dest` for WEAK only) |
+| a gate: `add.canary-other` | WireGuard, OpenVPN or IKEv2 not proven on the server | prove them in the real app on the canary, then `--proven-elsewhere wireguard,openvpn,ikev2` |
+| a gate: `retire.guard-plans` | a plan's default route is on the server | `--default-to <server>` (`fleet plan-check <name>` shows the verdict read-only, before any run) |
+| `retire.guard-hop` | the server carries the relay hop | `fleet replace`, which moves it first |
+| an owner step: `retire.dns-other` | names at a registrar the tool cannot edit (only when there are some) | delete them, then `--done retire.dns-other` |
+| `add.firewall`, only with `--provider-firewall` | the owner said the provider has a firewall | open it, then `--done add.firewall` |
+| `add.install` | the installer asks something the answers do not cover | answer in the box's session (`tmux attach -t nx`); the step keeps watching |
+| any verify | something is really wrong | fix it, then the continue line |
+
+The owner's lists at the end (`add.owner-after`, `retire.owner-after`,
+`retire.delete-vps`) are printed and written to `owner-todo.txt` in the
+run directory; they are not waited for.
+
+### The canary: no customer before every protocol is proven
+
+The customer plans come last, after the server is proven through one
+plan no customer can buy:
+
+1. **build** and the **scripted proofs** (temporary users in the
+   server's running Xray, from outside, from inside, through the relay);
+2. `add.canary-routes`: the server's routes, direct **and** relay,
+   into `Internal test` only (`--canary-plan` to name another). Refused
+   if that plan is purchasable or a customer is on it;
+3. `add.canary-open`: `isActive` on, only if it was off (`isPurchasable`
+   is never sent; its value before is recorded), and one subscription
+   for the test account (`TEST_DIRECT_EMAIL`, or `TEST_CANARY_EMAIL`);
+4. `add.canary-provision`, `add.canary-e2e`: the panel issues that
+   account its credentials, exactly as for a customer, and the five Xray
+   protocols are dialled with them straight to the server and the four
+   relay ones through the relay box, exit address matched;
+5. `add.canary-other`: WireGuard, OpenVPN and IKEv2. No scripted client
+   dials them yet, so this stops, with the canary open, naming them.
+   Prove them in the real app signed in as the test account, then
+   continue with `--proven-elsewhere ...` (on the record in the run log).
+   The seam for scripted proofs is `canary_prove_<protocol>` in
+   `lib/checklist-add.sh`: when one exists the step calls it;
+6. `add.canary-close`: the test subscription the run made is deleted
+   and `Internal test` gets back exactly the flags it had;
+7. `add.plans`: the customer plans, smallest first, heartbeats and
+   backend errors checked after each. It refuses to start while any
+   step before it, canary included, has not passed.
+
+### One database dump per run
+
+The first step of a run that writes to the database takes the dump
+(`add.dump-node`, or `retire.dump`), records it in the run directory
+(`dump.txt`, and `run_dump_file` in `state`), and every later step that
+writes reuses it and says so. `--fresh-dump` takes a new one at the
+next step that asks; `--use-dump /root/db-backups/<file>.sql.gz` makes a
+dump this job already took (say, at the start of the session) the
+run's one dump. A write query refuses to run while the run has none.
+
+### --done never re-runs an action
+
+`--done <step>[,<step>]` means "done another way". For an owner's step
+the owner did it; for any other step it was done by hand or in an
+earlier pass. Either way **only the step's verify runs**, never its
+action, and the verify alone decides. (On 2026-11-14 `--done` on a
+relay step re-ran it and took a second 62 MB dump.)
+
+### Time
+
+Every step prints `took Ns`. Every pass ends with a table of the steps
+it ran and a total, and the whole run's table (every pass, every try)
+is `timings.txt` in the run directory.
+
+What the Finland runs took, read from their run logs (tool steps only;
+the waits between `--only` calls, the inside test, the app proof and
+the go-live plan edits are not in them):
+
+- `add finland-4`: 24 min of step time over 35 min. Slowest:
+  `add.install` 290 s, `add.e2e-direct` 115 s (two tries),
+  `add.e2e-relay` 113 s, `add.reboot` 94 s, `add.inside-probe` 86 s
+  (two tries), `add.packages` 70 s, `add.verify` 69 s (two tries),
+  `add.renew-dry` 51 s (two tries). Two of the tries were the dead Xray.
+- `retire finland-3`: 9 min of step time over 21 min. Slowest:
+  `retire.plans` 151 s (five plans), `retire.offline` 73 s,
+  `retire.hop` 69 s, `retire.relay-routes` 51 s.
+
+The installer alone is five minutes, so a whole `add` is not a
+five-minute job: about 20 to 25 minutes of steps when nothing fails,
+plus the app proof of the three protocols until those are scripted.
+Steps that could run side by side and do not yet: the five direct test
+tunnels (one after another today), the tunnels from outside and from
+inside (different hosts), the inside probe from the two inside boxes,
+the reputation and reverse-DNS readouts. Nothing runs in parallel yet.
+
+### Clean on every host, every time
+
+Every pass ends -- passed, stopped, failed or interrupted -- by
+shredding the scratch directory (`/dev/shm/nxf`) on every host it
+reached, the admin token with it. The one thing kept is the panel
+host's record of temporary test users while some may still be in an
+Xray (`temp/`): the next pass needs their emails to take them out. The
+tunnel test's port lock lives in that directory now, not loose in
+`/dev/shm`.
+
+### After the install: running and listening
+
+`add.postfix` (`postinstall.sh`) and `add.verify` (`verify.sh`) now run
+`engines.sh`: every engine's unit running, Xray listening on every
+inbound port, nginx on 80, WireGuard and OpenVPN on their ports, IKEv2 on
+500 and 4500 with its connections loaded. `postinstall.sh` also checks
+that every file in `/var/log/xray` is nobody's. Its `fix` starts what
+is down: Xray is restarted only when it is not running (nobody is on a
+dead Xray), anything else is started, never restarted. The UDP-over-TCP
+test counts only address lines, and fails outright when the server's
+Xray is not running or nothing listens on the Shadowsocks port.
+
+The installer itself now creates Xray's log files as nobody before its
+config test (which runs as root and used to create `access.log`
+root-owned), checks Xray is running a second after its restart, and
+starts the IKEv2 loader unit instead of only enabling it
+(`scripts/test-xray-logs.sh`).
+
 No address and no name of ours is in this file or anywhere in
 `scripts/fleet` (see `docs/node-address-hygiene.md`). They come from a
 local file outside the repository, or from the database through the
@@ -59,16 +209,20 @@ scripts/fleet/fleet add <name> <ip> --region <r> --dry-run   # every command it 
 | Command | What it does | What a pass proves |
 |---|---|---|
 | `fleet precheck <ip>` | Tests an **empty** box from both boxes inside the watched country: 256 KB up and down on three ports. Reputation and reverse-DNS readout. | That data moves to that address from inside, per box and port: `PASS` or `HELD`. Not a TCP connect: a held range lets the connection open and stalls the upload. |
-| `fleet add <name> <ip> --region <r>` | Empty Ubuntu box to a server in the plans: keys, OS, what the provider's image brought along, DNS, certificates, the disguise site, installer, fleet form, reboot test, inside probe, test tunnels, relay routes, plans, provisioning, monitoring. | Before anything is built on it: REALITY completes through the disguise site from outside. Before any customer has it: every Xray protocol exits on the new server's own address with 256 KB both ways, from outside and from inside; after the plan edit, the same with credentials the panel issued. |
+| `fleet add <name> <ip> --region <r>` | Empty Ubuntu box to a server in the plans: keys, OS, what the provider's image brought along, DNS, certificates, the disguise site, installer, fleet form, reboot test, inside probe, test tunnels, relay routes, the canary, customer plans, provisioning, monitoring. | Before anything is built on it: REALITY completes through the disguise site from outside. Before any customer has it: every Xray protocol exits on the new server's own address with 256 KB both ways, from outside and from inside, then the same with credentials the panel issued through `Internal test`; WireGuard, OpenVPN and IKEv2 proven (by the app, on the record) through that plan too. |
 | `fleet retire <name>` | Names at once if the box is already gone. Then plans first, relay routes, block incident, agent, server row, key, DNS, relay hop entry, alerts, leftovers. Ends by saying the VPS can be deleted. | That nothing points at the server any more: no plan, no credential, no route, no name, no hop rule, no file on the panel host. Its row and usage history are kept. |
 | `fleet replace <old> <ip>` | First of all: if the old box is already gone, its DNS names are deleted. Then `precheck`, `add` under the next free name, the relay hop moved if the old server carried it, each plan switched from old to new in one edit, then `retire`. | Both of the above, and that relay routes to the exits behind the hop still exit where they should after it moved. |
+| `fleet continue <run dir> [flags]` | Picks a stopped run up again with the command line it was started with, plus the flags given now. | Nothing by itself. |
+| `fleet plan-check <name>` | Read-only: the plan guard of `retire`, for real (a dry run asks the database nothing). | Whether `retire` would pass its plan guard now, and why not. |
 | `fleet status [<name>]` | Read-only: heartbeat, agent, API door, plans, relay routes, customers' bytes, inside-probe readings, engine units, certificate days, DNS records. | Nothing: it is a readout. |
 
 Useful flags: `--dry-run`, `--from <step>`, `--only <step>`, `--yes`
-(do not ask before steps on a live host), `--done <step>` (the owner
-did that step), `--waive <step>` (the owner decided to go on although
-that step did not pass), `--peer <name>`,
-`--relay-set <set>`, `--hop auto|yes|no`, `--plans "A,B"`, `--no-relay`,
+(do not ask before steps on a live host), `--done <step>` (done another
+way: only its verify runs), `--waive <step>` (the owner decided to go on
+although that step did not pass), `--fresh-dump`, `--use-dump <file>`,
+`--proven-elsewhere <protocols>`, `--canary-plan <name>`,
+`--provider-firewall`, `--peer <name>`, `--relay-set <set>`,
+`--hop auto|yes|no`, `--plans "A,B"` (customer plans), `--no-relay`,
 `--no-plans`, `--default-to <name>` (retire). `fleet --help` lists them.
 
 `--from` and `--only` are for running a step again. They are not a way
@@ -84,12 +238,13 @@ unverified for that server.
 - **ask**: changes a live host other than the new box (the relay box,
   the hop server). Asks first.
 - **owner**: only a person can do it. Says exactly what, then waits for
-  `done`. A run with no terminal (an AI session) stops there instead;
-  run the same command again with `--done <step>` once it is done. The
-  step's verify still has to pass.
-- **gate**: a decision. Passes, or stops and names the flag that records
-  the owner's decision to go on: `--accept-held`, `--accept-blocked-zone`,
-  `--accept-weak-dest`.
+  `done`. A run with no terminal stops there instead and prints the
+  continue line with `--done <step>`. The step's verify still has to
+  pass. The owner's end-of-run lists are owner steps that do not wait.
+- **gate**: a decision. Passes, or stops and prints the continue line
+  with the flag that records the owner's decision to go on:
+  `--accept-held`, `--accept-blocked-zone`, `--accept-weak-dest`,
+  `--proven-elsewhere`, `--default-to`.
 
 ### Two steps of `add` that exist because of one build
 
@@ -141,7 +296,7 @@ where the customers are. The trial is dialled from the panel host.
 | Deleting the VPS, a provider firewall, reverse DNS, the root password | Only the owner has the provider account. |
 | Re-signing the endpoint lists after a server is added or retired | The signing keys live on one machine and are never copied. Client releases come after this, never before. |
 | Names at a registrar the tool has no access to | Listed, unmasked, in the run directory for the owner to delete. Do it the same day. |
-| WireGuard, OpenVPN and IKEv2 tunnels | A scripted client cannot dial them. The tool shows only that datagrams reach those ports. A real app connect is the proof, and until then they are **unverified** on the new server. |
+| WireGuard, OpenVPN and IKEv2 tunnels | A scripted client cannot dial them yet. The tool shows that datagrams reach those ports, and `add.canary-other` stops before the customer plans until each is proven in the real app on the canary and recorded with `--proven-elsewhere`. |
 | Customer bytes after 24 and 48 hours, per mobile and home network | Both inside boxes are datacentres. Only customers' own attempts show the networks they are on. |
 | Website and promo locations | Public copy is the owner's. |
 
@@ -231,19 +386,23 @@ Runs live in `~/.neoxify/runs/<command>-<name>-<time>/`:
 - `state`: what the run recorded (the new names, chosen ports, ids).
 - `done`: the steps that passed.
 - `waived`: the steps the owner chose to go on without (`--waive`).
+- `argv`: the command line `fleet continue` runs again.
+- `dump.txt`: the run's one database dump.
+- `timings`, `timings.txt`: how long every step took, every try.
+- `owner-todo.txt`: what is left for the owner.
 
 When a step fails, nothing after it has run.
 
 1. Read the last lines of `run.log`. Fix the cause.
-2. Run the **same command again**. It skips what is done and resumes at the failed step.
+2. Run the **continue line the stop printed** (or the same command again). It skips what is done and resumes at the failed step.
 3. To run one step again: `--only <step>`. To go back and redo from a step: `--from <step>` (refused while a step before it has not passed).
 4. If a step cannot pass and the owner decides to go on: `--waive <step>`. The log records it and the run never reads as fully proven.
 5. To abandon an `add` before the plans step: nothing has reached a customer. Run the `UNDO` lines from the bottom up, then `fleet retire <name>` for what the installer registered (the server row cannot be deleted, only disabled).
 6. To abandon after the plans step: `fleet retire <name>`.
 
-A database dump is taken before every step that writes to it, and named
-in the log. A write step refuses to run without one from the last half
-hour.
+One database dump per run, taken before its first database write and
+named in the log; later steps reuse it (*One database dump per run*,
+above). A write query refuses to run while the run has none.
 
 The installer step is the one that cannot be repeated: a box that is
 already enrolled is never installed over. If it stopped on a question
@@ -259,6 +418,7 @@ node --test scripts/fleet/test/*.test.mjs
 - the ordered step ids of every command, from a real `--dry-run` against a fixture file: a step that disappears fails the test (`expected-steps.json`);
 - a dry run calls no `ssh`, `scp`, `curl` or `tar`, and prints nothing address-like (`fleet dns ... --dry-run` included);
 - the engine on a toy checklist: a failed verify stops the run, `--from` and `--only` do not get past an unproven step, `--waive` is recorded;
+- the one-command run (`onerun.test.mjs`): `--done` on a step that is not the owner's runs only its verify, a stop prints the continue line and the gate's flag, every step is timed with a total, one dump per run reused and `--fresh-dump`, no step dumps by itself, an unset second key is a stop, the canary refuses a purchasable plan or one a customer is on, WireGuard/OpenVPN/IKEv2 unproven stop the run before the customer plans, `--proven-elsewhere`, the canary closed only with its flags exactly as before, the canary plan takes relay routes too, the UDP-over-TCP count ignores dig's error line, `engines.sh` against stand-ins (a dead Xray, an IKEv2 loader never started, IKEv2 with nothing loaded), `fleet continue`;
 - what the riskiest steps decide once the hosts have answered, with the hosts replaced by stand-ins and fixture files (`steps.test.mjs`): the three hop steps run once and run again after stopping halfway, when a server counts as gone, the panel-issued proof with a protocol missing;
 - plan-list arithmetic, DNS record matching and the hop edits, as pure functions, with a hop move that stopped halfway and is run again;
 - the jq programs that run on the panel host (skipped where `jq` is missing; CI has it);

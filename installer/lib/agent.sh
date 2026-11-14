@@ -2289,11 +2289,49 @@ xray_fix_modes() {
     chmod 755 /usr/local/share/xray
     find /usr/local/share/xray -type f -exec chmod 644 {} +
   fi
-  if [[ -d /var/log/xray ]]; then
-    chown nobody:nogroup /var/log/xray
-    chmod 750 /var/log/xray
-    find /var/log/xray -type f -exec chown nobody:nogroup {} + -exec chmod 600 {} +
+  xray_prepare_logs
+}
+
+# The log files Xray opens at start, created by the user it runs as.
+#
+# `xray run -test` runs as root, and with the access log on it opens
+# /var/log/xray/access.log -- creating it root:root 600 when it is not
+# there yet. Xray itself, as nobody, then cannot open it and exits at
+# once ("failed to initialize access logger ... permission denied"):
+# every protocol on the box dead from the install on. So the files are
+# made here, nobody's, before any test runs, and whatever is there is
+# handed back to nobody. Found on the 2026-11-13 build (finland-4).
+# Paths are variables so scripts/test-xray-logs.sh can run this as a
+# plain user against a stand-in directory.
+XRAY_LOG_DIR="${XRAY_LOG_DIR:-/var/log/xray}"
+XRAY_CONFIG_PATH="${XRAY_CONFIG_PATH:-/usr/local/etc/xray/config.json}"
+xray_prepare_logs() {
+  local u="${XRAY_RUN_USER:-nobody}" g="${XRAY_RUN_GROUP:-nogroup}" p
+  [[ -d "$XRAY_LOG_DIR" ]] || return 0
+  chown "$u:$g" "$XRAY_LOG_DIR"
+  chmod 750 "$XRAY_LOG_DIR"
+  if [[ -f "$XRAY_CONFIG_PATH" ]]; then
+    for p in $(jq -r '.log.access // empty, .log.error // empty' "$XRAY_CONFIG_PATH" 2>/dev/null); do
+      [[ "$p" == "$XRAY_LOG_DIR"/* ]] || continue
+      [[ -e "$p" ]] || install -m 600 -o "$u" -g "$g" /dev/null "$p"
+    done
   fi
+  find "$XRAY_LOG_DIR" -type f -exec chown "$u:$g" {} + -exec chmod 600 {} +
+}
+
+# xray_started_ok: after a restart, is Xray running? A restart that
+# "succeeds" and leaves Xray dead a second later is how a node was
+# reported installed with every protocol down. Prints why, and fails.
+xray_started_ok() {
+  local i
+  for i in 1 2 3 4 5; do
+    sleep 1
+    [[ "$(systemctl is-active xray 2>/dev/null)" == active ]] || break
+    [[ $i -eq 5 ]] && return 0
+  done
+  echo "ERROR: Xray is not running after its restart ($(systemctl is-active xray 2>&1 | head -1)). Its last words:" >&2
+  journalctl -u xray -n 8 --no-pager 2>&1 | sed 's/^/    /' >&2 || true
+  return 1
 }
 
 # Saves the running firewall rules as the ones the node boots with.
@@ -3079,6 +3117,9 @@ PY
     fi
     return 1
   fi
+  # The test ran as root and may have created a log file root's: hand it
+  # back before Xray, as nobody, has to open it.
+  xray_prepare_logs
 
   # The verified restart where it exists (installed with the TLS
   # certificate tooling): it compares the inbounds running before and
@@ -3088,6 +3129,15 @@ PY
     /usr/local/bin/neoxify-xray-restart || echo "WARNING: see above -- an inbound that was running before the restart is not running now." >&2
   else
     systemctl restart xray
+  fi
+  # Running a second after, not only "restarted". Not fatal here: the
+  # node still registers its protocols, so the panel is complete, and the
+  # checks after the install (scripts/fleet postinstall/engines) refuse
+  # to go on with a dead Xray. But it is said, loudly, with the reason.
+  if ! xray_started_ok; then
+    xray_prepare_logs
+    systemctl restart xray
+    xray_started_ok || echo "ERROR: Xray is NOT running on this node. Every Xray protocol is down until it is: journalctl -u xray." >&2
   fi
 
   install_self_loop_guard "$(node_public_ipv4)" "${is_relay:-n}"
@@ -4225,6 +4275,13 @@ UNIT
     echo "  strongSwan refused the configuration; swanctl --load-all shows why." >&2
     return 1
   fi
+  # Started too, not only enabled: the unit is what loads the config again
+  # whenever strongSwan restarts (PartOf), and enabled-but-never-started
+  # it does nothing until the next boot. That is how the 2026-11-13 build
+  # left it, with the load above done by hand. Starting it runs the same
+  # --load-all again, which changes nothing.
+  systemctl restart neoxify-swanctl-load >/dev/null 2>&1 ||
+    echo "  WARNING: neoxify-swanctl-load did not start: systemctl status neoxify-swanctl-load." >&2
 
   local config_id params
   params="$(jq -n --arg host "$hostname_input" --arg pool "$listen_pool" \

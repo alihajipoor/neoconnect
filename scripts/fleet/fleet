@@ -5,7 +5,9 @@
 #   fleet add <name> <ip> --region <r> [--dest <host:port>]
 #   fleet retire <name>
 #   fleet replace <old-name> <ip>
+#   fleet continue <run dir> [options]          pick a stopped run up again, same command line
 #   fleet status [<name>]                       read-only
+#   fleet plan-check <name> [--default-to <s>]  read-only: would retiring it pass the plan guard?
 #   fleet steps <precheck|add|retire|replace>   the checklist, ids and titles
 #   fleet dns <list|get|create-a|delete|...>    Cloudflare helper, output masked
 #
@@ -14,21 +16,34 @@
 #   --from <step>        start at that step (and run it again if it was done)
 #   --only <step>        run that one step
 #   --yes                do not ask before steps that change a live host
-#   --done <step>        the owner did that step (for runs with no terminal to wait at)
+#   --done <step,...>    done another way: only the step's verify runs, NEVER its action
+#                        (an owner step: the owner did it between two runs)
 #   --waive <step,...>   the owner decided to go on although that step did not pass;
 #                        written to the run log, and the run ends "complete EXCEPT" it
 #   --env <file>         the local address file (default ~/.neoxify/fleet.env)
 #   --run <dir>          continue that run directory; --new-run starts a fresh one
+#   --fresh-dump         a new database dump at the next step that needs one. A run takes
+#                        ONE dump, at its first database write, and every later step reuses it
+#   --use-dump <file>    this job already has a dump on the panel host (/root/db-backups/..):
+#                        checked with gzip -t and used as this run's one dump
 # add / replace:
 #   --peer <name>        the server whose protocol set the new one must equal
 #   --relay-set <set>    which free entry set on the relay box to use
 #   --hop auto|yes|no    reach the new exit from the relay through the hop
-#   --plans "A,B"        only these plans (default: every plan)
+#   --plans "A,B"        only these customer plans (default: every plan)
 #   --no-relay, --no-plans
 #   --accept-held        the owner decided to build on a box the inside test holds
 #   --accept-blocked-zone, --accept-weak-dest
+#   --provider-firewall  the provider puts a firewall in front of the box: add.firewall waits
+#                        for the owner to open it (without it, it only prints the ports)
+#   --proven-elsewhere <p,...>  wireguard, openvpn, ikev2: proven another way (the real app,
+#                        through the canary plan) on this server; written to the run log
+#   --canary-plan <name> the plan a new server is proven through first (default "Internal test")
 # retire:
 #   --default-to <name>  where a plan's default route goes when it is on this server
+#
+# Decisions given once (--accept-*, --hop, --dest, --proven-elsewhere, ...) are kept with
+# the run and not asked for again: a stop prints the exact `fleet continue` line.
 #
 # Run it from Git Bash on the operator's PC. Addresses, key paths and
 # names of ours come only from the local file (see fleet.env.example) or
@@ -49,13 +64,26 @@ FLEET_HOME="${FLEET_HOME:-$HOME/.neoxify}"
 OPT_DRY=0 OPT_YES=0 OPT_NEW_RUN=0 OPT_FROM="" OPT_ONLY="" OPT_RUN="" OPT_ENV="" OPT_FLAGS="" OPT_DONE="" OPT_WAIVE=""
 OPT_PEER="" OPT_RELAY_SET="" OPT_HOP=auto OPT_PLANS="" OPT_NO_RELAY=0 OPT_NO_PLANS=0
 OPT_ACCEPT_HELD=0 OPT_ACCEPT_ZONE=0 OPT_ACCEPT_DEST=0 OPT_DEFAULT_TO="" OPT_NAME=""
+OPT_FRESH_DUMP=0 OPT_USE_DUMP="" OPT_PROVIDER_FW=0 OPT_PROVEN="" OPT_CANARY_PLAN="Internal test"
 REGION="" DEST="" NAME="" OLD="" NEW_IP=""
 
 usage() {
-  sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-2}"
 }
 
+# `fleet continue <run dir> [options]`: the command line the run was
+# started with (kept in its directory), plus what is given now.
+if [[ "${1:-}" == continue ]]; then
+  [[ -n "${2:-}" && -d "$2" ]] || { echo "fleet continue: name a run directory (the stop message prints it)" >&2; exit 2; }
+  [[ -s "$2/argv" ]] || { echo "fleet continue: $2 has no saved command line (a run from before this was added: run its command again)" >&2; exit 2; }
+  mapfile -t SAVED <"$2/argv"
+  dir="$2"
+  shift 2
+  exec bash "${BASH_SOURCE[0]}" "${SAVED[@]}" "$@" --run "$dir"
+fi
+
+ORIG_ARGS=("$@")
 CMD="${1:-}"
 [[ -n "$CMD" ]] || usage
 shift
@@ -70,17 +98,22 @@ while [[ $# -gt 0 ]]; do
     --accept-held) OPT_ACCEPT_HELD=1 ;;
     --accept-blocked-zone) OPT_ACCEPT_ZONE=1 ;;
     --accept-weak-dest) OPT_ACCEPT_DEST=1 ;;
+    --fresh-dump) OPT_FRESH_DUMP=1 ;;
+    --provider-firewall) OPT_PROVIDER_FW=1 ;;
     --delete)
       # Only `fleet dns sweep ... --delete` takes it: it goes on to the DNS helper.
       [[ "$CMD" == dns ]] || { echo "fleet: unknown option $1" >&2; exit 2; }
       POS+=("$1")
       ;;
-    --from | --only | --done | --waive | --run | --env | --region | --dest | --peer | --relay-set | --hop | --plans | --default-to | --name)
+    --from | --only | --done | --waive | --run | --env | --region | --dest | --peer | --relay-set | --hop | --plans | --default-to | --name | --use-dump | --proven-elsewhere | --canary-plan)
       [[ $# -ge 2 ]] || { echo "fleet: $1 needs a value" >&2; exit 2; }
       case "$1" in
         --from) OPT_FROM="$2" ;;
         --only) OPT_ONLY="$2" ;;
-        --done) OPT_DONE="$2" ;;
+        --done) OPT_DONE="${OPT_DONE:+$OPT_DONE,}$2" ;;
+        --use-dump) OPT_USE_DUMP="$2" ;;
+        --proven-elsewhere) OPT_PROVEN="${OPT_PROVEN:+$OPT_PROVEN,}$2" ;;
+        --canary-plan) OPT_CANARY_PLAN="$2" ;;
         --waive) OPT_WAIVE="${OPT_WAIVE:+$OPT_WAIVE,}$2" ;;
         --run) OPT_RUN="$2" ;;
         --env) OPT_ENV="$2" ;;
@@ -93,18 +126,64 @@ while [[ $# -gt 0 ]]; do
         --default-to) OPT_DEFAULT_TO="$2" ;;
         --name) OPT_NAME="$2" ;;
       esac
-      # A waiver goes into the run log with what it waives.
-      case "$1" in --waive) OPT_FLAGS+="$1 $2 " ;; *) OPT_FLAGS+="$1 " ;; esac
+      # A waiver, and what was proven another way, go into the run log
+      # with what they name.
+      case "$1" in --waive | --proven-elsewhere | --done) OPT_FLAGS+="$1 $2 " ;; *) OPT_FLAGS+="$1 " ;; esac
       shift
       ;;
     -h | --help) usage 0 ;;
     --*) echo "fleet: unknown option $1" >&2; exit 2 ;;
     *) POS+=("$1") ;;
   esac
-  case "${1:-}" in --accept-* | --no-* | --yes) OPT_FLAGS+="$1 " ;; esac
+  case "${1:-}" in --accept-* | --no-* | --yes | --fresh-dump | --provider-firewall) OPT_FLAGS+="$1 " ;; esac
   shift
 done
 export OPT_DRY OPT_YES
+
+# The command line a run keeps, so that `fleet continue` and a plain
+# re-run never ask again for a decision already given. One-shot options
+# (which step, which run, a fresh dump) are not kept.
+persistent_args() {
+  local a skip=0
+  for a in "${ORIG_ARGS[@]}"; do
+    if [[ $skip -eq 1 ]]; then skip=0; continue; fi
+    case "$a" in
+      --only | --from | --done | --waive | --run | --use-dump) skip=1 ;;
+      --dry-run | --new-run | --fresh-dump) ;;
+      *) printf '%s\n' "$a" ;;
+    esac
+  done
+}
+
+# remember_args: on a new run, keep its command line. On a resumed run,
+# a decision the first command gave and this one leaves out is carried
+# over: the command is run again with it, once.
+remember_args() {
+  local f="$RUN_DIR/argv" cur missing=() u i
+  dry && return 0
+  cur="$(persistent_args)"
+  if [[ -s "$f" && "${FLEET_REEXEC:-0}" != 1 ]]; then
+    mapfile -t saved <"$f"
+    for ((i = 0; i < ${#saved[@]}; i++)); do
+      u="${saved[$i]}"
+      [[ "$u" == --* ]] || continue
+      case "$u" in
+        --accept-* | --no-relay | --no-plans | --yes | --provider-firewall) grep -qxF -- "$u" <<<"$cur" || missing+=("$u") ;;
+        --*)
+          # an option with a value: carried only if not given again now
+          if ! grep -qxF -- "$u" <<<"$cur" && [[ $((i + 1)) -lt ${#saved[@]} ]]; then missing+=("$u" "${saved[$((i + 1))]}"); fi
+          i=$((i + 1))
+          ;;
+      esac
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+      echo "Carried over from this run's first command: $(printf '%s\n' "${missing[@]}" | grep -- '^--' | tr '\n' ' ')"
+      FLEET_REEXEC=1 exec bash "${BASH_SOURCE[0]}" "${ORIG_ARGS[@]}" "${missing[@]}" --run "$RUN_DIR"
+    fi
+  fi
+  printf '%s\n' "$cur" >"$f"
+  chmod 600 "$f" 2>/dev/null || true
+}
 
 # shellcheck source=lib/engine.sh
 source "$FLEET_DIR/lib/engine.sh"
@@ -152,9 +231,24 @@ load_checklists() {
 # A run ends as complete only when every step of it passed, or was
 # waived on the record (lib/engine.sh conclude_run). --only is one step
 # and concludes nothing.
+#
+# Whatever happens -- a pass, a stop, a failure, an interrupt -- the run
+# cleans its scratch files off every host it used (cleanup_hosts) and
+# prints how long each step took.
 run_and_finish() {
+  local from=1 rc=0
   build_mask
-  run_checklist || return 1
+  remember_args
+  if ! dry; then
+    # shellcheck disable=SC2064
+    trap "cleanup_hosts; trap - EXIT" EXIT
+    trap "exit 130" INT TERM
+    [[ -f "$RUN_DIR/timings" ]] && from=$(($(wc -l <"$RUN_DIR/timings") + 1))
+    use_dump_given || return 1
+  fi
+  run_checklist || rc=1
+  report_timings "$from"
+  [[ $rc -eq 0 ]] || return 1
   if [[ -n "$OPT_ONLY" ]] || dry; then return 0; fi
   conclude_run || return 1
   echo "Run log: $RUN_DIR/run.log"
@@ -223,6 +317,22 @@ case "$CMD" in
     checklist_replace
     open_run replace "$OLD"
     run_and_finish
+    ;;
+
+  plan-check)
+    # The plan guard of `retire`, for real and read-only: a dry run cannot
+    # show its verdict, because it asks the database nothing.
+    [[ ${#POS[@]} -eq 1 ]] || usage
+    OLD="${POS[0]}"
+    name_ok "$OLD"
+    load_env
+    load_checklists
+    RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fleet-plancheck.XXXXXX")"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$RUN_DIR'" EXIT
+    build_mask
+    { do_retire_guard_plans && ok_retire_guard_plans; } 2>&1 | mask
+    exit "${PIPESTATUS[0]}"
     ;;
 
   status)

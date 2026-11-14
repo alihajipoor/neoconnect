@@ -2,9 +2,9 @@
 # postinstall.sh check|fix <xray version> <public address>
 # Runs on the box being built, right after the installer.
 #
-# Seven things every build before 2026-11 needed fixing by hand after the
-# installer finished. The installer does them itself now, so `check` is
-# what normally runs, and it should say "ok" seven times. `fix` is the
+# Nine things a build needed fixing by hand after the installer finished.
+# The installer does them itself now, so `check` is what normally runs,
+# and it should say "ok" for each (and once per engine). `fix` is the
 # old hand procedure, kept for a box built with an older installer: it
 # repairs what `check` finds and nothing else.
 #
@@ -20,6 +20,11 @@
 #                  address (a client bug once looped a server into itself
 #                  22,000 times)
 #   conntrack      room for at least 65536 connections
+#   xray-logs      every file in /var/log/xray owned by nobody: a root-owned
+#                  access.log kills Xray at start (2026-11-13: dead from the
+#                  install on, while this check said "ok xray-modes")
+#   engines        every engine running AND listening, the IKEv2 loader
+#                  started with its connections loaded (engines.sh)
 #
 # `fix` restarts Xray when it changed the unit or the binary. That is
 # free on a new box and is why this runs before any customer exists; it
@@ -141,6 +146,31 @@ LIST
   restart=1
 }
 
+c_xray_logs() {
+  local bad="" f o
+  [ -d /var/log/xray ] || { say_ok "xray-logs (no log directory)"; return; }
+  for f in /var/log/xray/*; do
+    [ -f "$f" ] || continue
+    o=$(stat -c %U:%G "$f")
+    [ "$o" = nobody:nogroup ] || bad+=" $f($o)"
+  done
+  [ -z "$bad" ] && say_ok xray-logs && return
+  say_drift xray-logs "not nobody's:$bad"
+  [ "$MODE" = fix ] || return
+  find /var/log/xray -type f -exec chown nobody:nogroup {} + -exec chmod 600 {} +
+  restart=1
+}
+
+c_engines() {
+  if "$HERE/engines.sh" check; then
+    return
+  fi
+  drift=1
+  [ "$MODE" = fix ] || return
+  echo "repairing what is down (Xray only when it is not running; anything else started, never restarted):"
+  "$HERE/engines.sh" fix || echo "STILL DOWN after the repair: see the lines above"
+}
+
 c_swanctl_unit() {
   local f=/etc/systemd/system/neoxify-swanctl-load.service want
   [ -f "$f" ] || { say_ok "swanctl-unit (no IKEv2 on this box)"; return; }
@@ -228,6 +258,7 @@ c_swanctl_unit
 c_wg_pubkey
 c_self_loop
 c_conntrack
+c_xray_logs
 
 if [ "$MODE" = fix ] && [ "$restart" = 1 ]; then
   if has_users && [ "${NX_ALLOW_RESTART:-0}" != 1 ]; then
@@ -248,5 +279,7 @@ if [ "$MODE" = fix ] && id xray >/dev/null 2>&1 && ! pgrep -u xray >/dev/null 2>
   [ -z "$(find /usr/local/etc/xray /usr/local/share/xray /var/log/xray /etc/systemd/system -user xray -print -quit 2>/dev/null)" ]; then
   userdel xray 2>/dev/null && echo "removed the unused xray account"
 fi
+# Last, after any restart above: what is running and listening now.
+c_engines
 [ "$MODE" = fix ] && exit 0
 exit $drift

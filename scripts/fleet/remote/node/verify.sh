@@ -53,6 +53,10 @@ for u in $units; do
   fi
 done
 [ "$(systemctl --failed --no-legend | wc -l)" = 0 ] && pass "no failed unit" || nope "failed units: $(systemctl --failed --no-legend | awk '{print $1}' | tr '\n' ' ')"
+# Running AND listening, every engine, IKEv2 with its connections loaded.
+while read -r word rest; do
+  case "$word" in ok) pass "$rest" ;; DOWN) nope "$rest" ;; esac
+done < <("$(dirname "$0")/engines.sh" check 2>&1)
 for u in apt-daily-upgrade.timer apt-daily.timer unattended-upgrades.service; do
   [ "$(systemctl is-enabled "$u" 2>&1 | head -1)" = masked ] && pass "$u masked" || nope "$u is not masked"
 done

@@ -13,8 +13,9 @@ export const isV4 = (s) =>
   /^\d{1,3}(\.\d{1,3}){3}$/.test(s) &&
   s.split(".").every((p) => Number(p) <= 255);
 
-/** a.b.x.x, so a log line never carries a whole node address. */
-export const maskV4 = (s) => (isV4(s) ? s.split(".").slice(0, 2).join(".") + ".x.x" : s);
+/** <ip>: no part of a node address in a log line. It kept the first two
+ * octets until 2026-11-13, which is enough to name the provider range. */
+export const maskV4 = (s) => (isV4(s) ? "<ip>" : s);
 
 /**
  * Records whose content IS the address. Equality, never a prefix or a

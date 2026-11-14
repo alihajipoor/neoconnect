@@ -11,6 +11,13 @@
 # half before anyone saw it, which is why this is checked on every build.
 set -uo pipefail
 umask 077
+
+# How many lines of dig's +short output are answers: IPv4 addresses
+# only. dig prints ";; connection timed out; no servers could be
+# reached" on that same output when nothing answers, and counting every
+# line made a dead Xray a PASS (2026-11-13).
+uot_answers() { grep -cE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || true; }
+[ "${1:-}" = --count-answers ] && { uot_answers; exit 0; }
 C=/usr/local/etc/xray/config.json
 D=$(mktemp -d /dev/shm/uot.XXXXXX)
 XP=
@@ -29,12 +36,24 @@ if [ ! -s "$D/c.json" ]; then
   echo "UOT-FAIL no shadowsocks-in inbound with a seed user in the config"
   exit 1
 fi
+# The server's own Xray must be running and listening on that port: this
+# test talks to it, and on 2026-11-13 it "passed" with it dead.
+SSP=$(jq -r '.inbounds[] | select(.tag == "shadowsocks-in") | .port' "$C")
+if [ "$(systemctl is-active xray 2>/dev/null)" != active ]; then
+  echo "UOT-FAIL the server's Xray is not running ($(systemctl is-active xray 2>&1 | head -1))"
+  exit 1
+fi
+if [ -z "$(ss -Hltn "( sport = :$SSP )" 2>/dev/null)" ]; then
+  echo "UOT-FAIL nothing listens on the Shadowsocks port $SSP"
+  exit 1
+fi
 /usr/local/bin/xray run -c "$D/c.json" >"$D/log" 2>&1 &
 XP=$!
 sleep 2
-n=$(dig +time=4 +tries=1 -p 15399 @127.0.0.1 www.example.com A +short 2>/dev/null | grep -c .)
+out=$(dig +time=4 +tries=1 -p 15399 @127.0.0.1 www.example.com A +short 2>/dev/null)
+n=$(printf '%s\n' "$out" | uot_answers)
 if [ "$n" -ge 1 ]; then
-  echo "UOT-PASS DNS over Shadowsocks UDP-over-TCP answered ($n line(s))"
+  echo "UOT-PASS DNS over Shadowsocks UDP-over-TCP answered ($n address(es))"
 else
   echo "UOT-FAIL no DNS answer over Shadowsocks UDP-over-TCP"
   exit 1

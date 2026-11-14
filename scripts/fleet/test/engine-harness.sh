@@ -33,6 +33,7 @@ ok_t_three() { return 0; }
 
 step t.one auto "First"
 step t.two auto "Second"
+gate_flag t.two --accept-two
 step t.owner owner "The owner's"
 step t.three auto "Third"
 # The toy's "customers get the server" step: it must not run on unproven work.
@@ -40,7 +41,12 @@ needs_prior t.three
 
 open_run toy subject
 build_mask
-run_checklist || exit 1
+from=1
+[[ -f "$RUN_DIR/timings" ]] && from=$(($(wc -l <"$RUN_DIR/timings") + 1))
+rc=0
+run_checklist || rc=1
+report_timings "$from"
+[[ $rc -eq 0 ]] || exit 1
 # As in `fleet`: --only is one step and concludes nothing.
 [[ -n "$OPT_ONLY" ]] && exit 0
 conclude_run || exit 1

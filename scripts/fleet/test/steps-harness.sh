@@ -40,6 +40,8 @@ CALLS="$RUN_DIR/calls"
 OPT_DRY=0 OPT_YES=1 OPT_FROM="" OPT_ONLY="" OPT_DONE="" OPT_WAIVE="" OPT_PLANS="" OPT_DEFAULT_TO=""
 OPT_HOP="${T_HOP:-auto}" OPT_NO_RELAY="${T_NO_RELAY:-0}" OPT_NO_PLANS="${T_NO_PLANS:-0}"
 OPT_ACCEPT_HELD=0 OPT_ACCEPT_ZONE=0 OPT_ACCEPT_DEST="${T_ACCEPT_DEST:-0}" OPT_RELAY_SET=""
+OPT_PROVEN="${T_PROVEN:-}" OPT_FRESH_DUMP="${T_FRESH:-0}" OPT_CANARY_PLAN="Internal test" OPT_PROVIDER_FW=0
+EXTRA_AUTHORIZED_KEY_FILE="${T_EXTRA_KEY-}"
 # --dest, as given on this pass (empty: not given).
 DEST="${T_DEST:-}"
 # T_OLD may be set and empty: a plain `add` has no old server.
@@ -121,6 +123,8 @@ q() {
     plan-holds) echo "${T_PLAN_HOLDS:-Pro|0|f|8}" ;;
     provision) printf 'have|%s\nwant|0\nnot-acked|0\n' "${T_HAVE:-0}" ;;
     route-ids) echo "${T_ROUTE_IDS:-}" ;;
+    node-ports) echo "${T_NODE_PORTS:-}" | tr ';' '\n' ;;
+    canary-plan) echo "${T_CANARY_ROW:-}" ;;
     *) return 0 ;;
   esac
 }

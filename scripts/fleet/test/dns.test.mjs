@@ -82,7 +82,7 @@ describe("aRecordBody", () => {
 describe("masking", () => {
   it("never shows a whole address", () => {
     assert.equal(isV4("203.0.113.10"), true);
-    assert.equal(maskV4("203.0.113.10"), "203.0.x.x");
+    assert.equal(maskV4("203.0.113.10"), "<ip>", "no octet of a node address survives the mask");
     assert.equal(maskV4("abc.example.org"), "abc.example.org");
     assert.ok(!recordLine(rec("abc.example.org", "203.0.113.10")).includes("203.0.113.10"));
   });

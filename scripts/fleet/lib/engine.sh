@@ -18,7 +18,7 @@
 # command they would have run, and every step and verify is shown.
 
 STEP_IDS=()
-declare -A STEP_TITLE=() STEP_KIND=() STEP_PRIOR=()
+declare -A STEP_TITLE=() STEP_KIND=() STEP_PRIOR=() STEP_GATE_FLAG=()
 
 die() { echo "fleet: $*" >&2; exit 1; }
 dry() { [[ "${OPT_DRY:-0}" == 1 ]]; }
@@ -45,6 +45,30 @@ step() {
 needs_prior() {
   [[ -n "${STEP_TITLE[$1]:-}" ]] || die "needs_prior: no step $1"
   STEP_PRIOR[$1]=1
+}
+
+# gate_flag <id> <flag>: the flag that records the owner's decision to go
+# on past that gate. A stop there prints the whole command to continue
+# with it, so nobody has to work out what to type.
+gate_flag() {
+  [[ -n "${STEP_TITLE[$1]:-}" ]] || die "gate_flag: no step $1"
+  STEP_GATE_FLAG[$1]="$2"
+}
+
+# continue_cmd [flags...]: the exact command that picks this run up
+# again. It names the run directory, never an address: `fleet continue`
+# reads the rest of the command line from there.
+continue_cmd() {
+  local c="scripts/fleet/fleet continue ${RUN_DIR:-<run directory>}"
+  [[ $# -gt 0 ]] && c+=" $*"
+  echo "$c"
+}
+
+# --done a,b: is this step one of them?
+done_named() {
+  [[ -n "${OPT_DONE:-}" ]] || return 1
+  case ",$OPT_DONE," in *",$1,"*) return 0 ;; esac
+  return 1
 }
 
 # ---------------------------------------------------------------- state
@@ -167,8 +191,8 @@ confirm() {
   local q="$1" a
   [[ "${OPT_YES:-0}" == 1 ]] && return 0
   if ! have_tty; then
-    echo "  This step asks before it runs, and there is no terminal to ask at. Run again with --yes"
-    echo "  once the owner has agreed to it."
+    echo "  This step asks before it runs, and there is no terminal to ask at. Once the owner has agreed:"
+    echo "    $(continue_cmd --yes)"
     return 1
   fi
   read -r -p "  $q [yes/no]: " a </dev/tty || return 1
@@ -178,8 +202,8 @@ confirm() {
 wait_owner() { # <step id>
   local a
   if ! have_tty; then
-    echo "  Waiting for the owner, and there is no terminal to wait at. When it is done, run the same"
-    echo "  command again with: --done $1"
+    echo "  Waiting for the owner, and there is no terminal to wait at. When it is done:"
+    echo "    $(continue_cmd --done "$1")"
     return 1
   fi
   while true; do
@@ -196,23 +220,61 @@ wait_owner() { # <step id>
 resume_hint() {
   echo
   echo "Stopped at $1. Nothing after it ran."
-  echo "Fix the cause, then run the same command again: it resumes at this step."
+  echo "Fix the cause, then continue (it resumes at this step):"
+  echo "    $(continue_cmd)"
+  if [[ -n "${STEP_GATE_FLAG[$1]:-}" ]]; then
+    echo "If the owner decides to go on past this gate as it is:"
+    echo "    $(continue_cmd "${STEP_GATE_FLAG[$1]}")"
+  fi
   echo "Run log, with the undo line of every change so far: $RUN_DIR/run.log"
 }
 
 refuse_unproven() { # <what is refused> <the unproven step ids, one per line>
   echo "REFUSED: $1. These earlier steps never passed in this run:"
   echo "$2" | sed 's/^/    /'
-  echo "Run the same command with no --from and no --only: it resumes at the first of them."
+  echo "Continue with no --from and no --only, and it resumes at the first of them:"
+  echo "    $(continue_cmd)"
   echo "If the owner has decided to go on without one, record that with --waive <step>[,<step>]:"
   echo "it is written to the run log, and the run then ends as complete EXCEPT those steps."
 }
 
+# ---------------------------------------------------------------- timing
+
+# step_end <id> <result> <start, in $SECONDS>: how long the step took,
+# printed and kept in the run directory (one line per try, every pass).
+step_end() {
+  local s=$((SECONDS - $3))
+  echo "  took ${s}s"
+  dry || printf '%s|%s|%s|%s\n' "$1" "$2" "$s" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$RUN_DIR/timings"
+}
+
+# report_timings <first line of this pass in the timings file>: a table
+# of the steps this pass ran, with a total, and the whole run's table
+# (every pass, every try) written to timings.txt in the run directory.
+report_timings() {
+  local from="${1:-1}" f="$RUN_DIR/timings"
+  dry && return 0
+  [[ -s "$f" ]] || return 0
+  echo
+  echo "Time per step, this pass:"
+  tail -n +"$from" "$f" | awk -F'|' '{printf "  %-24s %-10s %6ss\n", $1, $2, $3; t += $3} END {printf "  %-24s %-10s %6ss  (%dm %02ds)\n", "TOTAL", "", t, t / 60, t % 60}'
+  {
+    echo "Time per step, the whole run (every pass; a step tried twice counts both tries):"
+    awk -F'|' '{if (!($1 in s)) o[++n] = $1; s[$1] += $3; c[$1]++; r[$1] = $2; t += $3}
+      END {for (i = 1; i <= n; i++) printf "%-24s %4d try %-10s %6ss\n", o[i], c[o[i]], r[o[i]], s[o[i]];
+           printf "%-24s %4s     %-10s %6ss  (%dm %02ds)\n", "TOTAL", "", "", t, t / 60, t % 60}' "$f"
+  } >"$RUN_DIR/timings.txt"
+  echo "Whole run: $RUN_DIR/timings.txt"
+}
+
 run_checklist() {
-  local total=${#STEP_IDS[@]} n=0 id fn kind rc started=1 miss
+  local total=${#STEP_IDS[@]} n=0 id fn kind rc started=1 miss t0
   [[ -n "${OPT_FROM:-}" ]] && started=0
   if [[ -n "${OPT_FROM:-}" && -z "${STEP_TITLE[$OPT_FROM]:-}" ]]; then die "no step '$OPT_FROM' in this checklist"; fi
   if [[ -n "${OPT_ONLY:-}" && -z "${STEP_TITLE[$OPT_ONLY]:-}" ]]; then die "no step '$OPT_ONLY' in this checklist"; fi
+  for id in ${OPT_DONE:+${OPT_DONE//,/ }}; do
+    [[ -n "${STEP_TITLE[$id]:-}" ]] || die "--done: no step '$id' in this checklist"
+  done
 
   if ! dry; then
     record_waivers
@@ -260,34 +322,46 @@ run_checklist() {
       continue
     fi
 
+    t0=$SECONDS
     if [[ -n "${STEP_PRIOR[$id]:-}" ]]; then
       miss="$(unproven "$id")"
       if [[ -n "$miss" ]]; then
         refuse_unproven "$id is where customers get the server, and it does not run on unproven work" "$miss" | sed 's/^/  /'
         log_line "REFUSED $id (unproven before it: $(tr '\n' ' ' <<<"$miss"))"
-        return 1
-      fi
-    fi
-
-    if [[ "$kind" == "ask" ]]; then
-      if ! confirm "This step changes a live host other than the new box. Run it now?"; then
-        resume_hint "$id"
+        step_end "$id" refused "$t0"
         return 1
       fi
     fi
 
     log_line "START $id ${STEP_TITLE[$id]}"
-    if [[ "$kind" == "owner" && "${OPT_DONE:-}" == "$id" ]]; then
-      # --done <step>: the owner did it between two runs. What to do was
-      # printed the first time; only the verify is left.
-      echo "  the owner reports this done (--done $id)"
-      log_line "OWNER-DONE $id (--done)"
+    if done_named "$id"; then
+      # --done <step>: the step's action is NEVER run again here. For an
+      # owner's step the owner did it between two runs; for any other
+      # step it was done another way (by hand, or in an earlier pass).
+      # Either way only the verify runs, and it alone decides.
+      if [[ "$kind" == "owner" ]]; then
+        echo "  the owner reports this done (--done $id): only the verify runs"
+        log_line "OWNER-DONE $id (--done)"
+      else
+        echo "  --done $id: its action is not run again; only its verify runs, and decides"
+        log_line "VERIFY-ONLY $id (--done)"
+      fi
     else
+      if [[ "$kind" == "ask" ]]; then
+        if ! confirm "This step changes a live host other than the new box. Run it now?"; then
+          log_line "WAITING $id (asks first; no --yes)"
+          step_end "$id" asked "$t0"
+          resume_hint "$id"
+          return 1
+        fi
+      fi
+
       { "do_$fn"; } 2>&1 | mask | tee -a "$RUN_DIR/run.log"
       rc=${PIPESTATUS[0]}
       if [[ $rc -ne 0 ]]; then
         log_line "FAILED $id (do, exit $rc)"
         echo "  STEP FAILED (exit $rc)"
+        step_end "$id" failed "$t0"
         resume_hint "$id"
         return 1
       fi
@@ -297,6 +371,7 @@ run_checklist() {
       if [[ "$kind" == "owner" ]] && ! state_has "nowait_$fn"; then
         if ! wait_owner "$id"; then
           log_line "WAITING $id (owner)"
+          step_end "$id" owner "$t0"
           echo
           echo "Stopped at $id, which is the owner's. Nothing after it ran."
           echo "Run log: $RUN_DIR/run.log"
@@ -310,11 +385,13 @@ run_checklist() {
     if [[ $rc -ne 0 ]]; then
       log_line "FAILED $id (verify, exit $rc)"
       echo "  VERIFY FAILED"
+      step_end "$id" failed "$t0"
       resume_hint "$id"
       return 1
     fi
     mark_done "$id"
     log_line "DONE $id"
+    step_end "$id" done "$t0"
   done
   return 0
 }

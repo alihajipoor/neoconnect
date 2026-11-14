@@ -12,7 +12,7 @@
 --     it are read;
 --   * read blocks run inside BEGIN READ ONLY (the wrapper adds it);
 --   * write blocks run in one transaction, end with a SELECT that shows
---     the result, and are refused without a fresh database dump;
+--     the result, and are refused unless the run has its one dump;
 --   * every "isEnabled" is qualified: routes and protocol_configs both
 --     have one, and an ambiguous column once rolled a whole retirement
 --     back.
@@ -158,13 +158,21 @@ SELECT sp.name,
  GROUP BY sp.id, sp.name, sp."defaultRouteId" ORDER BY sp.name;
 
 -- @@ revoked (read) name
--- Shared credentials still ACTIVE on the server's routes, and plans
--- with subscribers that would be left with no enabled route.
+-- Credentials still ACTIVE on the server's routes -- every one, shared
+-- and per-device alike (it counted shared ones only until 2026-11-13,
+-- while 452 of finland-3's 812 were per-device) -- and plans with
+-- subscribers that would be left with no enabled route.
 SELECT 'active-creds', count(*)
   FROM protocol_users pu JOIN routes r ON r.id = pu."routeId"
   JOIN protocol_configs e ON e.id = r."entryProtocolConfigId" JOIN nodes ne ON ne.id = e."nodeId"
   LEFT JOIN protocol_configs x ON x.id = r."exitProtocolConfigId" LEFT JOIN nodes nx ON nx.id = x."nodeId"
- WHERE pu.status = 'ACTIVE' AND pu."sessionId" IS NULL
+ WHERE pu.status = 'ACTIVE'
+   AND ((ne.name = :'name' AND r."exitProtocolConfigId" IS NULL) OR nx.name = :'name');
+SELECT 'of-them-per-device', count(*)
+  FROM protocol_users pu JOIN routes r ON r.id = pu."routeId"
+  JOIN protocol_configs e ON e.id = r."entryProtocolConfigId" JOIN nodes ne ON ne.id = e."nodeId"
+  LEFT JOIN protocol_configs x ON x.id = r."exitProtocolConfigId" LEFT JOIN nodes nx ON nx.id = x."nodeId"
+ WHERE pu.status = 'ACTIVE' AND pu."sessionId" IS NOT NULL
    AND ((ne.name = :'name' AND r."exitProtocolConfigId" IS NULL) OR nx.name = :'name');
 SELECT 'empty-plans', count(*) FROM (
   SELECT sp.id FROM subscription_plans sp
@@ -381,3 +389,43 @@ SELECT 'bytes-24h', count(DISTINCT u."subscriptionId") FILTER (WHERE u."bytesUp"
 
 -- @@ status-names (read)
 SELECT name FROM nodes WHERE status <> 'DISABLED' ORDER BY (role = 'RELAY'), name;
+
+-- @@ canary-plan (read) plan emails
+-- The plan a new server is proven through before any customer plan holds
+-- it: id | isActive | isPurchasable | routes | ACTIVE subscriptions |
+-- ACTIVE subscriptions of anyone but the test accounts (customers).
+SELECT sp.id, sp."isActive", sp."isPurchasable",
+       (SELECT count(*) FROM "_PlanAllowedRoutes" par WHERE par."B" = sp.id),
+       (SELECT count(*) FROM subscriptions s WHERE s."planId" = sp.id AND s.status = 'ACTIVE'),
+       (SELECT count(*) FROM subscriptions s JOIN customers c ON c.id = s."customerId"
+         WHERE s."planId" = sp.id AND s.status = 'ACTIVE' AND c.email <> ALL (string_to_array(:'emails', ',')))
+  FROM subscription_plans sp WHERE sp.name = :'plan';
+
+-- @@ canary-account (read) email plan
+-- The test account: id | status | its ACTIVE subscriptions on that plan.
+SELECT c.id, c.status,
+       coalesce((SELECT string_agg(s.id::text, ',' ORDER BY s.id) FROM subscriptions s
+                  JOIN subscription_plans sp ON sp.id = s."planId"
+                 WHERE s."customerId" = c.id AND sp.name = :'plan' AND s.status = 'ACTIVE'), '')
+  FROM customers c WHERE c.email = :'email';
+
+-- @@ canary-provision (read) name email plan
+-- How many of the server's routes the canary plan holds, on how many of
+-- them the test account holds an ACTIVE shared credential through that
+-- plan, and commands to the server not acknowledged yet.
+WITH mine AS (
+  SELECT r.id FROM routes r
+    JOIN protocol_configs e ON e.id = r."entryProtocolConfigId" JOIN nodes ne ON ne.id = e."nodeId"
+    LEFT JOIN protocol_configs x ON x.id = r."exitProtocolConfigId" LEFT JOIN nodes nx ON nx.id = x."nodeId"
+   WHERE r."isEnabled" AND ((ne.name = :'name' AND r."exitProtocolConfigId" IS NULL) OR nx.name = :'name'))
+SELECT 'routes', count(*) FROM "_PlanAllowedRoutes" par JOIN subscription_plans sp ON sp.id = par."B"
+ WHERE sp.name = :'plan' AND par."A" IN (SELECT id FROM mine)
+UNION ALL
+SELECT 'creds', count(DISTINCT pu."routeId") FROM protocol_users pu
+  JOIN subscriptions s ON s.id = pu."subscriptionId" AND s.status = 'ACTIVE'
+  JOIN subscription_plans sp ON sp.id = s."planId" AND sp.name = :'plan'
+  JOIN customers c ON c.id = s."customerId" AND c.email = :'email'
+ WHERE pu.status = 'ACTIVE' AND pu."sessionId" IS NULL AND pu."routeId" IN (SELECT id FROM mine)
+UNION ALL
+SELECT 'not-acked', count(*) FROM agent_commands ac JOIN nodes n ON n.id = ac."nodeId"
+ WHERE n.name = :'name' AND ac."createdAt" > now() - interval '30 minutes' AND ac.status::text <> 'ACKED';

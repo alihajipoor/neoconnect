@@ -200,17 +200,17 @@ checklist_replace() {
   register_precheck_steps
   register_add_steps
   step move.hop ask "Relay hop moved to the new server before the old one goes (only if the old one carries it)"
-  step add.plans auto "Plans, one at a time: the new server in and the old one out in the same edit (database dump first)"
+  register_canary_steps
+  step add.plans auto "Customer plans, one at a time: the new server in and the old one out in the same edit"
   # Nothing reaches a customer until every proof before this has passed
   # in this run. --from and --only do not get round that.
   needs_prior add.plans
   step add.provision auto "Provisioning check: credentials created and acknowledged"
-  step add.e2e-issued auto "Tunnels again, with credentials the panel issued"
-  step add.monitoring auto "Monitoring picked it up: inside probe reading and the server's API door"
+  step add.monitoring auto "Monitoring: the server's API door and an inside-probe reading (not waited for)"
   step move.defaults auto "No plan route and no plan default left on the old server"
   step retire.snapshot auto "Read-only snapshot of the old server: status, routes, plans, names"
   register_retire_guards
   register_retire_steps
-  step add.owner-after owner "What only the owner can do for the new server afterwards"
+  step add.owner-after owner "What only the owner can do for the new server afterwards (listed, not waited for)"
   step add.cleanup auto "Scratch files shredded on every host"
 }
