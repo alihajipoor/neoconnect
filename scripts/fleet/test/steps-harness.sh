@@ -68,6 +68,32 @@ rsh() {
     *reality-dest-audit.sh*) echo "${T_AUDIT:-OK    www.example.org             AS64500 EXAMPLE in ZZ}" ;;
     *"agent.json && echo enrolled"*) echo "${T_ENROLLED:-}" ;;
     *"provider-image.sh"*) printf '%s\n' "${T_IMAGE:-ok      ufw: not active, none of its chains loaded}" ;;
+    # The WireGuard/OpenVPN/IKEv2 dial on the panel host: T_DIAL is
+    # "wireguard=pass,openvpn=fail,..." (default pass).
+    *nx-dial.sh*)
+      local k r
+      for k in wireguard openvpn ikev2; do [[ "$2" == *" $k issued"* ]] && break; done
+      r="$(tr ',' '\n' <<<"${T_DIAL:-}" | sed -n "s/^$k=//p")"
+      echo "DIAL nxf-dial-test0"
+      if [[ "${r:-pass}" == pass ]]; then
+        printf '%s\n' "x $k issued | EXIT-MATCH | down 200 262144B 0.5s | up 200 262144B 0.5s" "E2E-PASS x $k issued" "HOLDING 25s"
+      else
+        printf '%s\n' "x $k issued | no WireGuard handshake in 20 s" "E2E-FAIL x $k issued"
+      fi
+      ;;
+    # The server's own view: T_SESSION_<KIND> is the line session.sh prints.
+    *session.sh*)
+      local v
+      for k in wireguard openvpn ikev2; do [[ "$2" == *"session.sh $k "* ]] && break; done
+      v="T_SESSION_${k^^}"
+      # WireGuard's first read is the baseline, before the dial.
+      if [[ "$k" == wireguard && ! -e "$RUN_DIR/wg-baseline" ]]; then
+        : >"$RUN_DIR/wg-baseline"
+        echo "${T_SESSION_WIREGUARD_BEFORE:-SESSION wireguard absent (no such peer)}"
+      else
+        echo "${!v:-SESSION $k found rx=300000 tx=300000 age=0}"
+      fi
+      ;;
   esac
   return 0
 }
@@ -125,6 +151,7 @@ q() {
     route-ids) echo "${T_ROUTE_IDS:-}" ;;
     node-ports) echo "${T_NODE_PORTS:-}" | tr ';' '\n' ;;
     canary-plan) echo "${T_CANARY_ROW:-}" ;;
+    dial-creds) echo "${T_DIAL_CREDS:-}" | tr ';' '\n' ;;
     *) return 0 ;;
   esac
 }

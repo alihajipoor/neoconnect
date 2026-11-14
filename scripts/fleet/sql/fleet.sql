@@ -330,6 +330,24 @@ SELECT e.protocol::text || '/' || e.transport::text, r.id, pu.id,
    AND e.protocol::text IN ('XRAY_VLESS_REALITY', 'XRAY_VLESS_TLS', 'XRAY_TROJAN', 'SHADOWSOCKS')
  ORDER BY 4, 1;
 
+-- @@ dial-creds (read) name email plan
+-- The test account's own shared WireGuard, OpenVPN and IKEv2 credentials
+-- on the server's direct routes, issued through that plan (empty: any
+-- plan): protocol | credential | the server's id for it (externalUserId:
+-- WireGuard's PUBLIC key, OpenVPN's certificate name, IKEv2's EAP user
+-- name). Never credentialsJson.
+SELECT e.protocol::text, pu.id, pu."externalUserId"
+  FROM protocol_users pu
+  JOIN subscriptions s ON s.id = pu."subscriptionId" AND s.status = 'ACTIVE'
+  JOIN subscription_plans sp ON sp.id = s."planId"
+  JOIN customers c ON c.id = s."customerId"
+  JOIN routes r ON r.id = pu."routeId" AND r."exitProtocolConfigId" IS NULL
+  JOIN protocol_configs e ON e.id = r."entryProtocolConfigId" JOIN nodes ne ON ne.id = e."nodeId"
+ WHERE c.email = :'email' AND ne.name = :'name' AND pu.status = 'ACTIVE' AND pu."sessionId" IS NULL
+   AND (:'plan' = '' OR sp.name = :'plan')
+   AND e.protocol::text IN ('WIREGUARD', 'OPENVPN', 'IKEV2')
+ ORDER BY 1, pu."createdAt" DESC;
+
 -- @@ inside-latest (read) name
 -- The newest inside-probe reading per vantage and port. This, and bytes
 -- real customers moved, is the answer to "is it blocked": the panel's

@@ -172,11 +172,12 @@ describe("the canary: no customer plan before every protocol is proven", () => {
     assert.equal(step("canary_refuse_customers", {}, "").code, 1, "no such plan");
   });
 
-  it("WireGuard, OpenVPN and IKEv2 unproven: the run stops before the customer plans, naming them and the line to continue", () => {
+  it("WireGuard, OpenVPN and IKEv2 not dialled (no issued credential): the run stops before the customer plans, naming them and the line to continue", () => {
     const ports = "WIREGUARD/UDP|26200;OPENVPN/UDP|31205;IKEV2/UDP|500;XRAY_TROJAN/TCP|8443";
     let r = step("do_add_canary_other", { T_NODE_PORTS: ports });
     assert.equal(r.code, 0, r.out);
-    assert.equal(stateOf("canary_wireguard"), "unproven");
+    assert.match(r.out, /WIREGUARD: NOT DIALLED, the test account holds no panel-issued WIREGUARD credential on this server through 'Internal test'/);
+    assert.equal(stateOf("canary_wireguard"), "fail");
     r = step("ok_add_canary_other");
     assert.equal(r.code, 1);
     assert.match(r.out, /NOT PROVEN on this server: wireguard openvpn ikev2/);
@@ -188,7 +189,7 @@ describe("the canary: no customer plan before every protocol is proven", () => {
     const ports = "WIREGUARD/UDP|26200;OPENVPN/UDP|31205;IKEV2/UDP|500";
     step("do_add_canary_other", { T_NODE_PORTS: ports, T_PROVEN: "wireguard,openvpn" });
     assert.equal(stateOf("canary_wireguard"), "elsewhere");
-    assert.equal(stateOf("canary_ikev2"), "unproven");
+    assert.equal(stateOf("canary_ikev2"), "fail");
     const r = step("ok_add_canary_other");
     assert.equal(r.code, 1);
     assert.match(r.out, /NOT PROVEN on this server: ikev2/);

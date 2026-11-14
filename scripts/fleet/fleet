@@ -8,6 +8,8 @@
 #   fleet continue <run dir> [options]          pick a stopped run up again, same command line
 #   fleet status [<name>]                       read-only
 #   fleet plan-check <name> [--default-to <s>]  read-only: would retiring it pass the plan guard?
+#   fleet prove <name> [--plans <plan>]        dial its WireGuard, OpenVPN and IKEv2 with the test account's
+#                                               issued credentials (no server, plan or database change)
 #   fleet steps <precheck|add|retire|replace>   the checklist, ids and titles
 #   fleet dns <list|get|create-a|delete|...>    Cloudflare helper, output masked
 #
@@ -68,7 +70,7 @@ OPT_FRESH_DUMP=0 OPT_USE_DUMP="" OPT_PROVIDER_FW=0 OPT_PROVEN="" OPT_CANARY_PLAN
 REGION="" DEST="" NAME="" OLD="" NEW_IP=""
 
 usage() {
-  sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,49p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-2}"
 }
 
@@ -332,6 +334,29 @@ case "$CMD" in
     trap "rm -rf '$RUN_DIR'" EXIT
     build_mask
     { do_retire_guard_plans && ok_retire_guard_plans; } 2>&1 | mask
+    exit "${PIPESTATUS[0]}"
+    ;;
+
+  prove)
+    # The add's WireGuard, OpenVPN and IKEv2 proof, on its own, against a
+    # live server: the test account's credentials the panel issued (through
+    # --plans <plan>, or any plan), dialled from a throwaway container on
+    # the panel host. Changes nothing on the server, the plans or the
+    # database; the panel host keeps only the dial image.
+    [[ ${#POS[@]} -eq 1 ]] || usage
+    NAME="${POS[0]}"
+    name_ok "$NAME"
+    load_env
+    load_checklists
+    RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fleet-prove.XXXXXX")"
+    if ! dry; then
+      NEW_IP="$(node_field "$NAME" publicIp)" || die "cannot read $NAME from the database"
+      ip_ok "$NEW_IP"
+      # shellcheck disable=SC2064
+      trap "cleanup_hosts >/dev/null; rm -rf '$RUN_DIR'" EXIT
+    fi
+    build_mask
+    prove_server "$OPT_PLANS" 2>&1 | mask
     exit "${PIPESTATUS[0]}"
     ;;
 

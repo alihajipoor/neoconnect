@@ -96,17 +96,57 @@ plan no customer can buy:
    account its credentials, exactly as for a customer, and the five Xray
    protocols are dialled with them straight to the server and the four
    relay ones through the relay box, exit address matched;
-5. `add.canary-other`: WireGuard, OpenVPN and IKEv2. No scripted client
-   dials them yet, so this stops, with the canary open, naming them.
-   Prove them in the real app signed in as the test account, then
-   continue with `--proven-elsewhere ...` (on the record in the run log).
-   The seam for scripted proofs is `canary_prove_<protocol>` in
-   `lib/checklist-add.sh`: when one exists the step calls it;
+5. `add.canary-other`: WireGuard, OpenVPN and IKEv2, dialled by the
+   tool with their real clients and the test account's credentials
+   issued through the canary (see *WireGuard, OpenVPN and IKEv2* below).
+   A protocol that does not pass stops the run here, with the canary
+   open, naming it. `--proven-elsewhere <p>` still records a proof made
+   another way (the real app on the canary); it counts only for a
+   protocol whose dial did not pass, and the run log says both;
 6. `add.canary-close`: the test subscription the run made is deleted
    and `Internal test` gets back exactly the flags it had;
 7. `add.plans`: the customer plans, smallest first, heartbeats and
    backend errors checked after each. It refuses to start while any
    step before it, canary included, has not passed.
+
+### WireGuard, OpenVPN and IKEv2
+
+`add.canary-other`, and `fleet prove <name>` on its own against a live
+server, dial each of the three the server has, all at once, from the
+panel host (where the Xray proofs dial from):
+
+- the client is the real one (`wireguard-go` + `wg`, `openvpn`,
+  strongSwan's `charon` with `swanctl`), with the credential the panel
+  issued (`remote/panel/nx-dial.sh` builds the client config from it,
+  in RAM, never printed);
+- it runs in a throwaway container: its own network namespace on
+  Docker's default bridge, `--cap-drop ALL` plus `NET_ADMIN` (and
+  `NET_BIND_SERVICE` for IKEv2), `/dev/net/tun` only, read-only root,
+  128 MB, half a CPU, 64 processes, a hard time limit, removed on any
+  exit. Not `--privileged`, no host networking: the host's routes,
+  firewall and resolver are never touched. WireGuard runs in userspace
+  and IKEv2's ESP in charon's own libipsec, so no kernel module is asked
+  for;
+- proof is all of: the exit address `/health/ip` sees is the server's
+  own, 256 KB down and 256 KB up through `/health/bulk`, and the
+  server's own view of the session, read while the tunnel is held
+  (`remote/node/session.sh`: the WireGuard peer's handshake and byte
+  counters, this session's line in OpenVPN's status file, the IKEv2 SA
+  of that EAP user), shows at least 256 KB each way. Nothing secret, no
+  address, is printed;
+- the client leaves as a real one does (IKEv2 DELETE, OpenVPN exit
+  notify), so the server does not keep the session.
+
+What stays on the panel host: one image, `nxf-dial:1` (about 160 MB,
+Debian slim with the three clients), built the first time it is needed
+(about 20 s to a few minutes) and reused; its build cache is pruned.
+Nothing else: no container, volume or file outside `/dev/shm/nxf`, which
+the end-of-run cleanup removes. All three take about a minute together
+(OpenVPN is the slowest: its status file is written every 60 s at most).
+
+Proven for real on 2026-11-14 against finland-4 (`fleet prove
+finland-4`, client side only, nothing changed on the server): all three
+exit-matched, 256 KB each way, the server's own view agreeing, in 50 s.
 
 ### One database dump per run
 
@@ -214,6 +254,7 @@ scripts/fleet/fleet add <name> <ip> --region <r> --dry-run   # every command it 
 | `fleet replace <old> <ip>` | First of all: if the old box is already gone, its DNS names are deleted. Then `precheck`, `add` under the next free name, the relay hop moved if the old server carried it, each plan switched from old to new in one edit, then `retire`. | Both of the above, and that relay routes to the exits behind the hop still exit where they should after it moved. |
 | `fleet continue <run dir> [flags]` | Picks a stopped run up again with the command line it was started with, plus the flags given now. | Nothing by itself. |
 | `fleet plan-check <name>` | Read-only: the plan guard of `retire`, for real (a dry run asks the database nothing). | Whether `retire` would pass its plan guard now, and why not. |
+| `fleet prove <name> [--plans <plan>]` | Dials the server's WireGuard, OpenVPN and IKEv2 with the test account's issued credentials (through that plan, or any), from a throwaway container on the panel host. Changes no server, plan or row. | Whether each of the three carries traffic to the server's own address, and what the server saw. |
 | `fleet status [<name>]` | Read-only: heartbeat, agent, API door, plans, relay routes, customers' bytes, inside-probe readings, engine units, certificate days, DNS records. | Nothing: it is a readout. |
 
 Useful flags: `--dry-run`, `--from <step>`, `--only <step>`, `--yes`
@@ -296,7 +337,7 @@ where the customers are. The trial is dialled from the panel host.
 | Deleting the VPS, a provider firewall, reverse DNS, the root password | Only the owner has the provider account. |
 | Re-signing the endpoint lists after a server is added or retired | The signing keys live on one machine and are never copied. Client releases come after this, never before. |
 | Names at a registrar the tool has no access to | Listed, unmasked, in the run directory for the owner to delete. Do it the same day. |
-| WireGuard, OpenVPN and IKEv2 tunnels | A scripted client cannot dial them yet. The tool shows that datagrams reach those ports, and `add.canary-other` stops before the customer plans until each is proven in the real app on the canary and recorded with `--proven-elsewhere`. |
+| WireGuard, OpenVPN and IKEv2 on a real device and network | No longer manual on the server: `add.canary-other` dials all three with their real clients from the panel host (see above). Still not covered by any scripted proof: the apps' own code paths (the Windows service's WinTUN and RAS, Android's and iOS's tunnels), a censored network, IPv6. `--proven-elsewhere` stays for a proof made in the real app when the scripted dial cannot be used. |
 | Customer bytes after 24 and 48 hours, per mobile and home network | Both inside boxes are datacentres. Only customers' own attempts show the networks they are on. |
 | Website and promo locations | Public copy is the owner's. |
 

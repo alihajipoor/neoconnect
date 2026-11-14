@@ -1469,14 +1469,181 @@ canary_plan() { echo "${OPT_CANARY_PLAN:-Internal test}"; }
 canary_email() { echo "${TEST_CANARY_EMAIL:-${TEST_DIRECT_EMAIL:-}}"; }
 test_emails() { printf '%s' "${TEST_DIRECT_EMAIL:-}${TEST_RELAY_EMAIL:+,$TEST_RELAY_EMAIL}${TEST_CANARY_EMAIL:+,$TEST_CANARY_EMAIL}"; }
 
-# The protocols no scripted client here can dial yet. Chunk B adds a
-# canary_prove_<protocol> function per protocol (canary_prove_wireguard,
-# canary_prove_openvpn, canary_prove_ikev2): it dials the server with the
-# test account's credential issued through the canary plan and returns 0
-# only on proof (exit address matched, bytes both ways). add.canary-other
-# calls it when it exists; until then a protocol is proven only by
-# --proven-elsewhere, on the record.
+# WireGuard, OpenVPN and IKEv2 are dialled with their real clients
+# (wireguard-go, openvpn, strongSwan's charon) in a throwaway container on
+# the panel host, with the test account's credential issued through the
+# canary plan (dial_set, below; `fleet prove` uses it on its own).
+# add.canary-other dials each one the server has, all at once. --proven-elsewhere still records a
+# proof made another way (the real app on the canary): it counts only for
+# a protocol whose scripted dial did not pass, and the run log says both.
 CANARY_OTHER_PROTOS="WIREGUARD OPENVPN IKEV2"
+
+# prove_server [plan]: `fleet prove <name>`. Dials each of WireGuard,
+# OpenVPN and IKEv2 the server has, at once, with the test account's
+# credentials (through that plan, or any plan). Changes no server, plan
+# or row; 1 unless every one was proven.
+prove_server() {
+  local plan="${1:-}" ports p have="" bad=0 t0
+  ports="$(q node-ports "name=$(nn)")" || return 1
+  dry && ports=$'WIREGUARD/UDP|1\nOPENVPN/UDP|2\nIKEV2/UDP|500'
+  for p in $CANARY_OTHER_PROTOS; do
+    grep -q "^$p/" <<<"$ports" && have+="$p "
+  done
+  [[ -n "$have" ]] || { say "$(nn) has no WireGuard, OpenVPN or IKEv2"; return 0; }
+  t0=$(date +%s)
+  panel_mint >/dev/null || return 1
+  # shellcheck disable=SC2086
+  dial_set "$(canary_email)" "$plan" $have
+  panel_token_shred >/dev/null
+  if dry; then
+    say "(dry run: nothing dialled)"
+    return 0
+  fi
+  for p in $have; do
+    if [[ "$(cat "$RUN_DIR/dial-${p,,}.rc" 2>/dev/null)" == 0 ]]; then say "$p: PROVEN"; else say "$p: NOT PROVEN"; bad=1; fi
+    rm -f "$RUN_DIR/dial-${p,,}.rc"
+  done
+  say "took $(($(date +%s) - t0))s"
+  return $bad
+}
+
+# dial_image: the panel host has the dial image (built once, kept; see
+# remote/panel/nx-dial-image.sh for what stays there).
+dial_image() {
+  local out rc
+  [[ "${DIAL_IMAGE_OK:-}" == 1 ]] && return 0
+  out="$(pscript nx-dial-image.sh)"
+  rc=$?
+  [[ -n "$out" ]] && say "$out"
+  [[ $rc -eq 0 ]] || return 1
+  DIAL_IMAGE_OK=1
+}
+
+dial_hold() { case "$1" in openvpn) echo 80 ;; *) echo 25 ;; esac; }
+
+# session_numbers <SESSION line> -> "rx tx age", or nothing when absent.
+session_numbers() {
+  sed -nE 's/^SESSION [a-z0-9]+ found rx=([0-9]+) tx=([0-9]+) age=(-?[0-9]+).*/\1 \2 \3/p' <<<"$1" | head -1
+}
+
+# session_ok <kind> <rx before> <tx before> <rx> <tx> <age> <seconds since the dial started>
+# The server's own view agrees: at least 256 KB more each way than before
+# the dial, and fresh: a WireGuard handshake in the last 3 minutes; an
+# OpenVPN status file written after the dial started (OpenVPN keeps one
+# session per certificate name, so that line is this session's); an IKEv2
+# SA established after the dial started.
+session_ok() {
+  local k="$1" rx0="$2" tx0="$3" rx="$4" tx="$5" age="$6" since="$7"
+  ((rx - rx0 >= 262144 && tx - tx0 >= 262144)) || return 1
+  case "$k" in
+    wireguard) ((age >= 0 && age <= 180)) ;;
+    openvpn | ikev2) ((age >= 0 && age <= since)) ;;
+    *) return 1 ;;
+  esac
+}
+
+# dial_set <email> <plan or ''> <WIREGUARD|OPENVPN|IKEV2>...: dials each,
+# all at once, with the credential the panel issued to <email> (through
+# <plan>, or any plan when empty). The result of each is in
+# $RUN_DIR/dial-<protocol>.rc, 0 only on proof; what each printed comes
+# out in order once all are done.
+dial_set() {
+  local email="$1" plan="$2" rows P lp pu xid
+  shift 2
+  rows="$(q dial-creds "name=$(nn)" "email=$email" "plan=$plan")" || return 1
+  if dry; then
+    pscript nx-dial-image.sh
+    for P in "$@"; do
+      lp="${P,,}"
+      rsh new "$REMOTE_DIR/session.sh $lp '{its id on the server}'"
+      rsh panel "$PANEL_ENV$REMOTE_DIR/nx-dial.sh {credential} '$(nn) $lp issued' $(dial_hold "$lp")"
+    done
+    return 0
+  fi
+  for P in "$@"; do echo 1 >"$RUN_DIR/dial-${P,,}.rc"; done
+  dial_image || { say "NOT DIALLED: the dial image is not on the panel host"; return 1; }
+  # Once, before the dials run side by side.
+  rpushdir new node || { say "NOT DIALLED: the server's own view cannot be read (no copy to the server)"; return 1; }
+  for P in "$@"; do
+    lp="${P,,}"
+    pu="" xid=""
+    IFS='|' read -r _ pu xid <<<"$(grep "^$P|" <<<"$rows" | head -1)"
+    if [[ -z "$pu" || -z "$xid" ]]; then
+      say "$P: NOT DIALLED, the test account holds no panel-issued $P credential on this server${plan:+ through '$plan'}" >"$RUN_DIR/dial-$lp.log"
+      continue
+    fi
+    (
+      dial_one "$P" "$pu" "$xid" >"$RUN_DIR/dial-$lp.log" 2>&1
+      echo $? >"$RUN_DIR/dial-$lp.rc"
+    ) &
+  done
+  wait
+  for P in "$@"; do
+    cat "$RUN_DIR/dial-${P,,}.log" 2>/dev/null
+    rm -f "$RUN_DIR/dial-${P,,}.log"
+  done
+}
+
+# dial_one <PROTOCOL> <credential id> <its id on the server>: 0 only on
+# proof. The panel host dials the credential with the real client in a
+# throwaway container (remote/panel/nx-dial.sh): the exit address must be
+# the server's own and 256 KB must go each way. While the tunnel is held,
+# the server's own view is read (remote/node/session.sh: WireGuard's peer
+# handshake and byte counters, OpenVPN's status file, IKEv2's SA list),
+# and it must show this session moving those bytes. Then the hold ends.
+dial_one() {
+  local P="$1" pu="$2" xid="$3" lp="${1,,}" out sv nums bg i t_start since cname
+  local rx0=0 tx0=0 rx=0 tx=0 age="" ok=0
+  out="$RUN_DIR/dial-$lp.out"
+  # A WireGuard peer's counters live as long as the peer: take them
+  # before. An OpenVPN or IKEv2 session starts from zero.
+  if [[ "$lp" == wireguard ]]; then
+    sv="$(rsh new "$REMOTE_DIR/session.sh $lp '$xid'" 2>/dev/null)"
+    nums="$(session_numbers "$sv")"
+    [[ -n "$nums" ]] && read -r rx0 tx0 _ <<<"$nums"
+  fi
+  : >"$out"
+  t_start=$(date +%s)
+  rsh panel "$PANEL_ENV$REMOTE_DIR/nx-dial.sh $pu '$(nn) $lp issued' $(dial_hold "$lp")" >"$out" 2>&1 &
+  bg=$!
+  for ((i = 0; i < 90; i++)); do
+    grep -q '^E2E-' "$out" && break
+    kill -0 "$bg" 2>/dev/null || break
+    sleep 2
+  done
+  if ! grep -q '^E2E-PASS' "$out"; then
+    wait "$bg" 2>/dev/null
+    grep -v '^DIAL ' "$out" | head -12 | sed 's/^/  /'
+    [[ -s "$out" ]] || say "$P: the panel host gave no answer"
+    say "$P: the scripted dial did NOT pass"
+    rm -f "$out"
+    return 1
+  fi
+  grep -E ' \| EXIT-' "$out" | sed 's/^/  /'
+  # The server's own view, while the tunnel is still held.
+  for ((i = 0; i < 18; i++)); do
+    sv="$(rsh new "$REMOTE_DIR/session.sh $lp '$xid'" 2>/dev/null)"
+    nums="$(session_numbers "$sv")"
+    if [[ -n "$nums" ]]; then
+      read -r rx tx age <<<"$nums"
+      since=$(($(date +%s) - t_start))
+      if session_ok "$lp" "$rx0" "$tx0" "$rx" "$tx" "$age" "$since"; then ok=1; break; fi
+    fi
+    kill -0 "$bg" 2>/dev/null || break
+    sleep 5
+  done
+  # Proven or not, the hold can end now.
+  cname="$(sed -n 's/^DIAL \(nxf-dial-[A-Za-z0-9]*\)$/\1/p' "$out" | head -1)"
+  [[ -n "$cname" ]] && kill -0 "$bg" 2>/dev/null && rsh panel "docker exec $cname touch /tmp/release 2>/dev/null; true" >/dev/null
+  wait "$bg" 2>/dev/null
+  rm -f "$out"
+  if [[ $ok -eq 1 ]]; then
+    say "$P: the server's own view: this session received $(((rx - rx0) / 1024)) KB and sent $(((tx - tx0) / 1024)) KB${age:+ (age ${age}s)}"
+    return 0
+  fi
+  say "$P: the tunnel passed from the client's side, but the server's own view did not confirm it: ${sv:-nothing read}"
+  return 1
+}
 
 # canary_row -> id|isActive|isPurchasable|routes|subs|customers' subs
 canary_row() { q canary-plan "plan=$(canary_plan)" "emails=$(test_emails)"; }
@@ -1587,18 +1754,38 @@ do_add_canary_other() {
     grep -q "^$p/" <<<"$ports" && have+="$p "
   done
   dry || state_set canary_other_have "$have"
+  [[ -n "$have" ]] || return 0
+  # Already proven on an earlier pass of this run: not dialled again.
+  local todo=""
   for p in $have; do
-    lp="${p,,}"
-    if declare -F "canary_prove_$lp" >/dev/null; then
-      if "canary_prove_$lp"; then dry || state_set "canary_$lp" pass; else dry || state_set "canary_$lp" fail; fi
-    elif [[ ",${OPT_PROVEN,,}," == *",$lp,"* ]]; then
-      say "$p: proven another way (--proven-elsewhere $lp), on the owner's record"
-      dry || { state_set "canary_$lp" elsewhere; log_line "PROVEN-ELSEWHERE $p on $(nn) (--proven-elsewhere)"; }
+    if ! dry && [[ "$(st "canary_${p,,}" "")" == pass ]]; then
+      say "$p: proven by the scripted dial on an earlier pass"
     else
-      say "$p: no scripted proof in this tool yet"
-      dry || state_set "canary_$lp" unproven
+      todo+="$p "
     fi
   done
+  [[ -n "$todo" ]] || return 0
+  panel_mint >/dev/null || return 1
+  # shellcheck disable=SC2086
+  dial_set "$(canary_email)" "$(canary_plan)" $todo
+  for p in $todo; do
+    lp="${p,,}"
+    if dry; then
+      :
+    elif [[ "$(cat "$RUN_DIR/dial-$lp.rc" 2>/dev/null)" == 0 ]]; then
+      say "$p: PROVEN by the scripted dial"
+      state_set "canary_$lp" pass
+      log_line "PROVEN $p on $(nn) (scripted dial: exit matched, 256 KB each way, the server's own view agrees)"
+    elif [[ ",${OPT_PROVEN,,}," == *",$lp,"* ]]; then
+      say "$p: the scripted dial did not prove it; proven another way (--proven-elsewhere $lp), on the owner's record"
+      state_set "canary_$lp" elsewhere
+      log_line "PROVEN-ELSEWHERE $p on $(nn) (--proven-elsewhere; the scripted dial did not pass)"
+    else
+      state_set "canary_$lp" fail
+    fi
+    rm -f "$RUN_DIR/dial-$lp.rc"
+  done
+  panel_token_shred >/dev/null
 }
 ok_add_canary_other() {
   local p lp r miss=""
@@ -1613,8 +1800,8 @@ ok_add_canary_other() {
   [[ -z "$miss" ]] && return 0
   say "NOT PROVEN on this server: ${miss% }. The customer plans are NOT touched until they are."
   say "The canary is open: '$(canary_plan)' is active, not purchasable, and the test account holds credentials on this"
-  say "server through it. Sign in with that account in the real app (the test VM), connect once on each of these,"
-  say "check the exit address and the server's own handshake, then continue with:"
+  say "server through it. The scripted dial's lines above say what failed: fix that and continue, and it is dialled"
+  say "again. Only if one was proven in the real app on the canary instead (exit address and the server's own view):"
   say "    $(continue_cmd --proven-elsewhere "$(tr ' ' ',' <<<"${miss% }")")"
   return 1
 }
