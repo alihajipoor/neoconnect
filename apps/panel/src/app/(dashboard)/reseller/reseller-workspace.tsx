@@ -214,7 +214,7 @@ export function ResellerWorkspace({
             {issuedTotal === 0 ? "Nothing yet." : "Nothing on this page — go back a page."}
           </p>
         ) : (
-          <Table>
+          <Table stack>
             <TableHeader>
               <TableRow>
                 <TableHead>Code</TableHead>
@@ -227,7 +227,7 @@ export function ResellerWorkspace({
             <TableBody>
               {vouchers.map((v) => (
                 <TableRow key={v.id}>
-                  <TableCell>
+                  <TableCell cell="primary">
                     <button
                       onClick={() => copy(v.code)}
                       className="flex items-center gap-1.5 font-mono text-sm hover:text-primary max-lg:min-h-10"
@@ -241,18 +241,18 @@ export function ResellerWorkspace({
                       )}
                     </button>
                   </TableCell>
-                  <TableCell>{v.plan.name}</TableCell>
-                  <TableCell className="text-muted-foreground">
+                  <TableCell label="Plan" phoneOrder={1}>{v.plan.name}</TableCell>
+                  <TableCell label="Sent to" wide phoneOrder={2} className="text-muted-foreground">
                     {v.recipientEmail ?? <span className="italic">given in person</span>}
                   </TableCell>
-                  <TableCell>
+                  <TableCell cell="status">
                     {v.redeemedCount > 0 ? (
                       <Badge className="bg-emerald-500/15 text-emerald-300">Redeemed</Badge>
                     ) : (
                       <Badge variant="secondary">Unused</Badge>
                     )}
                   </TableCell>
-                  <TableCell className="text-right">
+                  <TableCell cell="actions" className="text-right">
                     <div className="flex justify-end gap-1">
                       <Button
                         size="sm"

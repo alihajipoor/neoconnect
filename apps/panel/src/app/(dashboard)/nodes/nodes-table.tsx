@@ -72,7 +72,7 @@ export function NodesTable({ nodes, canManage }: { nodes: Node[]; canManage: boo
 function NodeRows({ nodes, canManage, empty }: { nodes: Node[]; canManage: boolean; empty: string }) {
   return (
     <div className="rounded-lg border border-white/8 bg-card/40">
-      <Table>
+      <Table stack>
         <TableHeader>
           <TableRow>
             <TableHead>Name</TableHead>
@@ -94,20 +94,20 @@ function NodeRows({ nodes, canManage, empty }: { nodes: Node[]; canManage: boole
           ) : (
             nodes.map((node) => (
               <TableRow key={node.id}>
-                <TableCell className="font-medium">{node.name}</TableCell>
-                <TableCell>
+                <TableCell cell="primary" className="font-medium">{node.name}</TableCell>
+                <TableCell label="Role" phoneOrder={4}>
                   <Badge variant="outline">{node.role}</Badge>
                 </TableCell>
-                <TableCell>{node.region}</TableCell>
-                <TableCell className="font-mono text-xs">{node.publicIp}</TableCell>
-                <TableCell>
+                <TableCell label="Region" phoneOrder={1}>{node.region}</TableCell>
+                <TableCell label="Public IP" phoneOrder={3} className="font-mono text-xs">{node.publicIp}</TableCell>
+                <TableCell cell="status">
                   <Badge variant={STATUS_VARIANT[node.status]}>{node.status}</Badge>
                 </TableCell>
-                <TableCell>
+                <TableCell label="Last heartbeat" phoneOrder={2}>
                   {node.lastHeartbeatAt ? new Date(node.lastHeartbeatAt).toLocaleString() : "—"}
                 </TableCell>
                 {canManage && (
-                  <TableCell>
+                  <TableCell cell="actions">
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="icon" aria-label="Row actions">

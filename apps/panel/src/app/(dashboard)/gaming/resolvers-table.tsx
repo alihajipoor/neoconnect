@@ -60,7 +60,7 @@ export function ResolversTable({
         )}
       </div>
       <div className="rounded-lg border border-white/8 bg-card/40">
-        <Table>
+        <Table stack>
           <TableHeader>
             <TableRow>
               <TableHead>Node</TableHead>
@@ -82,24 +82,24 @@ export function ResolversTable({
             ) : (
               resolvers.map((resolver) => (
                 <TableRow key={resolver.id}>
-                  <TableCell>
+                  <TableCell cell="primary">
                     <div className="font-medium">{nodeName(resolver)}</div>
                     {nodeRegion(resolver) && (
                       <div className="text-xs text-muted-foreground">{nodeRegion(resolver)}</div>
                     )}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell label="DoH endpoint" wide phoneOrder={2} className="font-mono text-xs">
                     {resolver.dohHost}:{resolver.dohPort}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell label="Proxy" phoneOrder={3} className="font-mono text-xs">
                     {resolver.proxyIp}:{resolver.proxyPort}
                   </TableCell>
-                  <TableCell>
+                  <TableCell cell="status">
                     <Badge variant={resolver.isEnabled ? "outline" : "secondary"}>
                       {resolver.isEnabled ? "Enabled" : "Disabled"}
                     </Badge>
                   </TableCell>
-                  <TableCell>
+                  <TableCell label="Health" wide phoneOrder={1}>
                     {/* Never a dash and never an empty cell. "Nothing has
                         ever confirmed this works" is a finding, and a
                         blank column reads as "fine, no news". */}
@@ -124,7 +124,7 @@ export function ResolversTable({
                     </div>
                   </TableCell>
                   {canManage && (
-                    <TableCell>
+                    <TableCell cell="actions">
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button variant="ghost" size="icon" aria-label="Row actions">

@@ -34,7 +34,7 @@ export function CustomersTable({ customers }: { customers: Customer[] }) {
         }
       />
       <div className="rounded-lg border border-white/8 bg-card/40">
-        <Table>
+        <Table stack>
           <TableHeader>
             <TableRow>
               <TableHead>Email</TableHead>
@@ -55,7 +55,7 @@ export function CustomersTable({ customers }: { customers: Customer[] }) {
             ) : (
               customers.map((customer) => (
                 <TableRow key={customer.id}>
-                  <TableCell className="font-medium">
+                  <TableCell cell="primary" className="font-medium">
                     {/* The row's own link rather than a "view" action in
                         the menu: opening the person is the most common
                         thing to want from this table. */}
@@ -66,15 +66,15 @@ export function CustomersTable({ customers }: { customers: Customer[] }) {
                       {customer.email}
                     </Link>
                   </TableCell>
-                  <TableCell>{customer.telegramId ?? "—"}</TableCell>
-                  <TableCell className="font-mono text-xs">{customer.referralCode ?? "—"}</TableCell>
-                  <TableCell>
+                  <TableCell label="Telegram" phoneOrder={2}>{customer.telegramId ?? "—"}</TableCell>
+                  <TableCell label="Referral" phoneOrder={3} className="font-mono text-xs">{customer.referralCode ?? "—"}</TableCell>
+                  <TableCell cell="status">
                     <Badge variant={customer.status === "ACTIVE" ? "success" : "secondary"}>
                       {customer.status}
                     </Badge>
                   </TableCell>
-                  <TableCell>{new Date(customer.createdAt).toLocaleDateString()}</TableCell>
-                  <TableCell>
+                  <TableCell label="Joined" phoneOrder={1}>{new Date(customer.createdAt).toLocaleDateString()}</TableCell>
+                  <TableCell cell="actions">
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="icon" aria-label="Row actions">

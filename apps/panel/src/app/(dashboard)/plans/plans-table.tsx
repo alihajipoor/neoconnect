@@ -50,7 +50,7 @@ export function PlansTable({
         )}
       />
       <div className="rounded-lg border border-white/8 bg-card/40">
-        <Table>
+        <Table stack>
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
@@ -72,21 +72,21 @@ export function PlansTable({
             ) : (
               plans.map((plan) => (
                 <TableRow key={plan.id}>
-                  <TableCell className="font-medium">{plan.name}</TableCell>
-                  <TableCell>
+                  <TableCell cell="primary" className="font-medium">{plan.name}</TableCell>
+                  <TableCell label="Data cap" phoneOrder={3}>
                     {plan.dataCapBytes === null ? (
                       <span className="text-highlight">Unlimited</span>
                     ) : (
                       formatBytes(plan.dataCapBytes)
                     )}
                   </TableCell>
-                  <TableCell>{plan.durationDays}d</TableCell>
-                  <TableCell>${plan.priceUsd}</TableCell>
+                  <TableCell label="Duration" phoneOrder={2}>{plan.durationDays}d</TableCell>
+                  <TableCell label="Price" phoneOrder={1}>${plan.priceUsd}</TableCell>
                   {/* Wraps, unlike the other cells: eight chips on one line
                       pushed the row menu off the right edge below about
                       1900px. */}
-                  <TableCell className="min-w-48 whitespace-normal max-lg:whitespace-nowrap">
-                    <div className="flex flex-wrap gap-1 max-lg:flex-nowrap">
+                  <TableCell label="Protocols" wide phoneOrder={4} className="min-w-48 whitespace-normal max-lg:whitespace-nowrap">
+                    <div className="flex flex-wrap gap-1 max-lg:flex-nowrap max-sm:flex-wrap">
                       {plan.protocolsAllowed.map((p) => (
                         <Badge key={p} variant="outline">
                           {PROTOCOL_LABELS[p]}
@@ -94,13 +94,13 @@ export function PlansTable({
                       ))}
                     </div>
                   </TableCell>
-                  <TableCell>
+                  <TableCell cell="status">
                     <Badge variant={plan.isActive ? "success" : "secondary"}>
                       {plan.isActive ? "Active" : "Inactive"}
                     </Badge>
                   </TableCell>
                   {canManage && (
-                    <TableCell>
+                    <TableCell cell="actions">
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button variant="ghost" size="icon" aria-label="Row actions">

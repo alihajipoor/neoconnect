@@ -40,7 +40,7 @@ export function TrafficCard({ traffic }: { traffic: CustomerTrafficRow[] | null 
           <p className="text-sm text-muted-foreground">No traffic through any server in the last 14 days.</p>
         ) : (
           <div className="rounded-lg border border-white/8 bg-card/40">
-            <Table>
+            <Table stack>
               <TableHeader>
                 <TableRow>
                   <TableHead>Day (UTC)</TableHead>
@@ -58,13 +58,13 @@ export function TrafficCard({ traffic }: { traffic: CustomerTrafficRow[] | null 
                   const firstOfDay = index === 0 || rows[index - 1].day !== row.day;
                   return (
                     <TableRow key={`${row.day}-${row.nodeName}-${row.protocol}`}>
-                      <TableCell className="font-mono text-xs text-muted-foreground">
+                      <TableCell cell="lead" className="font-mono text-xs text-muted-foreground">
                         {firstOfDay ? row.day : ""}
                       </TableCell>
-                      <TableCell className="text-sm">{row.nodeName}</TableCell>
-                      <TableCell className="text-sm text-muted-foreground">{protocolLabel(row.protocol)}</TableCell>
-                      <TableCell className="text-right text-sm tabular-nums">{megabytes(row.bytesUp)}</TableCell>
-                      <TableCell className="text-right text-sm tabular-nums">{megabytes(row.bytesDown)}</TableCell>
+                      <TableCell cell="primary" className="text-sm">{row.nodeName}</TableCell>
+                      <TableCell label="Protocol" wide phoneOrder={1} className="text-sm text-muted-foreground">{protocolLabel(row.protocol)}</TableCell>
+                      <TableCell label="Up" phoneOrder={2} className="text-right text-sm tabular-nums">{megabytes(row.bytesUp)}</TableCell>
+                      <TableCell label="Down" phoneOrder={3} className="text-right text-sm tabular-nums">{megabytes(row.bytesDown)}</TableCell>
                     </TableRow>
                   );
                 })}

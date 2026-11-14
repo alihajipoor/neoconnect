@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { ArrowDown, Network, Search } from "lucide-react";
 import type {
   IspNetwork,
@@ -83,6 +83,25 @@ function SortHead({
   );
 }
 
+/** An enum name that may break after each underscore when its cell is
+ * allowed to wrap (a phone); where it is not, it reads exactly as before. */
+function Breakable({ text }: { text: string }) {
+  return (
+    <>
+      {text.split("_").map((part, i) => (
+        <Fragment key={i}>
+          {i > 0 && (
+            <>
+              _<wbr />
+            </>
+          )}
+          {part}
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
 function RouteCells({ route }: { route: IspRoute }) {
   return (
     <>
@@ -91,8 +110,8 @@ function RouteCells({ route }: { route: IspRoute }) {
         {route.nodeName ? <span className="ml-1 text-xs text-muted-foreground">{route.nodeName}</span> : null}
         {route.isRelay ? <span className="ml-1 text-xs text-muted-foreground">(relay)</span> : null}
       </TableCell>
-      <TableCell className="text-sm text-muted-foreground">
-        {route.protocol ?? "--"}
+      <TableCell className="text-sm text-muted-foreground max-sm:max-w-28 max-sm:text-xs max-sm:whitespace-normal">
+        {route.protocol ? <Breakable text={route.protocol} /> : "--"}
         {route.transport && route.transport !== "TCP" ? ` / ${route.transport}` : ""}
       </TableCell>
     </>
@@ -210,7 +229,7 @@ export function IspRecommendationsView({ summary }: { summary: IspRecommendation
               <span className="font-medium">{network.org || "Unknown network"}</span>
               <span className="text-xs text-muted-foreground">AS{network.asn}</span>
             </div>
-            <Table>
+            <Table stickyFirst>
               <TableHeader>
                 <TableRow>
                   <TableHead>Route</TableHead>
@@ -270,7 +289,7 @@ export function IspRecommendationsView({ summary }: { summary: IspRecommendation
             </span>
           </div>
           {summary.unattributed.length > 0 ? (
-            <Table>
+            <Table stickyFirst>
               <TableHeader>
                 <TableRow>
                   <TableHead>Route</TableHead>

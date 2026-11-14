@@ -9,7 +9,7 @@ import { DeleteConfirm } from "@/components/dashboard/delete-confirm";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableMoreToggle, TableRow } from "@/components/ui/table";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -113,7 +113,7 @@ export function GameProfilesTable({
       </div>
 
       <div className="rounded-lg border border-white/8 bg-card/40">
-        <Table>
+        <Table stack>
           <TableHeader>
             <TableRow>
               <TableHead className="w-14">Order</TableHead>
@@ -144,16 +144,16 @@ export function GameProfilesTable({
             ) : (
               profiles.map((profile) => (
                 <TableRow key={profile.id}>
-                  <TableCell className="text-muted-foreground">{profile.sortOrder}</TableCell>
-                  <TableCell>
+                  <TableCell label="Order" more phoneOrder={5} className="text-muted-foreground">{profile.sortOrder}</TableCell>
+                  <TableCell cell="primary">
                     <div className="font-medium">{profile.displayName}</div>
                     <div className="font-mono text-xs text-muted-foreground">{profile.slug}</div>
                   </TableCell>
-                  <TableCell className="text-muted-foreground">{profile.publisher ?? "—"}</TableCell>
-                  <TableCell>
+                  <TableCell label="Publisher" phoneOrder={4} className="text-muted-foreground">{profile.publisher ?? "—"}</TableCell>
+                  <TableCell label="Carried" phoneOrder={1}>
                     <Badge variant="outline">{profile.hostnames.length} hosts</Badge>
                   </TableCell>
-                  <TableCell>
+                  <TableCell label="Excluded" phoneOrder={2}>
                     {/* Zero exclusions is worth flagging rather than
                         showing as a tidy "0". Almost every game has a
                         patch CDN, and pulling one through a node is how a
@@ -169,7 +169,7 @@ export function GameProfilesTable({
                       <Badge variant="outline">{profile.excludeHostnames.length} hosts</Badge>
                     )}
                   </TableCell>
-                  <TableCell>
+                  <TableCell label="Canary" phoneOrder={3}>
                     {/* No canary is not a cosmetic gap: it is the
                         difference between a client that can prove the
                         rules are live and one that reports "partial"
@@ -186,13 +186,13 @@ export function GameProfilesTable({
                       </Badge>
                     )}
                   </TableCell>
-                  <TableCell>
+                  <TableCell cell="status">
                     <Badge variant={profile.isActive ? "success" : "secondary"}>
                       {profile.isActive ? "Active" : "Inactive"}
                     </Badge>
                   </TableCell>
                   {canManage && (
-                    <TableCell>
+                    <TableCell cell="actions">
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button variant="ghost" size="icon" aria-label="Row actions">
@@ -226,6 +226,7 @@ export function GameProfilesTable({
                       </DropdownMenu>
                     </TableCell>
                   )}
+                  <TableMoreToggle />
                 </TableRow>
               ))
             )}

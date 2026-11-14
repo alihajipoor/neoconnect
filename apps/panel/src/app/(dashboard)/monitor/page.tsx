@@ -64,7 +64,7 @@ export default async function MonitorPage() {
             <span className="text-muted-foreground">{people === 1 ? "customer" : "customers"} carrying traffic</span>
           </p>
           <div className="rounded-lg border border-white/8 bg-card/40">
-            <Table>
+            <Table stack>
               <TableHeader>
                 <TableRow>
                   <TableHead>Customer</TableHead>
@@ -87,17 +87,17 @@ export default async function MonitorPage() {
                     // One customer can be on two servers at once (two
                     // devices), so the key carries the server and protocol.
                     <TableRow key={`${user.customerId}-${user.nodeName}-${user.protocol}`}>
-                      <TableCell className="font-medium">
+                      <TableCell cell="primary" className="font-medium">
                         <Link href={`/customers/${user.customerId}`} className="hover:text-primary hover:underline">
                           {user.email}
                         </Link>
                       </TableCell>
-                      <TableCell className="text-sm">{user.nodeName}</TableCell>
-                      <TableCell className="text-sm text-muted-foreground">{protocolLabel(user.protocol)}</TableCell>
-                      <TableCell className="text-sm" title={new Date(user.lastTrafficAt).toLocaleString()}>
+                      <TableCell label="Server" phoneOrder={1} className="text-sm">{user.nodeName}</TableCell>
+                      <TableCell label="Protocol" phoneOrder={2} className="text-sm text-muted-foreground">{protocolLabel(user.protocol)}</TableCell>
+                      <TableCell label="Last traffic" phoneOrder={3} className="text-sm" title={new Date(user.lastTrafficAt).toLocaleString()}>
                         {ago(user.lastTrafficAt)}
                       </TableCell>
-                      <TableCell className="text-right text-sm tabular-nums">{megabytes(user.bytesLast10Min)}</TableCell>
+                      <TableCell label="Last 10 minutes" phoneOrder={4} className="text-right text-sm tabular-nums">{megabytes(user.bytesLast10Min)}</TableCell>
                     </TableRow>
                   ))
                 )}
