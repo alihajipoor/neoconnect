@@ -31,7 +31,7 @@ export function ResolversTable({
 
   return (
     <section className="flex flex-col gap-4">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex items-start justify-between gap-4 max-sm:flex-col max-sm:gap-3">
         <div>
           <h2 className="text-lg font-semibold">Resolvers</h2>
           {/* The one sentence that has to be here. Thirteen relay routes

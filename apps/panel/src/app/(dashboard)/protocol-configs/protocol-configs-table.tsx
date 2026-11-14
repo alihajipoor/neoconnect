@@ -7,6 +7,7 @@ import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
 import { defaultInboundTag } from "@/lib/inbound-tags";
 import { retiredNodeIds } from "@/lib/retired";
 import { RetiredSwitch } from "@/components/dashboard/retired-switch";
+import { PageHeader } from "@/components/dashboard/page-header";
 import { deleteProtocolConfig } from "./actions";
 import { ProtocolConfigFormDialog } from "./protocol-config-form-dialog";
 import { ProtocolConfigEditDialog } from "./protocol-config-edit-dialog";
@@ -39,30 +40,31 @@ export function ProtocolConfigsTable({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">Protocol Configs</h1>
-          <p className="text-sm text-muted-foreground">VPN protocol engines registered on each node.</p>
-          <div className="mt-2">
-            <RetiredSwitch
-              count={retiredCount}
-              noun="servers' configs"
-              checked={showRetired}
-              onCheckedChange={setShowRetired}
+      <PageHeader
+        title="Protocol Configs"
+        description="VPN protocol engines registered on each node."
+        actions={
+          canManage && (
+            <ProtocolConfigFormDialog
+              nodes={nodes}
+              trigger={
+                <Button size="sm">
+                  <Plus /> New Protocol Config
+                </Button>
+              }
             />
-          </div>
-        </div>
-        {canManage && (
-          <ProtocolConfigFormDialog
-            nodes={nodes}
-            trigger={
-              <Button size="sm">
-                <Plus /> New Protocol Config
-              </Button>
-            }
+          )
+        }
+      >
+        <div className="mt-2">
+          <RetiredSwitch
+            count={retiredCount}
+            noun="servers' configs"
+            checked={showRetired}
+            onCheckedChange={setShowRetired}
           />
-        )}
-      </div>
+        </div>
+      </PageHeader>
       <div className="rounded-lg border border-white/8 bg-card/40">
         <Table>
           <TableHeader>

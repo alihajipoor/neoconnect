@@ -207,7 +207,7 @@ export function GameProfileFormDialog({
           </div>
         ) : (
           <form action={handleSubmit} className="flex flex-col gap-4">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="flex flex-col gap-2">
                 <Label htmlFor="displayName">Display name</Label>
                 <Input
@@ -237,7 +237,7 @@ export function GameProfileFormDialog({
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div className="flex flex-col gap-2">
                 <Label htmlFor="publisher">Publisher</Label>
                 <Input
@@ -376,7 +376,7 @@ export function GameProfileFormDialog({
                 hint="Networks the private exit would route, in CIDR form -- a bare address is rejected, since these are matched as prefixes. Not read by anything today."
               />
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="destinationAsn">Destination ASN</Label>
                   <Input
@@ -389,7 +389,7 @@ export function GameProfileFormDialog({
                     className="font-mono text-xs"
                   />
                 </div>
-                <label className="flex items-start gap-2 self-end pb-2 text-xs text-amber-200/90">
+                <label className="flex items-start gap-2 self-end pb-2 text-xs text-amber-200/90 max-sm:self-start max-sm:pb-0">
                   <Checkbox name="prefixComplete" defaultChecked={values?.prefixComplete ?? false} />
                   <span>
                     The networks above are believed to cover every prefix this game uses. Untick it if

@@ -227,7 +227,7 @@ function IncidentCard({ incident, canAct }: { incident: BlockIncident; canAct: b
             onChange={(ev) => setNote(ev.target.value)}
             placeholder="Note (optional)"
             maxLength={500}
-            className="h-8 min-w-48 flex-1 rounded-md border border-white/10 bg-transparent px-2 text-sm"
+            className="h-8 min-w-48 flex-1 rounded-md border border-white/10 bg-transparent px-2 text-sm max-lg:h-10 max-lg:text-base max-sm:w-full max-sm:min-w-0 max-sm:basis-full"
           />
           <Confirm
             label="Replace"
