@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
 import "./globals.css";
@@ -16,6 +16,18 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Neoxify Admin",
   description: "Neoxify control-plane admin panel",
+};
+
+/** Explicit rather than Next's default: the panel is used from phones.
+ * viewport-fit=cover lets the page reach under a notch and the home
+ * indicator, so the shell pads itself with env(safe-area-inset-*) instead
+ * (dashboard layout, header, menu drawer). No maximum-scale: pinch zoom
+ * stays available; inputs are 16px under lg so iOS does not zoom on focus. */
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#0a0a10",
 };
 
 export default function RootLayout({

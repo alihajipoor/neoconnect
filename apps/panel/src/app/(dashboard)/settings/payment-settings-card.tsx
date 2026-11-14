@@ -110,7 +110,7 @@ export function PaymentSettingsCard({ settings }: { settings: PaymentSettings })
       <Card>
         <CardHeader>
           <div className="flex items-center gap-2.5">
-            <div className="flex size-9 items-center justify-center rounded-lg bg-primary/15 text-primary">
+            <div className="flex size-9 items-center max-lg:shrink-0 justify-center rounded-lg bg-primary/15 text-primary">
               <CreditCard className="size-4.5" />
             </div>
             <div>
@@ -153,7 +153,7 @@ export function PaymentSettingsCard({ settings }: { settings: PaymentSettings })
       <Card>
         <CardHeader>
           <div className="flex items-center gap-2.5">
-            <div className="flex size-9 items-center justify-center rounded-lg bg-highlight/15 text-highlight">
+            <div className="flex size-9 items-center max-lg:shrink-0 justify-center rounded-lg bg-highlight/15 text-highlight">
               <Wallet className="size-4.5" />
             </div>
             <div>
@@ -213,7 +213,7 @@ export function PaymentSettingsCard({ settings }: { settings: PaymentSettings })
         </CardContent>
       </Card>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 max-sm:flex-col max-sm:items-start">
         <Button type="submit" disabled={pending}>
           {pending ? "Saving..." : "Save payment settings"}
         </Button>

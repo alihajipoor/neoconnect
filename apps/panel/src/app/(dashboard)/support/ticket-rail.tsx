@@ -83,14 +83,14 @@ export function TicketRail({ buckets }: { buckets: Record<SupportTicketStatus, T
         />
       </div>
 
-      <div className="flex gap-1 overflow-x-auto">
+      <div data-scroll-x="" className="flex gap-1 overflow-x-auto">
         {FILTERS.map((option) => (
           <button
             key={option.value}
             type="button"
             onClick={() => setFilter(option.value)}
             className={cn(
-              "rounded-lg px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition-colors",
+              "rounded-lg px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition-colors max-lg:min-h-10 max-lg:text-sm",
               filter === option.value
                 ? "bg-primary/15 text-foreground"
                 : "text-muted-foreground hover:bg-white/5 hover:text-foreground",
@@ -106,7 +106,9 @@ export function TicketRail({ buckets }: { buckets: Record<SupportTicketStatus, T
         ))}
       </div>
 
-      <div className="flex flex-col gap-1.5 overflow-y-auto lg:max-h-[calc(100vh-19rem)]">
+      {/* Below lg the rail sits above the conversation: held to a fixed
+          height so the open thread is still a short scroll away. */}
+      <div className="flex flex-col gap-1.5 overflow-y-auto max-lg:max-h-80 lg:max-h-[calc(100vh-19rem)]">
         {visible.length === 0 ? (
           <div className="flex flex-col items-center gap-2 rounded-lg border border-white/8 bg-card/40 px-4 py-10 text-center">
             <Inbox className="size-5 text-muted-foreground" />

@@ -5,6 +5,7 @@ import type { AdminUser } from "@/lib/types";
 import { deleteAdmin } from "./actions";
 import { AdminFormDialog } from "./admin-form-dialog";
 import { DeleteConfirm } from "@/components/dashboard/delete-confirm";
+import { PageHeader } from "@/components/dashboard/page-header";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -18,19 +19,19 @@ import {
 export function AdminsTable({ admins, currentAdminId }: { admins: AdminUser[]; currentAdminId: string }) {
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">Admins</h1>
-          <p className="text-sm text-muted-foreground">People with access to this panel.</p>
-        </div>
-        <AdminFormDialog
-          trigger={
-            <Button size="sm">
-              <Plus /> New Admin
-            </Button>
-          }
-        />
-      </div>
+      <PageHeader
+        title="Admins"
+        description="People with access to this panel."
+        actions={
+          <AdminFormDialog
+            trigger={
+              <Button size="sm">
+                <Plus /> New Admin
+              </Button>
+            }
+          />
+        }
+      />
       <div className="rounded-lg border border-white/8 bg-card/40">
         <Table>
           <TableHeader>

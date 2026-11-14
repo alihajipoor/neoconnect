@@ -29,6 +29,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { PageHeader } from "@/components/dashboard/page-header";
 import { cn } from "@/lib/utils";
 
 const STATUS_FILTERS: { label: string; value: InvoiceStatus | null }[] = [
@@ -95,12 +96,10 @@ export function InvoicesView({
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-xl font-semibold">Invoices</h1>
-        <p className="text-sm text-muted-foreground">
-          Every charge that has been issued, and what it actually collected.
-        </p>
-      </div>
+      <PageHeader
+        title="Invoices"
+        description="Every charge that has been issued, and what it actually collected."
+      />
 
       <RevenueCard summary={summary} days={summaryDays} />
 

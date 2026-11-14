@@ -1,16 +1,24 @@
 import * as React from "react";
 
 import { cn } from "@/lib/utils";
+import { TableScroll } from "./table-scroll";
+
+/* Phones: the table scrolls sideways inside its own box (TableScroll), with
+ * a hint on the edge that has more; the page never does. Cells keep
+ * whitespace-nowrap, so a column is as wide as its content needs and no
+ * narrower. A column that is not worth the width on a phone can be dropped
+ * under sm (640px) with `hideOnPhone` -- on its TableHead AND on the
+ * matching TableCell in every row, or the columns misalign. */
 
 function Table({ className, ...props }: React.ComponentProps<"table">) {
   return (
-    <div data-slot="table-container" className="relative w-full overflow-x-auto">
+    <TableScroll>
       <table
         data-slot="table"
         className={cn("w-full caption-bottom text-sm", className)}
         {...props}
       />
-    </div>
+    </TableScroll>
   );
 }
 
@@ -34,12 +42,13 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
   );
 }
 
-function TableHead({ className, ...props }: React.ComponentProps<"th">) {
+function TableHead({ className, hideOnPhone, ...props }: React.ComponentProps<"th"> & { hideOnPhone?: boolean }) {
   return (
     <th
       data-slot="table-head"
       className={cn(
         "h-10 px-3 text-left align-middle font-medium text-muted-foreground whitespace-nowrap [&:has([role=checkbox])]:pr-0",
+        hideOnPhone && "max-sm:hidden",
         className,
       )}
       {...props}
@@ -47,11 +56,11 @@ function TableHead({ className, ...props }: React.ComponentProps<"th">) {
   );
 }
 
-function TableCell({ className, ...props }: React.ComponentProps<"td">) {
+function TableCell({ className, hideOnPhone, ...props }: React.ComponentProps<"td"> & { hideOnPhone?: boolean }) {
   return (
     <td
       data-slot="table-cell"
-      className={cn("p-3 align-middle whitespace-nowrap [&:has([role=checkbox])]:pr-0", className)}
+      className={cn("p-3 align-middle whitespace-nowrap [&:has([role=checkbox])]:pr-0", hideOnPhone && "max-sm:hidden", className)}
       {...props}
     />
   );

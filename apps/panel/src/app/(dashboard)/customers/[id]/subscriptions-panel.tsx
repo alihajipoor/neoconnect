@@ -84,8 +84,8 @@ export function SubscriptionsPanel({
                   className="flex flex-col gap-3 rounded-lg border border-white/8 bg-card/40 p-3.5"
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2.5">
-                      <span className="font-medium">{plan?.name ?? "Unknown plan"}</span>
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <span className="font-medium break-words max-lg:min-w-0">{plan?.name ?? "Unknown plan"}</span>
                       <Badge variant={active ? "default" : "outline"}>{subscription.status}</Badge>
                     </div>
 

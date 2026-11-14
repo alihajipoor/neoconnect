@@ -102,8 +102,8 @@ function PlanFeatureRow({ grant, canManage }: { grant: PlanFeatureGrant; canMana
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-white/5 py-3 last:border-b-0">
-      <div className="w-40 shrink-0">
+    <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-white/5 py-3 last:border-b-0 max-sm:flex-col max-sm:items-start">
+      <div className="w-40 shrink-0 max-sm:w-full">
         <div className="text-sm font-medium">{grant.planName}</div>
         {pending && <div className="text-xs text-muted-foreground">Saving...</div>}
       </div>

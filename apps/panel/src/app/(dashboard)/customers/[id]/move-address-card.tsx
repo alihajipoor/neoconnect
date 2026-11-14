@@ -52,7 +52,7 @@ export function MoveAddressCard({ customerId }: { customerId: string }) {
           {pending ? "Moving..." : "Move account"}
         </Button>
         {issued && (
-          <p className="text-sm">
+          <p className="text-sm [overflow-wrap:anywhere]">
             New recovery code, shown once: <code className="font-mono">{issued}</code>
           </p>
         )}

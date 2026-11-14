@@ -74,7 +74,7 @@ function SortHead({
       <button
         type="button"
         onClick={() => onSort(sortKey)}
-        className={cn("inline-flex items-center gap-1 hover:text-foreground", active && "text-foreground")}
+        className={cn("inline-flex items-center gap-1 hover:text-foreground max-lg:min-h-10", active && "text-foreground")}
       >
         {children}
         <ArrowDown className={cn("size-3", active ? "opacity-100" : "opacity-0")} aria-hidden />

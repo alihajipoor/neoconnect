@@ -406,7 +406,7 @@ function SummaryCard({ summary, hours }: { summary: ClientAttemptSummaryRow[]; h
             const meta = OUTCOMES[row.outcome] ?? OUTCOMES.OTHER;
             return (
               <div key={row.outcome} className="flex items-center gap-3">
-                <span className="w-44 shrink-0 text-xs text-muted-foreground">{meta.label}</span>
+                <span className="w-44 shrink-0 text-xs text-muted-foreground max-sm:w-32">{meta.label}</span>
                 <div className="h-2 flex-1 overflow-hidden rounded-full bg-white/5">
                   <div
                     className={cn(

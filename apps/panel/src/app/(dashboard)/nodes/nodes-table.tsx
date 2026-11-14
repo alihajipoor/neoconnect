@@ -8,6 +8,7 @@ import { deleteNode } from "./actions";
 import { NodeFormDialog } from "./node-form-dialog";
 import { EnrollmentTokenDialog } from "./enrollment-token-dialog";
 import { DeleteConfirm } from "@/components/dashboard/delete-confirm";
+import { PageHeader } from "@/components/dashboard/page-header";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -34,21 +35,21 @@ export function NodesTable({ nodes, canManage }: { nodes: Node[]; canManage: boo
   const [showRetired, setShowRetired] = useState(false);
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">Nodes</h1>
-          <p className="text-sm text-muted-foreground">VPS boxes running the agent and VPN protocol engines.</p>
-        </div>
-        {canManage && (
-          <NodeFormDialog
-            trigger={
-              <Button size="sm">
-                <Plus /> New Node
-              </Button>
-            }
-          />
-        )}
-      </div>
+      <PageHeader
+        title="Nodes"
+        description="VPS boxes running the agent and VPN protocol engines."
+        actions={
+          canManage && (
+            <NodeFormDialog
+              trigger={
+                <Button size="sm">
+                  <Plus /> New Node
+                </Button>
+              }
+            />
+          )
+        }
+      />
       <NodeRows nodes={live} canManage={canManage} empty="No nodes yet." />
       {retired.length > 0 ? (
         <div className="flex flex-col gap-2">
@@ -56,7 +57,7 @@ export function NodesTable({ nodes, canManage }: { nodes: Node[]; canManage: boo
             type="button"
             onClick={() => setShowRetired((v) => !v)}
             aria-expanded={showRetired}
-            className="flex items-center gap-1 self-start text-sm font-medium text-muted-foreground hover:text-foreground"
+            className="flex items-center gap-1 self-start text-sm max-lg:min-h-10 font-medium text-muted-foreground hover:text-foreground"
           >
             {showRetired ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
             Retired ({retired.length})

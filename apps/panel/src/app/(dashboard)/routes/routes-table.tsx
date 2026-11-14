@@ -6,6 +6,7 @@ import type { Node, ProtocolConfig, Route } from "@/lib/types";
 import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
 import { isRetiredRoute, routeServers } from "@/lib/retired";
 import { RetiredSwitch } from "@/components/dashboard/retired-switch";
+import { PageHeader } from "@/components/dashboard/page-header";
 import { deleteRoute } from "./actions";
 import { RouteFormDialog } from "./route-form-dialog";
 import { routeDeleteWarning } from "./delete-warning";
@@ -48,34 +49,37 @@ export function RoutesTable({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">Routes</h1>
-          <p className="text-sm text-muted-foreground">
+      <PageHeader
+        title="Routes"
+        description={
+          <>
             The &ldquo;servers&rdquo; customers connect through -- a direct entry, or a relay chained to an
             exit.
-          </p>
-          <div className="mt-2">
-            <RetiredSwitch
-              count={retiredIds.size}
-              noun="servers' routes"
-              checked={showRetired}
-              onCheckedChange={setShowRetired}
+          </>
+        }
+        actions={
+          canManage && (
+            <RouteFormDialog
+              protocolConfigs={protocolConfigs}
+              nodes={nodes}
+              trigger={
+                <Button size="sm">
+                  <Plus /> New Route
+                </Button>
+              }
             />
-          </div>
-        </div>
-        {canManage && (
-          <RouteFormDialog
-            protocolConfigs={protocolConfigs}
-            nodes={nodes}
-            trigger={
-              <Button size="sm">
-                <Plus /> New Route
-              </Button>
-            }
+          )
+        }
+      >
+        <div className="mt-2">
+          <RetiredSwitch
+            count={retiredIds.size}
+            noun="servers' routes"
+            checked={showRetired}
+            onCheckedChange={setShowRetired}
           />
-        )}
-      </div>
+        </div>
+      </PageHeader>
       <div className="rounded-lg border border-white/8 bg-card/40">
         <Table>
           <TableHeader>

@@ -80,7 +80,18 @@ const NAV_ITEMS: { href: string; label: string; icon: typeof Users; roles?: Admi
  */
 const RESELLER_ALLOWED = new Set(["/reseller", "/settings"]);
 
-export function SidebarNav({ role }: { role: AdminRole }) {
+/** `inDrawer`: the phone menu (MobileNav) -- taller rows for a thumb, and
+ * `onNavigate` so the drawer closes once a page is chosen. The side menu
+ * at lg and up passes neither and renders exactly as before. */
+export function SidebarNav({
+  role,
+  inDrawer = false,
+  onNavigate,
+}: {
+  role: AdminRole;
+  inDrawer?: boolean;
+  onNavigate?: () => void;
+}) {
   const pathname = usePathname();
   const items = NAV_ITEMS.filter((item) =>
     role === "RESELLER"
@@ -97,8 +108,11 @@ export function SidebarNav({ role }: { role: AdminRole }) {
           <Link
             key={item.href}
             href={item.href}
+            onClick={onNavigate}
+            aria-current={active ? "page" : undefined}
             className={cn(
               "group relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+              inDrawer && "min-h-11 text-[15px]",
               active
                 ? "bg-primary/15 text-foreground"
                 : "text-muted-foreground hover:bg-white/5 hover:text-foreground",

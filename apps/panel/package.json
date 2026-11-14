@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check:phone": "node scripts/check-phone.mjs",
+    "standin-api": "node scripts/standin-api.mjs"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.20",

@@ -53,7 +53,7 @@ export function EmailSettingsCard({ settings }: { settings: EmailSettings }) {
             <Checkbox name="enabled" defaultChecked={settings.enabled} />
             Enabled
           </label>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="flex flex-col gap-2">
               <Label htmlFor="host">SMTP host</Label>
               <Input id="host" name="host" placeholder="smtp.example.com" defaultValue={settings.host ?? ""} />

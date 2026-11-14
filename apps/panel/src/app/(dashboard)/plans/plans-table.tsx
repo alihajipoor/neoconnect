@@ -7,6 +7,7 @@ import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
 import { deletePlan } from "./actions";
 import { PlanFormDialog } from "./plan-form-dialog";
 import { DeleteConfirm } from "@/components/dashboard/delete-confirm";
+import { PageHeader } from "@/components/dashboard/page-header";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -32,12 +33,10 @@ export function PlansTable({
 }) {
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">Plans</h1>
-          <p className="text-sm text-muted-foreground">Subscription tiers customers can purchase.</p>
-        </div>
-        {canManage && (
+      <PageHeader
+        title="Plans"
+        description="Subscription tiers customers can purchase."
+        actions={canManage && (
           <PlanFormDialog
             routes={routes}
             protocolConfigs={protocolConfigs}
@@ -49,7 +48,7 @@ export function PlansTable({
             }
           />
         )}
-      </div>
+      />
       <div className="rounded-lg border border-white/8 bg-card/40">
         <Table>
           <TableHeader>
@@ -86,8 +85,8 @@ export function PlansTable({
                   {/* Wraps, unlike the other cells: eight chips on one line
                       pushed the row menu off the right edge below about
                       1900px. */}
-                  <TableCell className="min-w-48 whitespace-normal">
-                    <div className="flex flex-wrap gap-1">
+                  <TableCell className="min-w-48 whitespace-normal max-lg:whitespace-nowrap">
+                    <div className="flex flex-wrap gap-1 max-lg:flex-nowrap">
                       {plan.protocolsAllowed.map((p) => (
                         <Badge key={p} variant="outline">
                           {PROTOCOL_LABELS[p]}
