@@ -17,6 +17,7 @@
  *   /  and  /index.php      the home page, below
  *   /sitemap.xml            the generated sitemap
  *   /r/CODE                 a voucher short link
+ *   /get/windows|android    an installer, from a copy on this site
  *   anything else           a real 404, rendered by 404.php
  *
  * Nothing here depends on server configuration, so the same rules hold on
@@ -48,6 +49,11 @@ if ($nx_rel === 'sitemap.xml') {
 if (preg_match('#^r/([A-Za-z0-9-]{1,32})/?$#', $nx_rel, $nx_m)) {
     $_GET['c'] = $nx_m[1];
     require __DIR__ . '/r/index.php';
+    exit;
+}
+if (preg_match('#^get/(windows|android)/?$#', $nx_rel, $nx_m)) {
+    $_GET['p'] = $nx_m[1];
+    require __DIR__ . '/get/index.php';
     exit;
 }
 if ($nx_rel !== '' && $nx_rel !== 'index.php') {
