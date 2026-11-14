@@ -64,7 +64,7 @@ function build(users: string[]) {
         }
         return { id: `cmd-${++seq}` };
       }),
-      update: jest.fn(async () => ({})),
+      updateMany: jest.fn(async () => ({ count: 1 })),
     },
   };
   const newCall = () => ({
