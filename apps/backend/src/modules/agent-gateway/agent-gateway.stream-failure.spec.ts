@@ -238,6 +238,27 @@ describe("AgentGatewayService stream failures over real gRPC", () => {
     a.stream.cancel();
   });
 
+  it("ends a node's old silent stream and leaves its new, talking one alone", async () => {
+    const old = agent();
+    old.stream.write(hello());
+    await until(() => registry.isConnected("node-1"), 2000, "registered");
+    const [oldLive] = (service as unknown as { liveCalls: Map<unknown, { lastMessageAt: number }> }).liveCalls.values();
+    const fresh = agent();
+    fresh.stream.write(hello());
+    await until(() => nodesService.setStatus.mock.calls.length === 2, 2000, "second Hello");
+    oldLive.lastMessageAt = Date.now() - 61_000;
+
+    await (service as unknown as { sweepStaleNodes(): Promise<void> }).sweepStaleNodes();
+
+    expect((await within(old.status, 3000, "status on the old stream")).code).toBe(grpc.status.UNAVAILABLE);
+    expect(registry.isConnected("node-1")).toBe(true);
+    let ended = false;
+    void fresh.status.then(() => (ended = true));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(ended).toBe(false);
+    fresh.stream.cancel();
+  });
+
   it("takes a cancelled stream out of the registry", async () => {
     const a = agent();
     a.stream.write(hello());

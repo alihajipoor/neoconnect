@@ -456,9 +456,9 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
         silentNodes.add(live.nodeId);
       }
     }
-    for (const nodeId of silentNodes) {
-      if (!this.heardFromRecently(nodeId, now)) this.tearDownNodeCalls(nodeId, now, "no message");
-    }
+    // Only the silent calls are ended: a node that has redialled keeps its
+    // new, talking stream while the old one is cleared away.
+    for (const nodeId of silentNodes) this.tearDownNodeCalls(nodeId, now, "no message");
   }
 
   /** Ends every silent call for a node with UNAVAILABLE, so its agent's
