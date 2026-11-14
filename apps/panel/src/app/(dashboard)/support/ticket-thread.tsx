@@ -51,7 +51,7 @@ export function TicketThread({ ticket }: { ticket: SupportTicket }) {
   return (
     <div className="flex h-full flex-col rounded-lg border border-white/8 bg-card/40">
       <header className="flex flex-wrap items-center gap-3 border-b border-white/8 px-4 py-3">
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 max-sm:basis-full">
           <div className="flex items-center gap-2">
             <h2 className="truncate text-sm font-semibold">{ticket.subject}</h2>
             <Badge variant={ticket.status === "OPEN" ? "default" : "outline"}>
@@ -90,7 +90,7 @@ export function TicketThread({ ticket }: { ticket: SupportTicket }) {
           >
             <div
               className={cn(
-                "max-w-[80%] rounded-2xl px-3.5 py-2.5",
+                "max-w-[80%] rounded-2xl px-3.5 py-2.5 max-lg:min-w-0 max-sm:max-w-[88%]",
                 message.fromAdmin
                   ? "rounded-br-md bg-primary/20 text-foreground"
                   : "rounded-bl-md bg-white/6 text-foreground",
@@ -99,7 +99,7 @@ export function TicketThread({ ticket }: { ticket: SupportTicket }) {
               {/* pre-wrap, not a markdown renderer: whatever the customer
                   typed is shown exactly as typed, and their line breaks
                   survive without letting their text become markup. */}
-              <p className="text-sm whitespace-pre-wrap">{message.body}</p>
+              <p className="text-sm whitespace-pre-wrap max-lg:[overflow-wrap:anywhere]">{message.body}</p>
               <p className="mt-1 text-[11px] text-muted-foreground">
                 {message.fromAdmin ? "You" : "Customer"} ·{" "}
                 {new Date(message.createdAt).toLocaleString()}

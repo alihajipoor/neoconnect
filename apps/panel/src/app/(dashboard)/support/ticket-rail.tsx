@@ -90,7 +90,7 @@ export function TicketRail({ buckets }: { buckets: Record<SupportTicketStatus, T
             type="button"
             onClick={() => setFilter(option.value)}
             className={cn(
-              "rounded-lg px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition-colors",
+              "rounded-lg px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition-colors max-lg:min-h-10 max-lg:text-sm",
               filter === option.value
                 ? "bg-primary/15 text-foreground"
                 : "text-muted-foreground hover:bg-white/5 hover:text-foreground",

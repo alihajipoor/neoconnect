@@ -108,7 +108,7 @@ export function SecurityCard({ email, initialMfaEnabled }: { email: string; init
             </div>
           </form>
         ) : mfaEnabled ? (
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between max-sm:flex-wrap max-sm:gap-3">
             <Badge variant="success">Enabled</Badge>
             <Dialog open={disableOpen} onOpenChange={setDisableOpen}>
               <DialogTrigger asChild>
@@ -145,7 +145,7 @@ export function SecurityCard({ email, initialMfaEnabled }: { email: string; init
             </Dialog>
           </div>
         ) : (
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between max-sm:flex-wrap max-sm:gap-3">
             <Badge variant="secondary">Not enabled</Badge>
             <Button onClick={handleStartSetup} disabled={pending}>
               {pending ? "Starting..." : "Enable two-factor authentication"}
