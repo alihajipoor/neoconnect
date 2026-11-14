@@ -853,6 +853,7 @@ type ControlMessage struct {
 	// Types that are valid to be assigned to Payload:
 	//
 	//	*ControlMessage_Command
+	//	*ControlMessage_ServerHeartbeat
 	Payload       isControlMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -904,6 +905,15 @@ func (x *ControlMessage) GetCommand() *Command {
 	return nil
 }
 
+func (x *ControlMessage) GetServerHeartbeat() *ServerHeartbeat {
+	if x != nil {
+		if x, ok := x.Payload.(*ControlMessage_ServerHeartbeat); ok {
+			return x.ServerHeartbeat
+		}
+	}
+	return nil
+}
+
 type isControlMessage_Payload interface {
 	isControlMessage_Payload()
 }
@@ -912,7 +922,65 @@ type ControlMessage_Command struct {
 	Command *Command `protobuf:"bytes,1,opt,name=command,proto3,oneof"`
 }
 
+type ControlMessage_ServerHeartbeat struct {
+	ServerHeartbeat *ServerHeartbeat `protobuf:"bytes,2,opt,name=server_heartbeat,json=serverHeartbeat,proto3,oneof"`
+}
+
 func (*ControlMessage_Command) isControlMessage_Payload() {}
+
+func (*ControlMessage_ServerHeartbeat) isControlMessage_Payload() {}
+
+// Written by the control plane on every connected stream every 20 s, so
+// that an agent always hears from it: a node with no users and no routes
+// is sent nothing else. An agent that has seen one treats a long silence
+// afterwards as a dead link and redials -- a stream the control plane
+// stopped reading, on a connection that still answers keepalive pings,
+// is invisible to keepalive (2026-11-14: seven nodes silent for eight
+// minutes). Agents up to v0.2.12 do not know this field and skip the
+// message, since a ControlMessage without a Command is ignored.
+type ServerHeartbeat struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SentAtUnix    int64                  `protobuf:"varint,1,opt,name=sent_at_unix,json=sentAtUnix,proto3" json:"sent_at_unix,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ServerHeartbeat) Reset() {
+	*x = ServerHeartbeat{}
+	mi := &file_agent_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ServerHeartbeat) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ServerHeartbeat) ProtoMessage() {}
+
+func (x *ServerHeartbeat) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ServerHeartbeat.ProtoReflect.Descriptor instead.
+func (*ServerHeartbeat) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ServerHeartbeat) GetSentAtUnix() int64 {
+	if x != nil {
+		return x.SentAtUnix
+	}
+	return 0
+}
 
 type Command struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -925,7 +993,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_agent_proto_msgTypes[11]
+	mi := &file_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -937,7 +1005,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[11]
+	mi := &file_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -950,7 +1018,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{11}
+	return file_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Command) GetId() string {
@@ -1033,10 +1101,14 @@ const file_agent_proto_rawDesc = "" +
 	"\x0fProtocolUserRef\x12(\n" +
 	"\x10external_user_id\x18\x01 \x01(\tR\x0eexternalUserId\x12\x1a\n" +
 	"\bprotocol\x18\x02 \x01(\tR\bprotocol\x12\x18\n" +
-	"\aversion\x18\x03 \x01(\x03R\aversion\"R\n" +
+	"\aversion\x18\x03 \x01(\x03R\aversion\"\xa2\x01\n" +
 	"\x0eControlMessage\x125\n" +
-	"\acommand\x18\x01 \x01(\v2\x19.neoxify.agent.v1.CommandH\x00R\acommandB\t\n" +
-	"\apayload\"o\n" +
+	"\acommand\x18\x01 \x01(\v2\x19.neoxify.agent.v1.CommandH\x00R\acommand\x12N\n" +
+	"\x10server_heartbeat\x18\x02 \x01(\v2!.neoxify.agent.v1.ServerHeartbeatH\x00R\x0fserverHeartbeatB\t\n" +
+	"\apayload\"3\n" +
+	"\x0fServerHeartbeat\x12 \n" +
+	"\fsent_at_unix\x18\x01 \x01(\x03R\n" +
+	"sentAtUnix\"o\n" +
 	"\aCommand\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x121\n" +
 	"\x04type\x18\x02 \x01(\x0e2\x1d.neoxify.agent.v1.CommandTypeR\x04type\x12!\n" +
@@ -1068,7 +1140,7 @@ func file_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_agent_proto_goTypes = []any{
 	(CommandType)(0),        // 0: neoxify.agent.v1.CommandType
 	(*AgentMessage)(nil),    // 1: neoxify.agent.v1.AgentMessage
@@ -1082,7 +1154,8 @@ var file_agent_proto_goTypes = []any{
 	(*StateSnapshot)(nil),   // 9: neoxify.agent.v1.StateSnapshot
 	(*ProtocolUserRef)(nil), // 10: neoxify.agent.v1.ProtocolUserRef
 	(*ControlMessage)(nil),  // 11: neoxify.agent.v1.ControlMessage
-	(*Command)(nil),         // 12: neoxify.agent.v1.Command
+	(*ServerHeartbeat)(nil), // 12: neoxify.agent.v1.ServerHeartbeat
+	(*Command)(nil),         // 13: neoxify.agent.v1.Command
 }
 var file_agent_proto_depIdxs = []int32{
 	2,  // 0: neoxify.agent.v1.AgentMessage.hello:type_name -> neoxify.agent.v1.Hello
@@ -1094,15 +1167,16 @@ var file_agent_proto_depIdxs = []int32{
 	5,  // 6: neoxify.agent.v1.StatsBatch.sessions:type_name -> neoxify.agent.v1.SessionCount
 	6,  // 7: neoxify.agent.v1.SessionCount.sources:type_name -> neoxify.agent.v1.SourceAddress
 	10, // 8: neoxify.agent.v1.StateSnapshot.users:type_name -> neoxify.agent.v1.ProtocolUserRef
-	12, // 9: neoxify.agent.v1.ControlMessage.command:type_name -> neoxify.agent.v1.Command
-	0,  // 10: neoxify.agent.v1.Command.type:type_name -> neoxify.agent.v1.CommandType
-	1,  // 11: neoxify.agent.v1.AgentGateway.AgentSync:input_type -> neoxify.agent.v1.AgentMessage
-	11, // 12: neoxify.agent.v1.AgentGateway.AgentSync:output_type -> neoxify.agent.v1.ControlMessage
-	12, // [12:13] is the sub-list for method output_type
-	11, // [11:12] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	13, // 9: neoxify.agent.v1.ControlMessage.command:type_name -> neoxify.agent.v1.Command
+	12, // 10: neoxify.agent.v1.ControlMessage.server_heartbeat:type_name -> neoxify.agent.v1.ServerHeartbeat
+	0,  // 11: neoxify.agent.v1.Command.type:type_name -> neoxify.agent.v1.CommandType
+	1,  // 12: neoxify.agent.v1.AgentGateway.AgentSync:input_type -> neoxify.agent.v1.AgentMessage
+	11, // 13: neoxify.agent.v1.AgentGateway.AgentSync:output_type -> neoxify.agent.v1.ControlMessage
+	13, // [13:14] is the sub-list for method output_type
+	12, // [12:13] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_agent_proto_init() }
@@ -1119,6 +1193,7 @@ func file_agent_proto_init() {
 	}
 	file_agent_proto_msgTypes[10].OneofWrappers = []any{
 		(*ControlMessage_Command)(nil),
+		(*ControlMessage_ServerHeartbeat)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1126,7 +1201,7 @@ func file_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_proto_rawDesc), len(file_agent_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   12,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

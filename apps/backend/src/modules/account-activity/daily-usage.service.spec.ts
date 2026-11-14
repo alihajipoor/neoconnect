@@ -33,6 +33,8 @@ function build(opts: { createdAt?: Date; rows?: { bucket: bigint | number | stri
       queries.push({ sql: sql.sql, values: sql.values });
       return opts.rows ?? [];
     }),
+    $executeRawUnsafe: jest.fn(async () => 0),
+    $transaction: jest.fn(async (ops: Promise<unknown>[]) => Promise.all(ops)),
   };
   return { service: new DailyUsageService(prisma as never), prisma, queries };
 }

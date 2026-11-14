@@ -52,6 +52,8 @@ describe("account activity over HTTP", () => {
       $queryRaw: jest.fn(async () => [
         { bucket: BigInt(Math.floor(now / 1000 / 900) * 900), up: "1024", down: "4096" },
       ]),
+      $executeRawUnsafe: jest.fn(async () => 0),
+      $transaction: jest.fn(async (ops: Promise<unknown>[]) => Promise.all(ops)),
     };
     const slots = {
       inUse: jest.fn(async () => ({ known: true, sessions: new Map([["session-pc", { since: now - 600_000, lastSeen: now }]]) })),

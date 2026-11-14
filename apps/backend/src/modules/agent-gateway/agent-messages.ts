@@ -83,6 +83,9 @@ export interface ControlMessageEnvelope {
     type: string;
     payloadJson: Buffer;
   };
+  /** See ServerHeartbeat in packages/proto/agent.proto. An int64, so a
+   * string here like every other long (`longs: String`). */
+  serverHeartbeat?: { sentAtUnix: string };
 }
 
 export type AgentDuplexCall = grpc.ServerDuplexStream<AgentMessageEnvelope, ControlMessageEnvelope>;

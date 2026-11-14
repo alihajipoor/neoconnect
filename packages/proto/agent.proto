@@ -159,7 +159,20 @@ message ProtocolUserRef {
 message ControlMessage {
   oneof payload {
     Command command = 1;
+    ServerHeartbeat server_heartbeat = 2;
   }
+}
+
+// Written by the control plane on every connected stream every 20 s, so
+// that an agent always hears from it: a node with no users and no routes
+// is sent nothing else. An agent that has seen one treats a long silence
+// afterwards as a dead link and redials -- a stream the control plane
+// stopped reading, on a connection that still answers keepalive pings,
+// is invisible to keepalive (2026-11-14: seven nodes silent for eight
+// minutes). Agents up to v0.2.12 do not know this field and skip the
+// message, since a ControlMessage without a Command is ignored.
+message ServerHeartbeat {
+  int64 sent_at_unix = 1;
 }
 
 message Command {

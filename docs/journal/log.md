@@ -9916,3 +9916,66 @@ alone is about 5 minutes, then packages, reboot and the end-to-end
 proofs, all run one after another. Open: a run that stops after
 canary-open leaves "Internal test" active until it is continued; two
 fleet jobs at once share `/dev/shm/nxf`.
+
+## 2026-11-14 — seven nodes cut off for eight minutes by one pool timeout
+
+**Status:** fix merged to `main`, **not deployed**; agent change not released
+**Touches:** `apps/backend` (agent gateway, Prisma pools, daily usage), `packages/proto`, `agent/internal/controlplane`
+
+**What happened** (UTC). The production backend had run since
+2026-11-13 05:03 with nothing being deployed. At 20:08:31, inside a
+tenth of a second, 78 requests failed with Prisma's pool timeout
+("connection limit: 5", the default). Most were customer reads raced
+across mirrors by the desktop client (plans and available routes,
+daily usage); seven were the agent gateway's `node.findUnique` during
+heartbeat handling, one per node. Each of those seven logged an
+"AgentSync stream error". At 20:09:28-30 the same seven were marked
+OFFLINE; the eighth node, whose heartbeat did not hit the pool in that
+second, stayed ONLINE. The seven agents never redialled: one of them
+logged nothing at all after 20:07:56, not even its once-a-minute line,
+with the process still up. A backend restart at 20:16:38 brought all
+eight back by 20:17:09. Postgres logged only routine checkpoints; it
+was the app's 5-connection pool that ran dry, not the database. First
+occurrence since that backend started.
+
+**Cause, as far as it is proven.** The gateway's stream handler caught
+the heartbeat's database error and called `call.destroy(err)`. In
+grpc-js that sends no status and no RST_STREAM: the HTTP/2 stream stays
+open on a healthy connection, the server stops reading it, and the
+agent waits in `Recv()` forever. Proven by a real grpc-js
+server-and-client test that times out on the old gateway (7 of 8
+incident-shaped tests fail there) and by the investigators' local repro
+against the real agent. *Inferred, not measured:* that the burst which
+drained the pool was the desktop's mirror race plus the daily-usage
+aggregate. No query timings exist (`pg_stat_statements` is off).
+
+**What changed** (branch `claude/agent-stream-pool`):
+- every stream end now sends a gRPC status (UNAUTHENTICATED for a
+  refused Hello, UNAVAILABLE otherwise), so the agent's `Recv()` returns
+  and it redials; no `destroy()` is left in the gateway, and a
+  `destroy()` from anywhere else is still answered with a status;
+- a failed heartbeat, ack, stats or count write costs that message
+  only, logged once a minute per node and kind, never the stream;
+- the sweep (every 30 s, before any database query) ends calls silent
+  for over 60 s, at most once per node a minute, and never a talking
+  one; a node heartbeating whose write failed is not marked OFFLINE;
+- a new `ServerHeartbeat` every 20 s on every stream (older agents
+  skip it); the agent on the branch, once it has seen one, treats 90 s
+  of silence as a dead link and redials, with jitter;
+- an old stream's slow Hello can no longer overwrite a newer registered
+  stream; an old stream closing no longer drops the newer stream's
+  in-flight re-asserts; a Hello still being checked is not ended as
+  anonymous after 30 s;
+- the main Prisma pool is set in code to 20 connections with a 20 s
+  wait; daily-usage reports run on their own 3-connection pool under an
+  8 s statement timeout, and identical reads in flight share one query.
+  About 35 of Postgres's 100 connections at most.
+
+**Not proven:** anything in production (not deployed); a real Go agent
+against the new backend (all gRPC tests use a grpc-js client); Node 20
+behaviour of the close path (tests ran on Node 24); the 8 s cap against
+the heaviest accounts' real query times; the SET LOCAL batch transaction
+against a real Postgres; that 20 connections behave better than 5 under
+load. Not addressed here: the desktop client's mirror fan-out, other
+heavy `usage_records` readers still on the main pool, and turning on
+query statistics on production (the owner's call).

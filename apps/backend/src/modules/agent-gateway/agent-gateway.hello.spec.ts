@@ -21,12 +21,23 @@ describe("AgentGatewayService stream authentication", () => {
     return { payload: "hello", hello: { nodeId, timestamp, nonce, signature, agentVersion: "v0.2.9" } };
   }
 
+  /** Records the status the stream was ended with. The gateway ends a
+   * stream by emitting 'error' with a gRPC code -- what grpc-js turns into
+   * trailers the agent sees -- and must never destroy() it, which sends
+   * nothing and leaves the agent waiting (the 2026-11-14 outage). */
   class FakeCall extends EventEmitter {
-    destroyed: Error | null = null;
+    destroyed = false;
+    writableEnded = false;
+    status: (Error & { code?: number }) | null = null;
     write = jest.fn();
     end = jest.fn();
-    destroy(err: Error) {
-      this.destroyed ??= err;
+    destroy = jest.fn();
+    constructor() {
+      super();
+      this.on("error", (err: Error & { code?: number }) => {
+        this.status ??= err;
+        this.writableEnded = true;
+      });
     }
   }
 
@@ -77,7 +88,8 @@ describe("AgentGatewayService stream authentication", () => {
     await send(hello());
     await send({ payload: "heartbeat", heartbeat: {} });
 
-    expect(call.destroyed).toBeNull();
+    expect(call.status).toBeNull();
+    expect(call.destroy).not.toHaveBeenCalled();
     expect(nodesService.touchHeartbeat).toHaveBeenCalledWith("node-1");
     releaseSync();
   });
@@ -97,7 +109,9 @@ describe("AgentGatewayService stream authentication", () => {
 
     await send({ payload: "commandAck", commandAck: { commandId: `${UPLINK_ACK_PREFIX}route-1`, success: true, error: "" } });
 
-    expect(call.destroyed?.message).toMatch(/before a valid Hello/);
+    expect(call.status?.message).toMatch(/before a valid Hello/);
+    expect(call.status?.code).toBe(16); // UNAUTHENTICATED
+    expect(call.destroy).not.toHaveBeenCalled();
     expect(prisma.route.updateMany).not.toHaveBeenCalled();
     expect(prisma.protocolUser.updateMany).not.toHaveBeenCalled();
   });
@@ -122,7 +136,9 @@ describe("AgentGatewayService stream authentication", () => {
 
     await send(forged);
 
-    expect(call.destroyed?.message).toMatch(/invalid Hello signature/);
+    expect(call.status?.message).toMatch(/invalid Hello signature/);
+    expect(call.status?.code).toBe(16); // UNAUTHENTICATED
+    expect(call.destroy).not.toHaveBeenCalled();
     expect(registry.set).not.toHaveBeenCalled();
   });
 });
