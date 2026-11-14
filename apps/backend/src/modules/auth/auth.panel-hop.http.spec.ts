@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import type { AddressInfo, Server } from "node:net";
 import { ClientThrottlerGuard } from "../../common/guards/client-throttler.guard";
 import { AdminsService } from "../admins/admins.service";
+import { TrustedDevicesService } from "../trusted-devices/trusted-devices.service";
 import { LoginGuardController } from "../login-guard/login-guard.controller";
 import { LoginGuardService } from "../login-guard/login-guard.service";
 import type { Challenge } from "../login-guard/proof-of-work";
@@ -41,7 +42,10 @@ describe("admin sign-in through the panel's hop", () => {
     throttle = true;
     alerts = { signedIn: jest.fn(), failed: jest.fn() };
     const auth = {
-      login: jest.fn(async (email: string, password: string) => {
+      login: jest.fn(async (email: string, password: string, trustedDevice?: string) => {
+        if (email === ADMIN && password === RIGHT && trustedDevice === "good-token") {
+          return { accessToken: "a", refreshToken: "r", trustedDevice: { token: "next", id: "d", expiresAt: new Date() } };
+        }
         if (email === ADMIN && password === RIGHT) return { accessToken: "a", refreshToken: "r" };
         throw new UnauthorizedException("Invalid email or password");
       }),
@@ -60,6 +64,7 @@ describe("admin sign-in through the panel's hop", () => {
         LoginGuardService,
         { provide: AuthService, useValue: auth },
         { provide: AdminsService, useValue: {} },
+        { provide: TrustedDevicesService, useValue: {} },
         { provide: AdminSignInAlertsService, useValue: alerts },
         { provide: APP_GUARD, useClass: ClientThrottlerGuard },
       ],
@@ -105,6 +110,30 @@ describe("admin sign-in through the panel's hop", () => {
     const issued = await post("/login-challenge", { scope: "admin", email: ADMIN }, OPERATOR);
     expect((await login(ADMIN, RIGHT, OPERATOR, solve(issued.body as unknown as Challenge))).status).toBe(200);
     expect(alerts.signedIn).toHaveBeenCalledWith(ADMIN, OPERATOR, false);
+  });
+
+  // A trusted-device token changes nothing about a wrong password: still
+  // 401, still counted against the account, still alerted.
+  it("counts a wrong password with a trusted-device token like any other", async () => {
+    throttle = false;
+    for (let i = 1; i <= 2; i++) {
+      const res = await post("/auth/login", { email: ADMIN, password: "wrong-password", trustedDevice: "t".repeat(43) }, STRANGER);
+      expect(res.status).toBe(401);
+    }
+    expect(alerts.failed.mock.calls).toEqual([
+      [ADMIN, 1, STRANGER],
+      [ADMIN, 2, STRANGER],
+    ]);
+    // A right password with a token the service accepts: told as a
+    // trusted-device sign-in, and the token passed on as sent.
+    const issued = await post("/login-challenge", { scope: "admin", email: ADMIN }, OPERATOR);
+    const ok = await post(
+      "/auth/login",
+      { email: ADMIN, password: RIGHT, trustedDevice: "good-token", challenge: solve(issued.body as unknown as Challenge) },
+      OPERATOR,
+    );
+    expect(ok.status).toBe(200);
+    expect(alerts.signedIn).toHaveBeenCalledWith(ADMIN, OPERATOR, "trusted-device");
   });
 
   it("before: five strangers' failures through the panel refused every operator", async () => {

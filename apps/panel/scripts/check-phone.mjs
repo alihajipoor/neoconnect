@@ -11,7 +11,15 @@
 //     past its edge;
 //   - something is cut off: content clipped by an overflow-hidden box
 //     (text that ellipsizes on purpose -- `truncate` -- is not a failure);
-//   - the page errored, or sent the session to /login.
+//   - the page errored, or sent the session to /login;
+//   - under 640px, a list that uses stacked rows (`<Table stack>`) scrolls
+//     sideways at all, or a row's status or actions button is not wholly
+//     on the screen. (Comparison tables -- `stickyFirst` or plain -- may
+//     scroll sideways inside their own box.)
+// On /settings/account it also renders two-factor off (no Trusted devices
+// card); on /login it signs in to the code step (the stand-in always asks
+// for one) and checks the "Trust this device" box is on the screen and a
+// full tap target tall.
 // Then it opens the main things a page opens -- the phone menu, each
 // "New ..." dialog, the first row's actions menu and its Edit dialog --
 // and checks they sit inside the screen, fit it sideways, and that every
@@ -37,7 +45,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { startStandin } from "./standin-api.mjs";
+import { startStandin, TRUSTED_THIS_DEVICE } from "./standin-api.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const panelDir = path.resolve(here, "..");
@@ -269,6 +277,51 @@ const MEASURE = (scopeSel, phone) => `(() => {
   return { problems: [...new Set(problems)], notes: [...new Set(notes)] };
 })()`;
 
+/** Runs in the page under 640px. Every table that opted into stacked rows
+ * (`<Table stack>`, table[data-stack]) must not scroll sideways at all,
+ * and every row's status and actions button must be on the screen, whole.
+ * Rows taller than 300px are noted (not failed): a stacked row is meant to
+ * be a few lines. */
+const STACKED = `(() => {
+  const W = document.documentElement.clientWidth;
+  const problems = [];
+  const notes = [];
+  const tables = [...document.querySelectorAll('table[data-stack]')];
+  const label = (t, i) => {
+    const h = t.closest('section, [data-slot=card], main')?.querySelector('h1, h2, [data-slot=card-title]');
+    return 'stacked table ' + (i + 1) + (h ? ' ("' + h.innerText.trim().slice(0, 30) + '")' : '');
+  };
+  tables.forEach((t, i) => {
+    const box = t.closest('[data-slot=table-container]');
+    if (box && box.scrollWidth > box.clientWidth + 1) problems.push(label(t, i) + ' scrolls sideways: ' + box.scrollWidth + 'px in ' + box.clientWidth + 'px');
+    if (t.getBoundingClientRect().right > W + 1) problems.push(label(t, i) + ' is wider than the screen');
+    [...t.tBodies].flatMap((b) => [...b.rows]).forEach((tr, r) => {
+      for (const kind of ['status', 'actions']) {
+        const td = tr.querySelector(':scope > td[data-cell=' + kind + ']');
+        if (!td || getComputedStyle(td).display === 'none') continue;
+        const el = kind === 'actions' ? (td.querySelector('button, a') ?? td) : td;
+        const rr = el.getBoundingClientRect();
+        if (rr.width === 0 && rr.height === 0) continue;
+        if (rr.left < -1 || rr.right > W + 1) problems.push(label(t, i) + ' row ' + (r + 1) + ': ' + kind + ' outside the screen (' + Math.round(rr.left) + '..' + Math.round(rr.right) + 'px)');
+      }
+      const h = tr.getBoundingClientRect().height;
+      if (h > 300) notes.push(label(t, i) + ' row ' + (r + 1) + ' is ' + Math.round(h) + 'px tall');
+    });
+    // The first row's "More" shows what it folds away, and folds it back.
+    const toggle = t.querySelector('td[data-cell=more] input[data-more-toggle]');
+    if (toggle) {
+      const tr = toggle.closest('tr');
+      const folded = () => [...tr.querySelectorAll(':scope > td[data-more]')].filter((td) => getComputedStyle(td).display !== 'none').length;
+      const before = folded();
+      toggle.click();
+      const opened = folded();
+      toggle.click();
+      if (before !== 0 || opened === 0 || folded() !== 0) problems.push(label(t, i) + ': More does not show and hide the folded facts (' + before + ' -> ' + opened + ' -> ' + folded() + ')');
+    }
+  });
+  return { tables: tables.length, problems, notes };
+})()`;
+
 const PAGE_STATE = `(() => {
   const text = document.body ? document.body.innerText : '';
   const errored = /Application error|This page couldn.t load|Something went wrong|Unhandled Runtime Error|Internal Server Error|404: This page could not be found/i.test(text);
@@ -394,6 +447,8 @@ try {
       await send("Network.clearBrowserCookies");
       if (role.role) {
         await send("Network.setCookie", { name: "neoxify_access", value: standinToken(role), url: base, path: "/" });
+        // Marks one stand-in trusted device as this browser's.
+        await send("Network.setCookie", { name: "neoxify_trusted_id", value: TRUSTED_THIS_DEVICE, url: base, path: "/" });
       }
       for (const route of role.routes.filter((r) => !ONLY || ONLY.includes(r))) {
         for (const size of SIZES) {
@@ -409,7 +464,56 @@ try {
           const m = await ev(MEASURE(null, size.phone));
           row.problems.push(...m.problems);
           row.notes.push(...m.notes);
+          if (size.width < 640) {
+            const st2 = await ev(STACKED);
+            row.stacked = st2.tables;
+            row.problems.push(...st2.problems);
+            row.notes.push(...st2.notes);
+          }
           await shot(`${tag}.png`, true);
+
+          // Settings > Account with two-factor off: no Trusted devices card.
+          if (route === "/settings/account" && !empty) {
+            await fetch(`http://127.0.0.1:${apiPort}/__variant?mfa=0`);
+            await navigate(base + route);
+            const off = await ev(MEASURE(null, size.phone));
+            row.problems.push(...off.problems.map((p) => `2FA off: ${p}`));
+            row.notes.push(...off.notes.map((p) => `2FA off: ${p}`));
+            if (await ev(`[...document.querySelectorAll('[data-slot=card-title]')].some(t => t.innerText.trim() === 'Trusted devices')`)) row.problems.push("2FA off: Trusted devices card still shown");
+            row.opened.push("2fa-off");
+            await shot(`${tag}--2fa-off.png`, true);
+            await fetch(`http://127.0.0.1:${apiPort}/__variant?mfa=1`);
+            await navigate(base + route);
+          }
+
+          // Sign-in to the code step, where "Trust this device" sits.
+          if (route === "/login" && !empty) {
+            await ev(`(() => {
+              const set = (id, v) => { const el = document.getElementById(id); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); };
+              set('email', 'owner@example.com');
+              set('password', 'stand-in-password');
+              return true;
+            })()`);
+            await press(`document.querySelector('form button[type=submit]')`);
+            for (let i = 0; i < 50 && !(await ev(`!!document.getElementById('trustDevice')`)); i++) await sleep(200);
+            const box = await ev(`(() => {
+              const cb = document.getElementById('trustDevice');
+              if (!cb) return null;
+              const r = cb.closest('label').getBoundingClientRect();
+              return { left: r.left, right: r.right, height: r.height, W: document.documentElement.clientWidth };
+            })()`);
+            if (!box) row.problems.push("code step: never reached (no Trust this device box)");
+            else {
+              const cm = await ev(MEASURE(null, size.phone));
+              row.problems.push(...cm.problems.map((p) => `code step: ${p}`));
+              row.notes.push(...cm.notes.map((p) => `code step: ${p}`));
+              if (box.left < -1 || box.right > box.W + 1) row.problems.push(`code step: Trust this device outside the screen (${Math.round(box.left)}..${Math.round(box.right)}px)`);
+              if (box.height < 40) row.problems.push(`code step: Trust this device row only ${Math.round(box.height)}px tall`);
+              row.opened.push("code-step");
+              await shot(`${tag}--code-step.png`, true);
+            }
+            await navigate(base + route);
+          }
           if (!OPEN || empty) continue;
 
           // The things a page opens.

@@ -7,6 +7,7 @@ import * as QRCode from "qrcode";
 import { PrismaService } from "../../prisma/prisma.service";
 import { GuessBudget } from "../../common/guess-budget";
 import { durationSeconds } from "../../common/duration";
+import { TrustedDevicesService, type TrustedDeviceGrant } from "../trusted-devices/trusted-devices.service";
 import { AccessTokenPayload, MfaTokenPayload, RefreshTokenPayload } from "./types";
 
 // One time-step of drift tolerance either side (±30s) -- standard practice
@@ -42,7 +43,20 @@ export interface TokenPair {
   refreshToken: string;
 }
 
-export type LoginResult = TokenPair | { mfaRequired: true; mfaToken: string };
+/** `trustedDevice` is the browser's next trust token: set when this sign-in
+ * trusted the browser or spent its token. For the panel's server to put
+ * in an HttpOnly cookie -- never for the page. */
+export type SignedIn = TokenPair & { trustedDevice?: TrustedDeviceGrant };
+
+export type LoginResult = SignedIn | { mfaRequired: true; mfaToken: string };
+
+export interface TrustRequest {
+  /** "Trust this device for 30 days" was ticked. */
+  trust?: boolean;
+  /** The browser's User-Agent, for the device's label. */
+  userAgent?: string;
+  ip?: string;
+}
 
 @Injectable()
 export class AuthService {
@@ -55,6 +69,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly trustedDevices: TrustedDevicesService,
   ) {}
 
   async validateCredentials(email: string, password: string) {
@@ -112,10 +127,18 @@ export class AuthService {
     return { accessToken, refreshToken };
   }
 
-  async login(email: string, password: string): Promise<LoginResult> {
+  /** `trustedDevice` is the token from the browser's trust cookie, if it
+   * sent one. It is looked at only after the password is right and only
+   * for an account with two-factor on; a valid one for this account
+   * stands in for the code, and anything else asks for the code exactly
+   * as if no token had been sent. */
+  async login(email: string, password: string, trustedDevice?: string, ip?: string): Promise<LoginResult> {
     const admin = await this.validateCredentials(email, password);
 
     if (admin.mfaEnabled) {
+      const grant = await this.trustedDevices.redeem(admin, trustedDevice, ip);
+      if (grant) return { ...(await this.issueTokenPair(admin)), trustedDevice: grant };
+
       const mfaPayload: MfaTokenPayload = { sub: admin.id, purpose: "mfa" };
       const mfaToken = await this.jwt.signAsync(mfaPayload, {
         secret: this.config.get<string>("jwt.accessSecret"),
@@ -129,7 +152,7 @@ export class AuthService {
 
   /** Second step of a login that returned `mfaRequired: true` -- exchanges
    * the short-lived mfaToken + a fresh TOTP code for real tokens. */
-  async verifyMfaAndLogin(mfaToken: string, code: string): Promise<TokenPair> {
+  async verifyMfaAndLogin(mfaToken: string, code: string, trust: TrustRequest = {}): Promise<SignedIn> {
     let payload: MfaTokenPayload;
     try {
       payload = await this.jwt.verifyAsync<MfaTokenPayload>(mfaToken, {
@@ -168,7 +191,12 @@ export class AuthService {
     }
 
     this.mfaBudget.clear(admin.id);
-    return this.issueTokenPair(admin);
+    const tokens = await this.issueTokenPair(admin);
+    // Only here: after the password and a right code, on this browser.
+    if (trust.trust === true) {
+      return { ...tokens, trustedDevice: await this.trustedDevices.trust(admin, trust.userAgent, trust.ip) };
+    }
+    return tokens;
   }
 
   /** Whether `code` is a valid TOTP code for `secret` that has not been
@@ -216,6 +244,7 @@ export class AuthService {
       where: { id: adminId },
       data: { mfaSecret: secret, mfaEnabled: false, mfaLastStep: null },
     });
+    await this.trustedDevices.revokeAll(admin, "two-factor set up again");
 
     const otpauthUrl = authenticator.keyuri(admin.email, "Neoxify", secret);
     const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
@@ -236,6 +265,8 @@ export class AuthService {
       throw new UnauthorizedException("Invalid MFA code");
     }
     await this.prisma.adminUser.update({ where: { id: adminId }, data: { mfaEnabled: true } });
+    // A new authenticator: nothing trusted before it carries over.
+    await this.trustedDevices.revokeAll(admin, "two-factor set up again");
   }
 
   /** Requires the account password (not a TOTP code) so a stolen/replayed
@@ -251,6 +282,7 @@ export class AuthService {
       where: { id: adminId },
       data: { mfaSecret: null, mfaEnabled: false, mfaLastStep: null },
     });
+    await this.trustedDevices.revokeAll(admin, "two-factor turned off");
   }
 
   async refresh(refreshToken: string): Promise<TokenPair> {

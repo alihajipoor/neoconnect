@@ -15,6 +15,7 @@ import {
   TableCell,
   TableHead,
   TableHeader,
+  TableMoreToggle,
   TableRow,
 } from "@/components/ui/table";
 import {
@@ -55,7 +56,7 @@ export function VouchersTable({
       )}
 
       <div className="rounded-lg border border-white/8 bg-card/40">
-        <Table>
+        <Table stack>
           <TableHeader>
             <TableRow>
               <TableHead>Code</TableHead>
@@ -79,7 +80,7 @@ export function VouchersTable({
 
             {vouchers.map((voucher) => (
               <TableRow key={voucher.id}>
-                <TableCell>
+                <TableCell cell="primary">
                   <button
                     type="button"
                     onClick={() => copy(voucher.code)}
@@ -90,18 +91,18 @@ export function VouchersTable({
                     <Copy className="size-3 opacity-0 transition-opacity group-hover:opacity-60" />
                   </button>
                 </TableCell>
-                <TableCell className="text-sm">{voucher.plan?.name ?? "—"}</TableCell>
-                <TableCell className="text-sm tabular-nums">{usageLabel(voucher)}</TableCell>
-                <TableCell className="text-sm">
+                <TableCell label="Plan" wide phoneOrder={1} className="text-sm">{voucher.plan?.name ?? "—"}</TableCell>
+                <TableCell label="Used" phoneOrder={2} className="text-sm tabular-nums">{usageLabel(voucher)}</TableCell>
+                <TableCell label="Expires" phoneOrder={3} className="text-sm">
                   {voucher.expiresAt ? formatDay(voucher.expiresAt) : "Never"}
                 </TableCell>
-                <TableCell>
+                <TableCell cell="status">
                   <StatusBadge voucher={voucher} />
                 </TableCell>
-                <TableCell className="max-w-[16rem] truncate text-sm text-muted-foreground">
+                <TableCell label="Note" wide more={!!voucher.note} hideOnPhone={!voucher.note} phoneOrder={4} className="max-w-[16rem] truncate text-sm text-muted-foreground">
                   {voucher.note || "—"}
                 </TableCell>
-                <TableCell>
+                <TableCell cell="actions">
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button variant="ghost" size="icon" aria-label={`Actions for ${voucher.code}`}>
@@ -139,6 +140,7 @@ export function VouchersTable({
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </TableCell>
+                {voucher.note ? <TableMoreToggle /> : null}
               </TableRow>
             ))}
           </TableBody>

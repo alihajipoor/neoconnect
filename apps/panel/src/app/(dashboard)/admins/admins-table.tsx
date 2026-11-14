@@ -33,7 +33,7 @@ export function AdminsTable({ admins, currentAdminId }: { admins: AdminUser[]; c
         }
       />
       <div className="rounded-lg border border-white/8 bg-card/40">
-        <Table>
+        <Table stack>
           <TableHeader>
             <TableRow>
               <TableHead>Email</TableHead>
@@ -45,7 +45,7 @@ export function AdminsTable({ admins, currentAdminId }: { admins: AdminUser[]; c
           <TableBody>
             {admins.map((admin) => (
               <TableRow key={admin.id}>
-                <TableCell className="font-medium">
+                <TableCell cell="primary" className="font-medium">
                   {admin.email}
                   {admin.id === currentAdminId && (
                     <Badge variant="outline" className="ml-2">
@@ -53,11 +53,11 @@ export function AdminsTable({ admins, currentAdminId }: { admins: AdminUser[]; c
                     </Badge>
                   )}
                 </TableCell>
-                <TableCell>
+                <TableCell cell="status">
                   <Badge variant="secondary">{admin.role}</Badge>
                 </TableCell>
-                <TableCell>{new Date(admin.createdAt).toLocaleDateString()}</TableCell>
-                <TableCell>
+                <TableCell label="Created">{new Date(admin.createdAt).toLocaleDateString()}</TableCell>
+                <TableCell cell="actions">
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button variant="ghost" size="icon" aria-label="Row actions">

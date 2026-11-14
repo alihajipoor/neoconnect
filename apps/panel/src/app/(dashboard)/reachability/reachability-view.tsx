@@ -137,7 +137,7 @@ export function ReachabilityView({
       ) : null}
 
       <Card className="overflow-hidden">
-        <Table>
+        <Table stack>
           <TableHeader>
             <TableRow>
               <TableHead className="w-8" />
@@ -173,20 +173,20 @@ export function ReachabilityView({
                     className="cursor-pointer"
                     onClick={() => setExpanded(open ? null : node.nodeId)}
                   >
-                    <TableCell className="text-muted-foreground">
+                    <TableCell cell="lead" className="text-muted-foreground">
                       {open ? (
                         <ChevronDown className="h-4 w-4" />
                       ) : (
                         <ChevronRight className="h-4 w-4" />
                       )}
                     </TableCell>
-                    <TableCell>
+                    <TableCell cell="primary">
                       <div className="font-medium">{node.name}</div>
                       <div className="text-xs text-muted-foreground">
                         {node.region} &middot; port {node.port}
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell cell="status">
                       {verdict ? (
                         <Badge variant="outline" className={verdict.className} title={verdict.hint}>
                           <verdict.Icon className="mr-1 h-3 w-3" />
@@ -202,7 +202,7 @@ export function ReachabilityView({
                         </div>
                       ) : null}
                     </TableCell>
-                    <TableCell>
+                    <TableCell label="Agent" phoneOrder={1}>
                       <span
                         className={cn(
                           "text-xs",
@@ -217,13 +217,13 @@ export function ReachabilityView({
                         {node.agentStatus}
                       </span>
                     </TableCell>
-                    <TableCell className="text-sm">
+                    <TableCell label="Networks OK" phoneOrder={2} className="text-sm">
                       {node.probesAnswered ? `${node.probesOk}/${node.probesAnswered}` : "—"}
                     </TableCell>
-                    <TableCell className="text-sm">
+                    <TableCell label="Latency" phoneOrder={3} className="text-sm">
                       {node.medianLatencyMs ? `${node.medianLatencyMs} ms` : "—"}
                     </TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
+                    <TableCell label="Checked" phoneOrder={4} className="text-sm text-muted-foreground">
                       {ago(node.checkedAt)}
                     </TableCell>
                   </TableRow>

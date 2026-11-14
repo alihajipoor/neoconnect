@@ -167,7 +167,7 @@ export function ClientAttemptsView({
       </div>
 
       <div className="rounded-lg border border-white/8 bg-card/40">
-        <Table>
+        <Table stack>
           <TableHeader>
             <TableRow>
               <TableHead className="w-8" />
@@ -225,11 +225,12 @@ function AttemptRow({ attempt }: { attempt: ClientAttempt }) {
         className={cn(hasDetail && "cursor-pointer")}
         onClick={hasDetail ? () => setOpen((v) => !v) : undefined}
       >
-        <TableCell className="text-muted-foreground">
+        <TableCell cell="lead" className="text-muted-foreground">
           {hasDetail &&
             (open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />)}
         </TableCell>
         <TableCell
+          cell="primary"
           className="whitespace-nowrap text-sm"
           title={new Date(attempt.occurredAt ?? attempt.createdAt).toLocaleString()}
         >
@@ -244,13 +245,13 @@ function AttemptRow({ attempt }: { attempt: ClientAttempt }) {
             </span>
           )}
         </TableCell>
-        <TableCell>
+        <TableCell cell="status">
           <Badge variant={outcome.variant} title={outcome.hint}>
             {outcome.label}
           </Badge>
         </TableCell>
-        <TableCell className="text-sm text-muted-foreground">{KINDS[attempt.kind] ?? attempt.kind}</TableCell>
-        <TableCell className="text-sm">
+        <TableCell label="Doing" phoneOrder={1} className="text-sm text-muted-foreground">{KINDS[attempt.kind] ?? attempt.kind}</TableCell>
+        <TableCell label="Who" wide phoneOrder={3} className="text-sm">
           {attempt.customer?.email ? (
             // Straight to the person: their profile has every attempt,
             // device and server they used, which is the next question
@@ -270,16 +271,16 @@ function AttemptRow({ attempt }: { attempt: ClientAttempt }) {
             <span className="text-muted-foreground italic">no session</span>
           )}
         </TableCell>
-        <TableCell className="text-sm whitespace-nowrap text-muted-foreground">
+        <TableCell label="App" phoneOrder={2} className="text-sm whitespace-nowrap text-muted-foreground">
           {attempt.platform} {attempt.appVersion}
         </TableCell>
-        <TableCell className="font-mono text-xs text-muted-foreground">{attempt.ip ?? "—"}</TableCell>
+        <TableCell label="From" phoneOrder={4} className="font-mono text-xs text-muted-foreground">{attempt.ip ?? "—"}</TableCell>
       </TableRow>
 
       {open && (
         <TableRow className="hover:bg-transparent">
           <TableCell colSpan={7} className="bg-black/20">
-            <div className="flex flex-col gap-3 py-1 pl-8">
+            <div className="flex flex-col gap-3 py-1 pl-8 max-sm:pl-0">
               <p className="text-xs text-muted-foreground">{outcome.hint}</p>
 
               {attempt.reason && (

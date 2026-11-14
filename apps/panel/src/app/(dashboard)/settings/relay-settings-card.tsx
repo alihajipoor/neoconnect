@@ -116,7 +116,7 @@ export function RelaySettingsCard({ status }: { status: RelayAuthStatus }) {
             {status.today.signups} sign-ups, {status.today.signIns} sign-ins, {status.today.refusals} refused.
           </p>
           {status.today.rows.length > 0 && (
-            <Table>
+            <Table stack>
               <TableHeader>
                 <TableRow>
                   <TableHead>Box</TableHead>
@@ -129,11 +129,11 @@ export function RelaySettingsCard({ status }: { status: RelayAuthStatus }) {
               <TableBody>
                 {status.today.rows.map((r) => (
                   <TableRow key={`${r.box}|${r.asn}`}>
-                    <TableCell>{r.box || "—"}</TableCell>
-                    <TableCell>{r.asn ? `AS${r.asn}${r.org ? ` ${r.org}` : ""}` : "unknown"}</TableCell>
-                    <TableCell className="text-right">{r.signups}</TableCell>
-                    <TableCell className="text-right">{r.signIns}</TableCell>
-                    <TableCell className="text-right">{r.refusals}</TableCell>
+                    <TableCell cell="primary">{r.box || "—"}</TableCell>
+                    <TableCell label="Network" wide phoneOrder={1}>{r.asn ? `AS${r.asn}${r.org ? ` ${r.org}` : ""}` : "unknown"}</TableCell>
+                    <TableCell label="Sign-ups" phoneOrder={2} className="text-right">{r.signups}</TableCell>
+                    <TableCell label="Sign-ins" phoneOrder={3} className="text-right">{r.signIns}</TableCell>
+                    <TableCell label="Refused" phoneOrder={4} className="text-right">{r.refusals}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

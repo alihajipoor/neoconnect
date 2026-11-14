@@ -81,7 +81,7 @@ export function RoutesTable({
         </div>
       </PageHeader>
       <div className="rounded-lg border border-white/8 bg-card/40">
-        <Table>
+        <Table stack>
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
@@ -102,24 +102,24 @@ export function RoutesTable({
             ) : (
               shown.map((route) => (
                 <TableRow key={route.id} className={retiredIds.has(route.id) ? "opacity-60" : undefined}>
-                  <TableCell className="font-medium">
+                  <TableCell cell="primary" className="font-medium">
                     {route.name}
                     {retiredIds.has(route.id) ? (
                       <span className="ml-2 text-xs font-normal text-warning">retired server</span>
                     ) : null}
                   </TableCell>
-                  <TableCell>{describe(route.entryProtocolConfigId)}</TableCell>
-                  <TableCell>{describe(route.exitProtocolConfigId)}</TableCell>
-                  <TableCell>
+                  <TableCell label="Entry" wide phoneOrder={3}>{describe(route.entryProtocolConfigId)}</TableCell>
+                  <TableCell label="Exit" phoneOrder={2}>{describe(route.exitProtocolConfigId)}</TableCell>
+                  <TableCell label="Type" phoneOrder={1}>
                     <Badge variant="outline">{route.exitProtocolConfigId ? "Relayed" : "Direct"}</Badge>
                   </TableCell>
-                  <TableCell>
+                  <TableCell cell="status">
                     <Badge variant={route.isEnabled ? "success" : "secondary"}>
                       {route.isEnabled ? "Enabled" : "Disabled"}
                     </Badge>
                   </TableCell>
                   {canManage && (
-                    <TableCell>
+                    <TableCell cell="actions">
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button variant="ghost" size="icon" aria-label="Row actions">

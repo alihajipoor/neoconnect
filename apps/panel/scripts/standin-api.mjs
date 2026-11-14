@@ -4,13 +4,18 @@
 //
 // Every answer is invented: example.com addresses, 192.0.2.x (TEST-NET-1)
 // IPs, made-up names. The shapes follow src/lib/types.ts, which mirrors
-// the backend's responses. Content is deliberately awkward: long emails and
-// names, long numbers, many rows -- the things that break a phone layout.
+// the backend's responses. Content is a realistic mix -- most emails 18 to
+// 30 characters; names, plans, statuses, dates and numbers varied; some rows
+// expired, suspended or offline -- with a few deliberately awkward values
+// (very long emails, names and numbers) mixed in. A list made only of the
+// awkward ones hides what an ordinary row looks like on a phone.
 //
 //   node scripts/standin-api.mjs [--port 4999]
 //
 // GET /__variant?empty=1 switches every list to empty (and back with
-// empty=0), so one running server serves both variants. Writes (POST,
+// empty=0), so one running server serves both variants; ?mfa=0 turns the
+// signed-in admin's two-factor off (and mfa=1 back on). Sign-in always
+// asks for the code (POST /auth/login answers mfaRequired). Writes (POST,
 // PATCH, PUT, DELETE) answer a plausible success and change nothing.
 
 import http from "node:http";
@@ -20,33 +25,56 @@ const NOW = Date.now();
 const iso = (offsetMs = 0) => new Date(NOW + offsetMs).toISOString();
 const pad = (n, w = 4) => String(n).padStart(w, "0");
 
-const state = { empty: false };
+const state = { empty: false, mfa: true };
 
 // ------------------------------------------------------------- fixtures
 
 const LONG_EMAIL = "maximilian.alexander-hutchinson.support+refunds-2026@subdomain.example.com";
-const email = (i) =>
-  i === 0 ? LONG_EMAIL : i % 7 === 3 ? `a${i}@example.com` : `customer.number-${pad(i)}.with.a.longish.name@example.com`;
+const FIRST = ["sara", "ali", "emma", "reza", "nima", "leila", "omid", "jonas", "arash", "neda", "kian", "mina", "lucas", "shirin", "farhad", "yasmin", "babak", "chloe", "pouya", "taraneh", "daniel", "hana", "milad"];
+const LAST = ["ahmadi", "larsen", "karimi", "novak", "rahimi", "moradi", "schmidt", "jafari", "sadeghi", "nazari", "bauer", "farahani", "rostami", "kazemi", "bahrami", "ebrahimi", "silva"];
+/** Mostly 18 to 30 characters, in the shapes people really use; a few very
+ * long ones and one very short. */
+const email = (i) => {
+  if (i === 2 || i === 57) return LONG_EMAIL;
+  if (i === 9) return "office.network.admin.for.the.whole-building@subdomain.example.com";
+  if (i === 30) return "al@example.com";
+  const f = FIRST[i % FIRST.length];
+  const l = LAST[(i * 7) % LAST.length];
+  switch (i % 6) {
+    case 0:
+    case 1:
+    case 2:
+      return `${f}.${l}@example.com`;
+    case 3:
+      return `${f}${1980 + ((i * 13) % 40)}@example.net`;
+    case 4:
+      return `${f[0]}${l}@example.org`;
+    default:
+      return `${f}.${l}.work@example.com`;
+  }
+};
 
 const NODE_NAMES = [
-  "germany-frankfurt-relay-exit-very-long-name-1",
-  "finland-4",
-  "turkey-1",
-  "netherlands-amsterdam-2",
-  "united-kingdom-london-1",
-  "france-paris-1",
-  "sweden-stockholm-1",
-  "iran-relay-2",
+  "oakridge-3",
+  "pinecrest-4",
+  "harbor-1",
+  "meadowbrook-2",
+  "elm-1",
+  "aspen-1",
+  "cedar-1",
+  "relay-2-northgate-backup-route",
+  "oakridge-2",
+  "lighthouse-1",
 ];
 const nodes = NODE_NAMES.map((name, i) => ({
   id: `node_standin_${pad(i)}`,
   name,
   role: i === 7 ? "RELAY" : i % 3 === 0 ? "EXIT" : "STANDALONE",
-  region: ["eu-central-frankfurt", "eu-north", "tr-istanbul", "eu-west", "uk-south", "eu-west-paris", "eu-north-stockholm", "ir-tehran"][i],
+  region: ["eu-central", "eu-north", "eu-southeast", "eu-west", "uk-south", "eu-west-paris", "eu-north-stockholm", "zz-relay", "eu-central", "ap-southeast"][i],
   publicIp: `192.0.2.${10 + i}`,
-  status: ["ONLINE", "ONLINE", "OFFLINE", "PENDING", "ONLINE", "DISABLED", "ONLINE", "ONLINE"][i],
-  lastHeartbeatAt: i === 3 ? null : iso(-60_000 * (i + 1)),
-  agentVersion: i === 3 ? null : "v0.2.12-rc.1+build.20261114",
+  status: ["ONLINE", "ONLINE", "OFFLINE", "PENDING", "ONLINE", "DISABLED", "ONLINE", "ONLINE", "ONLINE", "OFFLINE"][i],
+  lastHeartbeatAt: i === 3 ? null : iso(-60_000 * (i + 1) * (i === 2 || i === 9 ? 600 : 1)),
+  agentVersion: i === 3 ? null : i === 6 ? "v0.2.12-rc.1+build.20261114" : i % 4 === 1 ? "v0.2.11" : "v0.2.12",
   agentPubKey: i === 3 ? null : "ed25519:STANDINkeyAAAAC3NzaC1lZDI1NTE5AAAAIStandInPublicKeyForLayoutOnly",
   createdAt: iso(-200 * DAY),
   updatedAt: iso(-DAY),
@@ -77,17 +105,17 @@ nodes.forEach((node, n) => {
 
 const routes = protocolConfigs.slice(0, 18).map((pc, i) => ({
   id: `route_standin_${pad(i)}`,
-  name: i === 0 ? "Iran relay via germany-frankfurt to finland-4 exit, REALITY over TCP, backup route" : `Route ${i}: ${pc.protocol} on ${nodes.find((n) => n.id === pc.nodeId).name}`,
+  name: i === 0 ? "Backup route via oakridge-3 to pinecrest-4 exit, REALITY over TCP" : `${nodes.find((n) => n.id === pc.nodeId).name} ${["Stealth", "TLS", "VMess", "Trojan", "Shadowsocks", "WireGuard", "OpenVPN"][i % 7]}`,
   entryProtocolConfigId: pc.id,
   exitProtocolConfigId: i % 4 === 0 ? protocolConfigs[(i + 9) % protocolConfigs.length].id : null,
   isEnabled: i % 5 !== 4,
   createdAt: iso(-90 * DAY),
   updatedAt: iso(-3 * DAY),
-  protocolUserCount: 1234567 - i * 1111,
+  protocolUserCount: [412, 87, 1530, 3, 0, 268, 941][i % 7],
 }));
 
 const PLAN_NAMES = [
-  "Ultimate Max Unlimited 12 months, every country, gaming included",
+  "Ultimate Max 12 months, every country and gaming",
   "Basic 1 month",
   "Standard 3 months",
   "Internal test",
@@ -97,9 +125,9 @@ const PLAN_NAMES = [
 const plans = PLAN_NAMES.map((name, i) => ({
   id: `plan_standin_${pad(i)}`,
   name,
-  dataCapBytes: i % 2 ? "1099511627776000" : null,
+  dataCapBytes: [null, "53687091200", "214748364800", null, "5368709120", "107374182400"][i],
   durationDays: [365, 30, 90, 7, 3, 28][i],
-  priceUsd: ["1299.99", "4.99", "12.00", "0.00", "0.00", "19.95"][i],
+  priceUsd: ["129.00", "4.99", "12.00", "0.00", "0.00", "19.95"][i],
   maxConcurrentConnections: i === 0 ? null : 3,
   maxDownloadMbps: i === 1 ? 100 : null,
   maxUploadMbps: i === 1 ? 20 : null,
@@ -117,17 +145,17 @@ const admins = [
   { email: "support.agent.with.a.long.address@example.com", role: "SUPPORT", mfaEnabled: false },
   { email: "billing@example.com", role: "BILLING", mfaEnabled: true },
   { email: "reseller.partner.shop-number-one@example.com", role: "RESELLER", mfaEnabled: false },
-  ...Array.from({ length: 16 }, (_, i) => ({ email: `staff-${pad(i, 2)}@example.com`, role: "SUPPORT", mfaEnabled: i % 2 === 0 })),
+  ...Array.from({ length: 8 }, (_, i) => ({ email: email(i * 5 + 1), role: i % 3 ? "SUPPORT" : "BILLING", mfaEnabled: i % 2 === 0 })),
 ].map((a, i) => ({ id: `adm_standin_${pad(i)}`, ...a, createdAt: iso(-400 * DAY + i * DAY), updatedAt: iso(-DAY) }));
 
 const customers = Array.from({ length: 100 }, (_, i) => ({
   id: `cus_standin_${pad(i + 1)}`,
   email: email(i),
-  telegramId: i % 3 === 0 ? null : `@telegram_handle_number_${pad(i)}_long`,
-  referralCode: i % 4 === 0 ? null : `REF-${pad(i, 6)}-STANDIN`,
-  status: i % 9 === 4 ? "DISABLED" : "ACTIVE",
+  telegramId: i % 3 === 0 ? null : i === 4 ? "@a_rather_long_telegram_handle_2026" : `@${FIRST[i % FIRST.length]}${i}`,
+  referralCode: i % 4 === 0 ? null : `NX${(i * 7919).toString(36).toUpperCase().padStart(5, "0")}`,
+  status: i % 9 === 4 || i === 3 ? "DISABLED" : "ACTIVE",
   emailVerifiedAt: i % 5 === 0 ? null : iso(-30 * DAY),
-  createdAt: iso(-i * DAY),
+  createdAt: iso(-(i * 3 + (i % 5)) * DAY),
   updatedAt: iso(-i * DAY + 1000),
   signupChannel: ["NORMAL", "RELAY", "SOCIAL", null][i % 4],
   relayUnverifiedSince: i % 4 === 1 && i % 5 === 0 ? iso(-2 * DAY) : null,
@@ -142,9 +170,9 @@ const subscriptions = (customerId) =>
     primaryNodeId: nodes[i].id,
     status: ["ACTIVE", "SUSPENDED", "EXPIRED", "PENDING"][i],
     startAt: iso(-20 * DAY),
-    expireAt: iso((i === 2 ? -1 : 345) * DAY),
+    expireAt: iso([212, 9, -4, 30][i] * DAY),
     dataCapBytes: plan.dataCapBytes,
-    dataUsedBytes: "987654321098765",
+    dataUsedBytes: ["18253611008", "51539607552", "4831838208", "0"][i],
     autoRenew: i === 0,
     createdAt: iso(-20 * DAY),
     updatedAt: iso(-DAY),
@@ -154,25 +182,25 @@ const invoiceRows = Array.from({ length: 100 }, (_, i) => ({
   id: `inv_standin_${pad(i)}`,
   invoiceNumber: `NX-2026-${pad(100000 + i, 8)}`,
   planNameSnapshot: PLAN_NAMES[i % PLAN_NAMES.length],
-  amountUsd: i % 5 === 0 ? "123456.78" : "4.99",
+  amountUsd: ["4.99", "12.00", "19.95", "129.00", "4.99", "12.00"][i % 6],
   currency: "USD",
   status: ["PAID", "ISSUED", "OVERDUE", "VOID", "DRAFT"][i % 5],
-  issuedAt: iso(-i * DAY),
+  issuedAt: iso(-(i * 2 + (i % 3)) * DAY),
   customer: { email: email(i) },
   paymentTransaction: i % 3 === 0 ? null : { provider: ["STRIPE", "NOWPAYMENTS", "PLISIO_CRYPTO_GATEWAY"][i % 3] },
 }));
 
 const voucherRows = Array.from({ length: 60 }, (_, i) => ({
   id: `vch_standin_${pad(i)}`,
-  code: i === 0 ? "ULTIMATE-MAX-GIFT-2026-ABCDEFGHIJKLMNOP" : `NX-${pad(i, 6)}-STANDIN`,
+  code: i === 0 ? "ULTIMATE-MAX-GIFT-2026-ABCDEFGHIJKLMNOP" : `NX-${(i * 104729).toString(36).toUpperCase().padStart(6, "0")}`,
   planId: plans[i % plans.length].id,
   plan: { id: plans[i % plans.length].id, name: plans[i % plans.length].name, durationDays: 30, priceUsd: "4.99" },
-  maxRedemptions: i % 3 === 0 ? null : 1000000,
-  redeemedCount: i * 1234,
-  expiresAt: i % 2 ? iso(30 * DAY) : null,
+  maxRedemptions: i % 3 === 0 ? null : [1, 50, 200][i % 3],
+  redeemedCount: i % 3 === 1 ? 1 : (i * 7) % 60,
+  expiresAt: i % 2 ? iso((i % 5 === 1 ? -3 : 30) * DAY) : null,
   isActive: i % 4 !== 3,
-  note: i % 2 ? "Given to the partner shop for the spring campaign; check with billing before reissuing" : null,
-  _count: { redemptions: i * 1234 },
+  note: i % 7 === 1 ? "Given to the partner shop for the spring campaign; check with billing before reissuing" : i % 3 === 0 ? "Spring campaign" : null,
+  _count: { redemptions: i % 3 === 1 ? 1 : (i * 7) % 60 },
   createdAt: iso(-i * DAY),
   updatedAt: iso(-i * DAY),
 }));
@@ -183,11 +211,11 @@ const ticketRows = (status) =>
     subject:
       i === 0
         ? "The app says connected but no website opens on my home network since yesterday evening, please help"
-        : `Question number ${i} about my subscription`,
+        : ["Cannot connect on mobile data", "Refund for last month", "How do I add a second device?", "Payment went through but no plan", "Slow speeds in the evening", "Change my email address"][i % 6],
     status,
     lastMessageAt: iso(-i * 3_600_000),
     customer: { id: customers[i].id, email: customers[i].email },
-    _count: { messages: i * 3 + 1 },
+    _count: { messages: [1, 3, 2, 7, 4, 12][i % 6] },
   }));
 
 const ticket = (id) => ({
@@ -239,7 +267,7 @@ const clientAttempts = Array.from({ length: 100 }, (_, i) => ({
   reason: i % 5 === 1 ? "Engine exited with code 23: failed to listen on 127.0.0.1:10808, address already in use by another process" : null,
   ip: `192.0.2.${100 + (i % 100)}`,
   occurredAt: i % 3 === 0 ? iso(-i * 600_000 - 7_200_000) : null,
-  asn: i % 4 ? 197207 + i : null,
+  asn: i % 4 ? 64496 + i : null,
   sessionSeconds: i % 4 === 3 ? 98765 : null,
   createdAt: iso(-i * 600_000),
 }));
@@ -266,7 +294,7 @@ const activity = () => ({
     outcome: OUTCOMES[i % OUTCOMES.length],
     platform: PLATFORMS[i % PLATFORMS.length],
     appVersion: "0.9.64",
-    network: i % 4 ? { asn: 197207, name: "Mobile Communication Company of a Very Long Operator Name PJS" } : null,
+    network: i % 4 ? { asn: 64496, name: "Example Mobile Communications of a Very Long Operator Name Co" } : null,
     ip: i % 5 === 0 ? null : `192.0.2.${150 + (i % 50)}`,
     throughServer: i % 10 === 5 ? NODE_NAMES[0] : null,
     noAddress: i % 5 === 0 ? (i % 10 ? "relay" : "erased") : null,
@@ -290,8 +318,8 @@ const activity = () => ({
     day: new Date(NOW - Math.floor(i / 2) * DAY).toISOString().slice(0, 10),
     nodeName: NODE_NAMES[i % NODE_NAMES.length],
     protocol: PROTOCOLS[i % PROTOCOLS.length],
-    bytesUp: "12345678901234",
-    bytesDown: "98765432109876543",
+    bytesUp: String(((i * 37) % 90 + 3) * 1_048_576),
+    bytesDown: String(((i * 53) % 900 + 40) * 1_048_576),
   })),
 });
 
@@ -314,14 +342,14 @@ const isp = () => ({
   windowHours: 72,
   truncated: true,
   networks: Array.from({ length: 12 }, (_, n) => ({
-    asn: 197207 + n * 1000,
-    org: n === 0 ? "Mobile Communication Company of a Very Long Operator Name PJS" : n % 4 === 3 ? null : `Operator ${n}`,
+    asn: 64496 + n * 1000,
+    org: n === 0 ? "Example Mobile Communications of a Very Long Operator Name Co" : n % 4 === 3 ? null : ["Example Telecom", "Northwind Mobile", "Contoso Fibre", "Fabrikam Net"][n % 4],
     routes: Array.from({ length: 6 }, (_, r) => ({
       ...ispRoute(r + n),
-      tried: 1234 - r,
-      carried: 1000 - r,
-      sustained: 800 - r,
-      worked: 700 - r,
+      tried: [48, 31, 12, 7, 5, 2][r],
+      carried: [41, 18, 11, 2, 5, 0][r],
+      sustained: [37, 12, 9, 1, 4, 0][r],
+      worked: [35, 11, 9, 1, 3, 0][r],
       tag: r % 3 === 0 ? { code: r % 2 ? "failingOnYourIsp" : "worksOnYourIsp", customers: 123, outOf: 456, windowHours: 72 } : null,
       traffic: ispTraffic(r),
     })),
@@ -345,8 +373,8 @@ const reachability = () =>
     port: 443,
     detail: Array.from({ length: i % 5 === 0 ? 0 : 7 }, (_, p) => ({
       vantage: `ir${p + 1}.vantage-point-with-a-long-hostname.example.net`,
-      asn: p % 2 ? `AS${197207 + p}` : null,
-      city: p % 3 ? "Tehran" : null,
+      asn: p % 2 ? `AS${64496 + p}` : null,
+      city: p % 3 ? "Springfield" : null,
       ok: p % 2 === 0,
       latencyMs: p % 2 === 0 ? 234 : null,
       error: p % 2 ? "Connection timed out after 10000 ms while waiting for the TCP handshake" : null,
@@ -369,7 +397,7 @@ const incident = (i, open) => ({
   evidenceJson: {
     evaluatedAt: iso(-600_000),
     current: i % 2 ? "LIKELY_BLOCKED" : "SUSPECT",
-    reason: "Connects fail on 7 of 9 Iranian networks while the same networks reach other servers; probes from inside time out",
+    reason: "Connects fail on 7 of 9 restricted networks while the same networks reach other servers; probes from inside time out",
     since: { client: iso(-3 * DAY), probe: iso(-2 * DAY) },
     families: FAMILIES.map((family, f) => ({
       family,
@@ -378,8 +406,8 @@ const incident = (i, open) => ({
       healthy: f === 1,
       summary: `${family}: 1234 tried, 987 failed against a baseline of 12 percent over the last six hours`,
       networks: Array.from({ length: 4 }, (_, n) => ({
-        asn: 197207 + n,
-        org: n === 0 ? "Mobile Communication Company of a Very Long Operator Name PJS" : n === 3 ? null : `Operator ${n}`,
+        asn: 64496 + n,
+        org: n === 0 ? "Example Mobile Communications of a Very Long Operator Name Co" : n === 3 ? null : `Operator ${n}`,
         tried: 1234,
         failed: 987,
         baseline: n % 2 ? 0.12 : null,
@@ -407,12 +435,12 @@ const incident = (i, open) => ({
 const gameProfileRows = Array.from({ length: 100 }, (_, i) => ({
   id: `game_standin_${pad(i)}`,
   slug: i === 0 ? "a-very-long-game-slug-that-goes-on-and-on-forever" : `game-${pad(i)}`,
-  displayName: i === 0 ? "The Extraordinarily Long Title of a Game: Remastered Ultimate Collector's Edition" : `Game ${i}`,
+  displayName: i === 0 ? "The Extraordinarily Long Title of a Game: Remastered Ultimate Collector's Edition" : `${["Starfall", "Iron", "Kingdoms of", "Last", "Neon", "Frost"][i % 6]} ${["Arena", "Legends", "Ash", "Outpost", "Drift", "Tactics", "Online"][i % 7]}`,
   iconKey: i % 3 ? `icon-${i}` : null,
-  publisher: i % 4 ? "Some Publisher Interactive Entertainment Worldwide Ltd." : null,
+  publisher: i % 4 ? ["Northwind Games", "Example Interactive", "Some Publisher Interactive Entertainment Worldwide Ltd."][i % 3] : null,
   hostnames: ["launcher.game.example.com", "login.game.example.com", "store.game.example.com", "account-management.game.example.com"],
   excludeHostnames: i % 2 ? ["cdn-patch-download.game.example.com"] : [],
-  destinationAsn: i % 5 ? null : "AS57976",
+  destinationAsn: i % 5 ? null : "AS64511",
   prefixComplete: i % 2 === 0,
   canaryHostname: i % 3 ? "login.game.example.com" : null,
   sortOrder: i,
@@ -457,13 +485,13 @@ const resellerVouchers = Array.from({ length: 50 }, (_, i) => ({
 
 const live = () => ({
   at: iso(),
-  users: Array.from({ length: 60 }, (_, i) => ({
+  users: Array.from({ length: 24 }, (_, i) => ({
     customerId: customers[i].id,
     email: customers[i].email,
     nodeName: NODE_NAMES[i % NODE_NAMES.length],
     protocol: PROTOCOLS[i % PROTOCOLS.length],
     lastTrafficAt: iso(-i * 9_000),
-    bytesLast10Min: String(98765432109 - i),
+    bytesLast10Min: String([254803968, 12582912, 1073741824, 524288, 87031808][i % 5] + i * 4096),
   })),
 });
 
@@ -486,8 +514,8 @@ const relayAuth = () => ({
     refusals: 1234,
     rows: Array.from({ length: 10 }, (_, i) => ({
       box: `relay-box-${i}.example.net`,
-      asn: 197207 + i,
-      org: i === 0 ? "Mobile Communication Company of a Very Long Operator Name PJS" : i % 3 ? `Operator ${i}` : null,
+      asn: 64496 + i,
+      org: i === 0 ? "Example Mobile Communications of a Very Long Operator Name Co" : i % 3 ? `Operator ${i}` : null,
       signups: 12345,
       signIns: 54321,
       refusals: 123,
@@ -500,9 +528,22 @@ const relayAuth = () => ({
 
 const E = (list) => (state.empty ? [] : list);
 
+/** Browsers trusted to skip the code. check-phone.mjs marks
+ * TRUSTED_THIS_DEVICE as this browser's. */
+export const TRUSTED_THIS_DEVICE = "tdv_standin_0002";
+const trustedDevices = [
+  { id: "tdv_standin_0001", label: "Chrome on Windows", createdAt: iso(-21 * DAY), lastUsedAt: iso(-2 * DAY), expiresAt: iso(9 * DAY) },
+  { id: TRUSTED_THIS_DEVICE, label: "Safari on iPhone", createdAt: iso(-6 * DAY), lastUsedAt: iso(-3_600_000), expiresAt: iso(24 * DAY) },
+  { id: "tdv_standin_0003", label: "Firefox on Linux (a long browser description from an unusual user agent string)", createdAt: iso(-29 * DAY), lastUsedAt: iso(-29 * DAY), expiresAt: iso(DAY) },
+];
+
 /** [method, pattern, handler(match, url) -> body | {status, body, total}] */
 const ROUTES = [
-  ["GET", /^\/auth\/me$/, () => admins[0]],
+  ["GET", /^\/auth\/me$/, () => ({ ...admins[0], mfaEnabled: state.mfa })],
+  ["GET", /^\/auth\/trusted-devices$/, () => E(trustedDevices)],
+  ["POST", /^\/auth\/login$/, () => ({ mfaRequired: true, mfaToken: "standin-mfa-token" })],
+  // No proof-of-work challenge, so a stand-in sign-in goes straight on.
+  ["POST", /^\/login-challenge$/, () => ({ status: 404, body: { message: "stand-in: no challenge" } })],
   ["GET", /^\/admins$/, () => E(admins)],
   ["GET", /^\/customers$/, (m, url) => list(E(customers), url, 123456)],
   ["GET", /^\/customers\/([^/]+)\/activity$/, () => (state.empty ? { now: { lastSeenAt: null, connected: null }, devices: [], attempts: [], traffic: [] } : activity())],
@@ -514,10 +555,10 @@ const ROUTES = [
   ["GET", /^\/protocol-configs$/, () => E(protocolConfigs)],
   ["GET", /^\/invoices\/summary$/, () => ({
     since: iso(-30 * DAY),
-    invoiceCount: state.empty ? 0 : 123456,
-    totalUsd: state.empty ? "0.00" : "12345678.90",
-    byPlan: E(plans.map((p) => ({ name: p.name, amountUsd: "123456.78" }))),
-    byProvider: E(["STRIPE", "NOWPAYMENTS", "PLISIO_CRYPTO_GATEWAY"].map((provider) => ({ provider, amountUsd: "4567890.12" }))),
+    invoiceCount: state.empty ? 0 : 1287,
+    totalUsd: state.empty ? "0.00" : "18436.55",
+    byPlan: E(plans.map((p) => ({ name: p.name, amountUsd: ["6450.00", "2994.00", "4320.00", "0.00", "0.00", "4672.55"][plans.indexOf(p)] }))),
+    byProvider: E(["STRIPE", "NOWPAYMENTS", "PLISIO_CRYPTO_GATEWAY"].map((provider, i) => ({ provider, amountUsd: ["11204.30", "6012.25", "1220.00"][i] }))),
   })],
   ["GET", /^\/invoices$/, (m, url) => list(E(invoiceRows), url, 98765)],
   ["GET", /^\/vouchers$/, (m, url) => list(E(voucherRows), url, 6000)],
@@ -544,10 +585,10 @@ const ROUTES = [
   ["GET", /^\/reseller\/vouchers$/, (m, url) => list(E(resellerVouchers), url, 5000)],
   ["GET", /^\/resellers$/, () => E(Array.from({ length: 12 }, (_, i) => ({
     id: `adm_reseller_${pad(i)}`,
-    email: i === 0 ? LONG_EMAIL : `reseller-${pad(i, 2)}@example.com`,
+    email: i === 0 ? LONG_EMAIL : email(i + 40),
     createdAt: iso(-i * 10 * DAY),
-    balances: plans.slice(0, 1 + (i % 5)).map((p) => ({ balance: 123456, plan: { id: p.id, name: p.name } })),
-    vouchersIssued: 98765 - i,
+    balances: plans.slice(0, 1 + (i % 5)).map((p, b) => ({ balance: [40, 12, 0, 250, 3][b], plan: { id: p.id, name: p.name } })),
+    vouchersIssued: [1290, 45, 0, 312, 8][i % 5],
   })))],
   ["GET", /^\/free-trial-settings$/, () => ({ id: "fts_standin", enabled: true, trialPlanId: plans[4].id, trialRouteId: routes[0].id, updatedAt: iso(-DAY) })],
   ["GET", /^\/referral-settings$/, () => ({ id: "rfs_standin", enabled: true, rewardPlanId: plans[0].id, loyalFriendMonths: 3, friendsRequired: 5, friendMonths: 1, rewardDays: 30, updatedAt: iso(-DAY) })],
@@ -577,6 +618,7 @@ export function startStandin({ port = 4999, host = "127.0.0.1", log = false } = 
     };
     if (url.pathname === "/__variant") {
       if (url.searchParams.has("empty")) state.empty = url.searchParams.get("empty") === "1";
+      if (url.searchParams.has("mfa")) state.mfa = url.searchParams.get("mfa") === "1";
       return send(200, { ...state });
     }
     // Drain the body; nothing is stored.

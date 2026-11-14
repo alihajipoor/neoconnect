@@ -55,7 +55,7 @@ export function DevicesCard({
           <p className="text-sm text-muted-foreground">Never signed in on any device.</p>
         ) : (
           <div className="rounded-lg border border-white/8 bg-card/40">
-            <Table>
+            <Table stack>
               <TableHeader>
                 <TableRow>
                   <TableHead>Device</TableHead>
@@ -75,7 +75,7 @@ export function DevicesCard({
                   const name = device.label ?? platform ?? "Unnamed device";
                   return (
                     <TableRow key={device.sessionId} className={device.revoked ? "opacity-60" : undefined}>
-                      <TableCell>
+                      <TableCell cell="primary">
                         <p className="text-sm">{name}</p>
                         {/* The label usually names the platform already
                             ("Android phone (Pixel 7)"); say it again only
@@ -84,10 +84,10 @@ export function DevicesCard({
                           <p className="text-xs text-muted-foreground">{platform}</p>
                         )}
                       </TableCell>
-                      <TableCell className="text-sm whitespace-nowrap text-muted-foreground">
+                      <TableCell label="App" phoneOrder={2} className="text-sm whitespace-nowrap text-muted-foreground">
                         {device.appVersion ?? "—"}
                       </TableCell>
-                      <TableCell className="text-sm text-muted-foreground">
+                      <TableCell label="Signed in via" phoneOrder={3} className="text-sm text-muted-foreground">
                         {/* The relay is the Iranian last-resort route: a
                             device that could only sign in that way is on
                             a network where the normal API is filtered. */}
@@ -99,19 +99,19 @@ export function DevicesCard({
                           (device.channel ?? "—")
                         )}
                       </TableCell>
-                      <TableCell className="text-sm whitespace-nowrap" title={new Date(device.createdAt).toLocaleString()}>
+                      <TableCell label="First used" phoneOrder={4} className="text-sm whitespace-nowrap" title={new Date(device.createdAt).toLocaleString()}>
                         {new Date(device.createdAt).toLocaleDateString()}
                       </TableCell>
-                      <TableCell className="text-sm whitespace-nowrap" title={new Date(device.lastUsedAt).toLocaleString()}>
+                      <TableCell label="Last used" phoneOrder={1} className="text-sm whitespace-nowrap" title={new Date(device.lastUsedAt).toLocaleString()}>
                         {ago(device.lastUsedAt)}
                       </TableCell>
-                      <TableCell>
+                      <TableCell cell="status">
                         <Badge variant={device.revoked ? "secondary" : "success"}>
                           {device.revoked ? "Signed out" : "Signed in"}
                         </Badge>
                       </TableCell>
                       {canSignOut && (
-                        <TableCell className="text-right">
+                        <TableCell phoneOrder={9} className="text-right">
                           {!device.revoked && (
                             <SignOutDeviceButton
                               customerId={customerId}

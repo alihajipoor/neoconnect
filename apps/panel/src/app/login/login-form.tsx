@@ -92,6 +92,12 @@ export function LoginForm() {
                   className="text-center text-lg tracking-[0.5em]"
                 />
               </div>
+              {/* Off by default. Ticked, a right code here lets this
+                  browser skip the code (never the password) for 30 days. */}
+              <label htmlFor="trustDevice" className="flex min-h-11 cursor-pointer items-center gap-3 text-sm">
+                <input id="trustDevice" name="trustDevice" type="checkbox" className="size-5 shrink-0 accent-primary" />
+                Trust this device for 30 days
+              </label>
             </Fragment>
           ) : (
             <Fragment key="password-step">

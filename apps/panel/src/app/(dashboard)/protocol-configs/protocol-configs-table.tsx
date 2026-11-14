@@ -66,7 +66,7 @@ export function ProtocolConfigsTable({
         </div>
       </PageHeader>
       <div className="rounded-lg border border-white/8 bg-card/40">
-        <Table>
+        <Table stack>
           <TableHeader>
             <TableRow>
               <TableHead>Node</TableHead>
@@ -92,15 +92,15 @@ export function ProtocolConfigsTable({
             ) : (
               shown.map((pc) => (
                 <TableRow key={pc.id} className={retired.has(pc.nodeId) ? "opacity-60" : undefined}>
-                  <TableCell className="font-medium">
+                  <TableCell cell="primary" className="font-medium">
                     {nodeName(pc.nodeId)}
                     {retired.has(pc.nodeId) ? (
                       <span className="ml-2 text-xs font-normal text-warning">retired</span>
                     ) : null}
                   </TableCell>
-                  <TableCell>{PROTOCOL_LABELS[pc.protocol]}</TableCell>
-                  <TableCell className="font-mono text-xs">{pc.listenPort}</TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell label="Protocol" phoneOrder={1}>{PROTOCOL_LABELS[pc.protocol]}</TableCell>
+                  <TableCell label="Port" phoneOrder={2} className="font-mono text-xs">{pc.listenPort}</TableCell>
+                  <TableCell label="Inbound" wide phoneOrder={3} className="font-mono text-xs">
                     {(() => {
                       const fallback = defaultInboundTag(pc.protocol, pc.transport);
                       if (pc.inboundTag) return <span>{pc.inboundTag}</span>;
@@ -115,13 +115,13 @@ export function ProtocolConfigsTable({
                       );
                     })()}
                   </TableCell>
-                  <TableCell>
+                  <TableCell cell="status">
                     <Badge variant={pc.isEnabled ? "success" : "secondary"}>
                       {pc.isEnabled ? "Enabled" : "Disabled"}
                     </Badge>
                   </TableCell>
                   {canManage && (
-                    <TableCell>
+                    <TableCell cell="actions">
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button variant="ghost" size="icon" aria-label="Row actions">

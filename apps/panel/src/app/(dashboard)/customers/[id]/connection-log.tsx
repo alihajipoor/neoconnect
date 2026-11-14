@@ -56,7 +56,7 @@ export function ConnectionLog({
           </p>
         ) : (
           <div className="rounded-lg border border-white/8 bg-card/40">
-            <Table>
+            <Table stack>
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-8" />
@@ -93,14 +93,14 @@ function AttemptRow({ attempt }: { attempt: CustomerAttempt }) {
   return (
     <>
       <TableRow className="cursor-pointer" onClick={() => setOpen((v) => !v)}>
-        <TableCell className="text-muted-foreground">
+        <TableCell cell="lead" className="text-muted-foreground">
           {open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
         </TableCell>
-        <TableCell className="text-sm whitespace-nowrap" title={new Date(attempt.at).toLocaleString()}>
+        <TableCell cell="primary" className="text-sm whitespace-nowrap" title={new Date(attempt.at).toLocaleString()}>
           <span suppressHydrationWarning>{ago(attempt.at)}</span>
         </TableCell>
-        <TableCell>
-          <div className="flex items-center gap-1.5">
+        <TableCell cell="status">
+          <div className="flex items-center gap-1.5 max-sm:flex-wrap max-sm:justify-end">
             <Badge variant={outcome.variant} title={outcome.hint}>
               {outcome.label}
             </Badge>
@@ -110,13 +110,13 @@ function AttemptRow({ attempt }: { attempt: CustomerAttempt }) {
             )}
           </div>
         </TableCell>
-        <TableCell className="text-sm whitespace-nowrap text-muted-foreground">
+        <TableCell label="App" phoneOrder={2} className="text-sm whitespace-nowrap text-muted-foreground">
           {attempt.platform} {attempt.appVersion}
         </TableCell>
-        <TableCell className="text-sm">
+        <TableCell label="Network" wide phoneOrder={3} className="text-sm">
           <NetworkName network={attempt.network} />
         </TableCell>
-        <TableCell className="text-sm whitespace-nowrap">
+        <TableCell label="Landed on" phoneOrder={1} className="text-sm whitespace-nowrap">
           {attempt.protocol ? protocolLabel(attempt.protocol) : <span className="text-muted-foreground">—</span>}
           {/* The server it landed on, beside the protocol: which one it
               was is half of what a support question needs. */}
@@ -125,7 +125,7 @@ function AttemptRow({ attempt }: { attempt: CustomerAttempt }) {
             <span className="ml-1.5 text-xs text-muted-foreground">up {duration(attempt.sessionSeconds)}</span>
           )}
         </TableCell>
-        <TableCell className="max-w-72 truncate text-xs text-muted-foreground" title={attempt.reason ?? undefined}>
+        <TableCell hideOnPhone className="max-w-72 truncate text-xs text-muted-foreground" title={attempt.reason ?? undefined}>
           {attempt.reason ?? ""}
         </TableCell>
       </TableRow>
@@ -133,7 +133,7 @@ function AttemptRow({ attempt }: { attempt: CustomerAttempt }) {
       {open && (
         <TableRow className="hover:bg-transparent">
           <TableCell colSpan={7} className="bg-black/20 whitespace-normal">
-            <div className="flex flex-col gap-3 py-1 pl-8">
+            <div className="flex flex-col gap-3 py-1 pl-8 max-sm:pl-0">
               <p className="text-xs text-muted-foreground">{outcome.hint}</p>
 
               {attempt.reason && (

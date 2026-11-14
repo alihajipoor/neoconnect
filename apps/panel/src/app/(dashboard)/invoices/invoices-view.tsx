@@ -136,7 +136,7 @@ export function InvoicesView({
       </div>
 
       <div className="rounded-lg border border-white/8 bg-card/40">
-        <Table>
+        <Table stack>
           <TableHeader>
             <TableRow>
               <TableHead>Invoice</TableHead>
@@ -163,23 +163,23 @@ export function InvoicesView({
             ) : (
               visible.map((invoice) => (
                 <TableRow key={invoice.id}>
-                  <TableCell className="font-mono text-xs font-medium">{invoice.invoiceNumber}</TableCell>
-                  <TableCell>{invoice.customer.email}</TableCell>
-                  <TableCell>{invoice.planNameSnapshot}</TableCell>
-                  <TableCell className="text-muted-foreground">
+                  <TableCell cell="primary" className="font-mono text-xs font-medium">{invoice.invoiceNumber}</TableCell>
+                  <TableCell label="Customer" wide phoneOrder={1}>{invoice.customer.email}</TableCell>
+                  <TableCell label="Plan" phoneOrder={4}>{invoice.planNameSnapshot}</TableCell>
+                  <TableCell label="Paid with" phoneOrder={5} className="text-muted-foreground">
                     {invoice.paymentTransaction
                       ? (PROVIDER_LABELS[invoice.paymentTransaction.provider] ??
                         invoice.paymentTransaction.provider)
                       : "—"}
                   </TableCell>
-                  <TableCell className="text-right font-medium tabular-nums">
+                  <TableCell label="Amount" phoneOrder={2} className="text-right font-medium tabular-nums">
                     {usd(invoice.amountUsd)}
                   </TableCell>
-                  <TableCell>
+                  <TableCell cell="status">
                     <Badge variant={STATUS_STYLES[invoice.status].variant}>{invoice.status}</Badge>
                   </TableCell>
-                  <TableCell className="text-muted-foreground">{shortDate(invoice.issuedAt)}</TableCell>
-                  <TableCell>
+                  <TableCell label="Issued" phoneOrder={3} className="text-muted-foreground">{shortDate(invoice.issuedAt)}</TableCell>
+                  <TableCell cell="actions">
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="icon" aria-label="Row actions">

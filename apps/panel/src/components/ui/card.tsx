@@ -2,11 +2,24 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
+/** A page's own padding or gap (p-0 on a card that holds a table, p-5,
+ * gap-4) is what it asked for at every width, so the card's tighter phone
+ * defaults step aside for it. Only unprefixed utilities count: a page's
+ * own `md:p-8` says nothing about phones. */
+const OWN_PADDING = /(^|\s)!?(p|py|pt|pb)-/;
+const OWN_GAP = /(^|\s)!?gap(-y)?-/;
+
 function Card({ className, ...props }: React.ComponentProps<"div">) {
+  const own = className ?? "";
   return (
     <div
       data-slot="card"
-      className={cn("flex flex-col gap-6 rounded-xl border bg-card py-6 text-card-foreground shadow-sm max-sm:gap-5 max-sm:py-5", className)}
+      className={cn(
+        "flex flex-col gap-6 rounded-xl border bg-card py-6 text-card-foreground shadow-sm",
+        !OWN_GAP.test(own) && "max-sm:gap-5",
+        !OWN_PADDING.test(own) && "max-sm:py-5",
+        className,
+      )}
       {...props}
     />
   );

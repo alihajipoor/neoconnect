@@ -9,5 +9,6 @@ import { AdminAuditService } from "./admin-audit.service";
 @Module({
   controllers: [AdminAuditController],
   providers: [AdminAuditService, { provide: APP_INTERCEPTOR, useClass: AdminAuditInterceptor }],
+  exports: [AdminAuditService],
 })
 export class AdminAuditModule {}

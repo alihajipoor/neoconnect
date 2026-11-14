@@ -1,4 +1,5 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Ip, Post, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Ip, Param, Post, UseGuards } from "@nestjs/common";
+import { TrustedDevicesService, type TrustSubject } from "../trusted-devices/trusted-devices.service";
 import { LoginGuardService } from "../login-guard/login-guard.service";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
@@ -35,6 +36,7 @@ export class AuthController {
     private readonly adminsService: AdminsService,
     private readonly loginGuard: LoginGuardService,
     private readonly signInAlerts: AdminSignInAlertsService,
+    private readonly trustedDevices: TrustedDevicesService,
   ) {}
 
   // Open to every role, unlike AdminsController's GET /admins/:id --
@@ -68,7 +70,7 @@ export class AuthController {
     this.loginGuard.enforce("admin", dto.challenge, dto.email, ip);
     let result: Awaited<ReturnType<AuthService["login"]>>;
     try {
-      result = await this.authService.login(dto.email, dto.password);
+      result = await this.authService.login(dto.email, dto.password, dto.trustedDevice, ip);
       // Reached on a correct password even when MFA is still outstanding
       // -- the secret being guessed here is the password, and it was not
       // guessed wrong.
@@ -80,9 +82,12 @@ export class AuthController {
       void this.signInAlerts.failed(dto.email, this.loginGuard.failureCount("admin", dto.email), ip);
       throw err;
     }
-    // Signed in with the password alone: an account with no second factor.
-    // With one, the alert waits for the code (`verifyMfa`).
-    if (!("mfaRequired" in result)) void this.signInAlerts.signedIn(dto.email, ip, false);
+    // Signed in at this step: with no second factor, or with a trusted
+    // browser standing in for the code. Otherwise the alert waits for the
+    // code (`verifyMfa`).
+    if (!("mfaRequired" in result)) {
+      void this.signInAlerts.signedIn(dto.email, ip, result.trustedDevice ? "trusted-device" : false);
+    }
     return result;
   }
 
@@ -92,7 +97,11 @@ export class AuthController {
   @Post("mfa/verify")
   @HttpCode(HttpStatus.OK)
   async verifyMfa(@Body() dto: MfaVerifyDto, @Ip() ip: string) {
-    const tokens = await this.authService.verifyMfaAndLogin(dto.mfaToken, dto.code);
+    const tokens = await this.authService.verifyMfaAndLogin(dto.mfaToken, dto.code, {
+      trust: dto.trustDevice === true,
+      userAgent: dto.userAgent,
+      ip,
+    });
     const email = emailOfAccessToken(tokens.accessToken);
     if (email) void this.signInAlerts.signedIn(email, ip, true);
     return tokens;
@@ -137,4 +146,36 @@ export class AuthController {
   async disableMfa(@CurrentAdmin() admin: AuthenticatedAdmin, @Body() dto: MfaDisableDto) {
     await this.authService.disableMfa(admin.sub, dto.password);
   }
+
+  // The caller's own trusted browsers: label and dates, never a token or
+  // its hash.
+  @Get("trusted-devices")
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(...ALL_ADMIN_ROLES)
+  trustedDevicesList(@CurrentAdmin() admin: AuthenticatedAdmin) {
+    return this.trustedDevices.list(admin.sub);
+  }
+
+  @Delete("trusted-devices")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(...ALL_ADMIN_ROLES)
+  async trustedDevicesRemoveAll(@CurrentAdmin() admin: AuthenticatedAdmin, @Ip() ip: string) {
+    await this.trustedDevices.revokeAll(subjectOf(admin), "removed by the admin", ip);
+  }
+
+  @Delete("trusted-devices/:id")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(...ALL_ADMIN_ROLES)
+  async trustedDevicesRemove(@CurrentAdmin() admin: AuthenticatedAdmin, @Param("id") id: string, @Ip() ip: string) {
+    await this.trustedDevices.remove(subjectOf(admin), id, ip);
+  }
+}
+
+function subjectOf(admin: AuthenticatedAdmin): TrustSubject {
+  return { id: admin.sub, email: admin.email, role: admin.role };
 }
