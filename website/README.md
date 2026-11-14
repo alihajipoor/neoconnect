@@ -210,13 +210,13 @@ done.
 | What | Where | Why |
 |---|---|---|
 | **Check the live responses** | -- | Routing (real 404s, `/sitemap.xml`, `/r/CODE`, `www.` to the apex) is done in PHP and was tested on a preview that imitates the shared host, not on the host. After deploying, check each of those URLs and the headers of a page and a static file. |
-| **Download links from Iran** | `inc/config.php` | `windows_installer_url` and `android_installer_url` point at connect.neoxify.site, and neoxify.site is recorded as blocked as a whole in Iran (DNS injection and SNI resets). A visitor there without a VPN reaches the page and the download fails. Serving the installers from neoxify.net itself, or from a domain not blocked there, is your call; either way it stays unverified until testers inside Iran confirm it. |
+| **Download links from Iran** | `get/index.php`, `inc/config.php` | Measured 2026-11-14 from two datacentre boxes inside: neoxify.net and GitHub's release files loaded, connect.neoxify.site resolved to an injected address and the installer URLs never connected. So the Windows and Android buttons now point at `/get/windows` and `/get/android` on neoxify.net, which hand out a copy kept on this host (see *Served from this site* below). **Still unverified:** a real download through `/get/` from inside after deploying, any home or mobile network inside (both boxes are datacentres), and whether an Apple ID or Play account there can install from the stores. |
 | **"Without limits." beside capped plans** | `inc/lang/*.php` | The app's tagline, approved 2026-10-18, is the h1 and is on the social cards. On a sales page whose plans are capped (one device, two devices, 30 GB), a reader can take it as a promise. Keep it, or qualify it in the hero lede; the plan copy states the limits plainly either way. |
 | **Static caching** | the host | See *Caching on the live host* above: ask whether per-site `Cache-Control` on `/assets/` is allowed. |
 | **Real prices** | `inc/content/plans.php` | Reconciled against the panel's `subscription_plans` table on 2026-08-24 — Ultimate was live at the wrong price with a dead button. Nothing enforces the match, so change this file in the same sitting you change a plan in the panel. |
 | **Persian review** | `inc/lang/fa.php` | The translation was drafted, not written by a native speaker. Any line you delete falls back to English automatically, so it is safe to remove one you don't like. |
 | **Send a real test message** | — | Submit the contact form once on the live host and confirm it reaches `info@neoxify.com` — including checking the spam folder. See the domain-split note below for why this needs verifying rather than assuming. |
-| **Feature switches** | `inc/config.php` | `free_trial_enabled` and `referrals_enabled` both default to **off**, because their panel settings do too. Turn each on here only once it is genuinely running in the panel. |
+| **Feature switches** | `inc/config.php` | `free_trial_enabled` is **on** (checked 2026-11-14: the panel grants the Trial plan when a new account's email is verified). `referrals_enabled` is off, as its panel setting is. Turn a switch on here only once the feature is genuinely running in the panel, and off the day it stops. |
 
 ## The download page
 
@@ -263,10 +263,69 @@ only download you will need" notice carries an explicit Android exception.
 Don't merge those into one cheerful claim unless the Android app gains an
 updater.
 
-Android also downloads as an APK rather than a Play Store install, so the page
-explains the "allow installs from this source" prompt up front. Somebody who
-meets that warning without being told reasonably assumes the file is suspect
-and stops.
+The direct APK stays the main Android button, so the page explains the
+"allow installs from this source" prompt up front. Somebody who meets that
+warning without being told reasonably assumes the file is suspect and stops.
+Beside it, `android_play_url` adds a Google Play button (the listing has
+been public since 0.2.40); empty hides it and the direct file stays.
+
+### iPhone and iPad
+
+`ios_app_store_url` holds the App Store listing (public since 1.0.2,
+2026-11-14; runs on iPhone and iPad, iOS 15 or newer). Set, it gives the
+download page an iPhone card with an App Store button, a schema.org node,
+and the iPhone mentions in the hero note, FAQ, meta descriptions and the
+closing points; empty hides the card. The store buttons are plain buttons
+with the store's name as text: no badge artwork from Apple or Google.
+
+What the page says is different on iPhone, because the source shows it:
+plans are bought through the App Store (the store build has no card,
+crypto or voucher screens), a voucher has to go in the account area or
+another app, and there is no Custom mode (per-app routing is Android and
+Windows only). The App Store's own prices are not on this site; the
+structured data gives the iPhone node the trial offer only.
+
+### Served from this site
+
+The Windows and Android buttons link to `/get/windows` and `/get/android`
+(`get/index.php`, routed by `index.php` and on Apache by `.htaccess`), not
+to the control plane, because networks that block VPNs block the control
+plane's domain too (measured 2026-11-14) while this site and GitHub's
+release files load. On a request the site, which sits outside, asks the
+configured installer URL where the current release is without following
+the redirect, remembers that answer for at most ten minutes, fetches the
+file once into `data/installers/<platform>/<tag>/<file>` and redirects the
+visitor there. The file is served by nginx as a static file, so a slow
+download never holds a PHP worker on the shared host. Still no version
+number in the site: the answer comes from the same endpoint as before.
+
+Guards: fixed platform keys (no open redirect); the release answer must
+start with `installer_release_prefix` and every fetch hop must be https on
+`installer_release_hosts` (no SSRF); tag and file name reduced to
+`[A-Za-z0-9._-]`; one fetch at a time per platform (flock), the next
+visitor waits for it; temp name, Content-Length, size cap and the file's
+first bytes (`MZ`, `PK`) checked before the rename; `ignore_user_abort`;
+a failed fetch is not retried for five minutes; two newest copies kept per
+platform. **Anything failing sends the visitor to the configured installer
+URL, as before**, so the button is never dead. `installer_local_copy =>
+false` turns the whole thing off.
+
+Things to know:
+
+- The fetch inside a visitor's request is capped at 50 s (nginx's gateway
+  timeout here is 60 s); measured from the host, the release file answered
+  in well under a second. `php get/index.php warm` does the same from the
+  command line with no time cap -- run it once right after a deploy, and
+  it is what a cron job would call.
+- **`data/installers/` is runtime state.** Deploys leave `data/` alone,
+  and it must be left out of any live-equals-main comparison, like the
+  submissions and the secret.
+- **Content-Type.** nginx serves `.exe` as `application/octet-stream`,
+  which is right, and `.apk` as `application/octet-stream` too, because the
+  host's `mime.types` has no `.apk` entry. Android's browsers go by the
+  `.apk` name, but the proper type needs one `types` line in the
+  neoxify.net vhost and an nginx reload -- a change on the shared box that
+  is the owner's to approve. Unverified on a phone either way.
 
 ### Automatic language
 
@@ -449,6 +508,9 @@ features/  pricing/  faq/  download/
 contact/  reseller/  privacy/  delete-account/    English pages
 fa/                                               Persian mirror of all nine
 404.php                                           real 404, routed to by index.php
+get/index.php                                     /get/windows, /get/android: installers
+                                                  from a copy on this site
+r/index.php                                       /r/CODE voucher short links
 sitemap.php  robots.txt                           /sitemap.xml is routed to the first
 inc/bootstrap.php                                 config, locale, helpers
 inc/config.php                                    the file you edit
@@ -530,8 +592,8 @@ in a Persian sentence as "GB 30".
   policy (the shipped server config writes an access log), no kill switch, no
   auto-connect, no refund guarantee, no company name or jurisdiction, no
   server count, no uptime figure, no signed installer, and no promise about
-  iOS. The download page says an app that does not exist is not "coming
-  soon"; anything else on the site that implies otherwise is a bug.
+  a Mac app. The download page says an app that does not exist is not
+  "coming soon"; anything else on the site that implies otherwise is a bug.
 - **No external requests.** No CDN, no Google Fonts, no analytics. Everything
   is local, including the typeface. The audience is largely on networks where
   a third-party request is slow at best and blocked at worst, and a blocked
