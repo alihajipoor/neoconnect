@@ -391,7 +391,7 @@ run_checklist() {
     fi
     mark_done "$id"
     log_line "DONE $id"
-    step_end "$id" done "$t0"
+    step_end "$id" "done" "$t0"
   done
   return 0
 }

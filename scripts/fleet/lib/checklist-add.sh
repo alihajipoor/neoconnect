@@ -1482,8 +1482,8 @@ CANARY_OTHER_PROTOS="WIREGUARD OPENVPN IKEV2"
 canary_row() { q canary-plan "plan=$(canary_plan)" "emails=$(test_emails)"; }
 
 canary_refuse_customers() { # <row>
-  local id active purch routes subs others
-  IFS='|' read -r id active purch routes subs others <<<"$1"
+  local id purch others
+  IFS='|' read -r id _ purch _ _ others <<<"$1"
   [[ -n "$id" ]] || { say "there is no plan named '$(canary_plan)' (--canary-plan)"; return 1; }
   [[ "$purch" == f ]] || { say "REFUSED: '$(canary_plan)' is purchasable. A customer could buy it and get the server unproven. Nothing was changed."; return 1; }
   [[ "${others:-0}" == 0 ]] || { say "REFUSED: $others subscription(s) of people other than the test accounts are ACTIVE on '$(canary_plan)'. They would get the server unproven. Nothing was changed."; return 1; }
