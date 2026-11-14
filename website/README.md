@@ -294,8 +294,11 @@ plane's domain too (measured 2026-11-14) while this site and GitHub's
 release files load. On a request the site, which sits outside, asks the
 configured installer URL where the current release is without following
 the redirect, remembers that answer for at most ten minutes, fetches the
-file once into `data/installers/<platform>/<tag>/<file>` and redirects the
-visitor there. The file is served by nginx as a static file, so a slow
+file once into `dl/<platform>/<tag>/<file>` and redirects the visitor
+there. The bookkeeping (remembered answer, lock, last failure) lives in
+`data/installers/`, which is never served. The copies are deliberately not
+under `data/`: `data/.htaccess` and the nginx example deny that folder
+outright, so a copy there would 403 or 404 after the redirect. The file is served by nginx as a static file, so a slow
 download never holds a PHP worker on the shared host. Still no version
 number in the site: the answer comes from the same endpoint as before.
 
@@ -306,26 +309,30 @@ start with `installer_release_prefix` and every fetch hop must be https on
 visitor waits for it; temp name, Content-Length, size cap and the file's
 first bytes (`MZ`, `PK`) checked before the rename; `ignore_user_abort`;
 a failed fetch is not retried for five minutes; two newest copies kept per
-platform. **Anything failing sends the visitor to the configured installer
+platform; when the release endpoint cannot be asked, the last copy on disk
+is served instead of the fallback (which is that same endpoint). **Anything failing sends the visitor to the configured installer
 URL, as before**, so the button is never dead. `installer_local_copy =>
 false` turns the whole thing off.
 
 Things to know:
 
-- The fetch inside a visitor's request is capped at 50 s (nginx's gateway
-  timeout here is 60 s); measured from the host, the release file answered
+- A visitor's request has one 45 s budget for asking, waiting for another
+  visitor's fetch and fetching (nginx's gateway timeout here is 60 s);
+  past it the visitor gets the fallback. Measured from the host, the release file answered
   in well under a second. `php get/index.php warm` does the same from the
   command line with no time cap -- run it once right after a deploy, and
   it is what a cron job would call.
-- **`data/installers/` is runtime state.** Deploys leave `data/` alone,
-  and it must be left out of any live-equals-main comparison, like the
-  submissions and the secret.
-- **Content-Type.** nginx serves `.exe` as `application/octet-stream`,
-  which is right, and `.apk` as `application/octet-stream` too, because the
-  host's `mime.types` has no `.apk` entry. Android's browsers go by the
-  `.apk` name, but the proper type needs one `types` line in the
-  neoxify.net vhost and an nginx reload -- a change on the shared box that
-  is the owner's to approve. Unverified on a phone either way.
+- **`dl/<platform>/` and `data/installers/` are runtime state.** Deploys
+  copy named files and leave both alone; both must be left out of any
+  live-equals-main comparison, like the submissions and the secret. `dl/`
+  must be writable by the PHP user (`www-data`).
+- **Content-Type.** On Apache, `dl/.htaccess` sets the `.apk` type. On
+  nginx the host's `mime.types` has no `.apk` entry, so without the
+  `location ^~ /dl/` block from `nginx-website.conf.example` the `.apk`
+  goes out as `application/octet-stream` (the `.exe` is right either way).
+  Adding that block to the live vhost means an nginx reload on the shared
+  box -- the owner's to approve. Android's browsers go by the `.apk` name;
+  unverified on a phone either way.
 
 ### Automatic language
 

@@ -1,0 +1,17 @@
+# Installer copies, served as plain files (see get/index.php). Public on
+# purpose: this is the folder the download buttons end up in. The
+# bookkeeping beside them lives in data/installers/, which is not served.
+#
+# Apache only; on nginx the same needs a location in the vhost (see
+# nginx-website.conf.example).
+
+Options -Indexes
+
+<IfModule mod_mime.c>
+    AddType application/vnd.android.package-archive .apk
+    AddType application/octet-stream .exe
+</IfModule>
+
+<IfModule mod_headers.c>
+    Header set X-Robots-Tag "noindex, nofollow"
+</IfModule>

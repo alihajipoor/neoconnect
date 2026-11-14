@@ -11,8 +11,10 @@
  * WHAT IT DOES. This site sits outside. On a request it asks the configured
  * installer URL where the current release is (without following it),
  * trusts that answer for installer_resolve_ttl seconds, fetches that file
- * ONCE into installer_store_dir, and redirects the visitor to the copy on
- * this site. The visitor's browser never needs another host. The site still
+ * ONCE into installer_store_dir (dl/, public), and redirects the visitor to
+ * the copy on this site. The bookkeeping (the remembered answer, the lock,
+ * the last failure) lives in installer_state_dir (data/installers, never
+ * served). The visitor's browser never needs another host. The site still
  * holds no version number: the answer comes from the same endpoint the
  * in-app updater uses, so a new release appears by itself.
  *
@@ -37,6 +39,10 @@
  *    never served.
  *  - ignore_user_abort: a visitor who gives up does not leave a half fetch.
  *  - Two newest copies kept per platform, older ones deleted.
+ *  - One time budget for the whole request (asking, waiting, fetching), so
+ *    the visitor gets an answer before the gateway timeout.
+ *  - If the release endpoint cannot be asked, the last copy on disk is
+ *    served rather than the fallback, which is that same blocked address.
  *
  * The copies are served by the web server as static files, which is what
  * keeps a slow download from tying up a PHP worker on a shared host.
@@ -95,10 +101,11 @@ function nxg_allowed_host($url)
 /** A curl handle with the settings every request here shares. */
 function nxg_curl($url, $timeout)
 {
+    $timeout = max(1, (int) $timeout);
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
     curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, min(10, $timeout));
     curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
@@ -111,11 +118,11 @@ function nxg_curl($url, $timeout)
  *
  * @return array|null array('url', 'tag', 'file') or null
  */
-function nxg_resolve($platform, $upstream)
+function nxg_resolve($platform, $upstream, $timeout)
 {
     $meta = nxg_platforms();
     $meta = $meta[$platform];
-    $ch = nxg_curl($upstream, 15);
+    $ch = nxg_curl($upstream, min(15, $timeout));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_exec($ch);
     $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -142,11 +149,33 @@ function nxg_resolve($platform, $upstream)
     return array('url' => $loc, 'tag' => $tag, 'file' => $file);
 }
 
-/** Absolute folder for the copies; created if missing. '' when unusable. */
+/** A folder under the site root named by a config key; '' when the value is unsafe. */
+function nxg_rel_dir($key, $default)
+{
+    $rel = trim(str_replace('\\', '/', (string) nxg_cfg($key, $default)), '/');
+    if ($rel === '' || strpos('/' . $rel . '/', '/../') !== false || strpos('/' . $rel . '/', '/./') !== false) {
+        return '';
+    }
+    return $rel;
+}
+
+/** The public folder the copies are served from. */
 function nxg_store()
 {
-    $rel = trim(str_replace('\\', '/', (string) nxg_cfg('installer_store_dir', 'data/installers')), '/');
-    if ($rel === '' || strpos('/' . $rel . '/', '/../') !== false) {
+    return nxg_dir('installer_store_dir', 'dl');
+}
+
+/** The private folder for the remembered answer, the lock and the last failure. */
+function nxg_state()
+{
+    return nxg_dir('installer_state_dir', 'data/installers');
+}
+
+/** Absolute writable folder for a config key; created if missing. '' when unusable. */
+function nxg_dir($key, $default)
+{
+    $rel = nxg_rel_dir($key, $default);
+    if ($rel === '') {
         return '';
     }
     $dir = dirname(__DIR__) . '/' . $rel;
@@ -159,7 +188,7 @@ function nxg_store()
 /** Public URL of a copy. */
 function nxg_public_url($platform, $tag, $file)
 {
-    $rel = trim(str_replace('\\', '/', (string) nxg_cfg('installer_store_dir', 'data/installers')), '/');
+    $rel = nxg_rel_dir('installer_store_dir', 'dl');
     return nxg_cfg('base_path', '/') . $rel . '/' . $platform . '/' . rawurlencode($tag) . '/' . rawurlencode($file);
 }
 
@@ -205,7 +234,7 @@ function nxg_fetch($platform, $url, $dest, $timeout)
         if (!$fh) {
             break;
         }
-        $ch = nxg_curl($url, max(5, $deadline - time()));
+        $ch = nxg_curl($url, $deadline - time());
         curl_setopt($ch, CURLOPT_FILE, $fh);
         curl_setopt($ch, CURLOPT_MAXFILESIZE, $max);
         curl_setopt($ch, CURLOPT_LOW_SPEED_LIMIT, 20000);
@@ -294,10 +323,12 @@ function nxg_prune($platformDir, $keepTag)
  * Make sure the current release is on disk. Returns its public URL, or ''
  * to tell the caller to fall back.
  *
+ * @param int  $budget  seconds for everything: asking, waiting and fetching
  * @param bool $verbose print what happens (command line)
  */
-function nxg_ensure($platform, $upstream, $timeout, $wait, $verbose)
+function nxg_ensure($platform, $upstream, $budget, $verbose)
 {
+    $end = time() + (int) $budget;
     $say = function ($m) use ($verbose, $platform) {
         if ($verbose) {
             echo $platform . ': ' . $m . "\n";
@@ -308,26 +339,38 @@ function nxg_ensure($platform, $upstream, $timeout, $wait, $verbose)
         return '';
     }
     $store = nxg_store();
-    if ($store === '') {
-        $say('store folder missing or not writable');
+    $state = nxg_state();
+    if ($store === '' || $state === '') {
+        $say('store or state folder missing or not writable');
         return '';
     }
     $ttl = (int) nxg_cfg('installer_resolve_ttl', 600);
     $ttl = $ttl > 600 ? 600 : ($ttl < 0 ? 0 : $ttl);
-    $cacheFile = $store . '/' . $platform . '.json';
+    $cacheFile = $state . '/' . $platform . '.json';
     $platformDir = $store . '/' . $platform;
 
     $cached = is_file($cacheFile) ? json_decode((string) @file_get_contents($cacheFile), true) : null;
-    $fresh = is_array($cached) && isset($cached['at'], $cached['tag'], $cached['file'], $cached['url'], $cached['src'])
-        && $cached['src'] === $upstream && (time() - (int) $cached['at']) < $ttl
+    $known = is_array($cached) && isset($cached['at'], $cached['tag'], $cached['file'], $cached['url'], $cached['src'])
+        && $cached['src'] === $upstream
         && nxg_safe_name($cached['tag']) === $cached['tag'] && nxg_safe_name($cached['file']) === $cached['file'];
+    $fresh = $known && (time() - (int) $cached['at']) < $ttl;
 
     if ($fresh) {
         $rel = $cached;
         $say('release (remembered) ' . $rel['tag'] . '/' . $rel['file']);
     } else {
-        $rel = nxg_resolve($platform, $upstream);
+        $rel = nxg_resolve($platform, $upstream, $end - time());
         if ($rel === null) {
+            // The endpoint is down or unreachable from here. The fallback is
+            // that same address, so the last copy on disk is the better
+            // answer. It may be one release old; the app updates itself.
+            if ($known) {
+                $last = $platformDir . '/' . $cached['tag'] . '/' . $cached['file'];
+                if (is_file($last)) {
+                    $say('the installer URL gave no usable release answer; serving the last copy, ' . $cached['tag']);
+                    return nxg_public_url($platform, $cached['tag'], $cached['file']);
+                }
+            }
             $say('the installer URL gave no usable release answer');
             return '';
         }
@@ -347,15 +390,14 @@ function nxg_ensure($platform, $upstream, $timeout, $wait, $verbose)
     if (!is_dir($platformDir) && !@mkdir($platformDir, 0755, true)) {
         return '';
     }
-    $lock = @fopen($store . '/' . $platform . '.lock', 'c');
+    $lock = @fopen($state . '/' . $platform . '.lock', 'c');
     if (!$lock) {
         return '';
     }
     if (!flock($lock, LOCK_EX | LOCK_NB)) {
         // Someone else is fetching it. Wait for them, not for a second copy.
         $say('another fetch is running; waiting');
-        $until = time() + $wait;
-        while (time() < $until) {
+        while (time() < $end) {
             sleep(1);
             clearstatcache(true, $dest);
             if (is_file($dest)) {
@@ -373,7 +415,7 @@ function nxg_ensure($platform, $upstream, $timeout, $wait, $verbose)
     }
 
     clearstatcache(true, $dest);
-    $failFile = $store . '/' . $platform . '.failed';
+    $failFile = $state . '/' . $platform . '.failed';
     if (!is_file($dest) && is_file($failFile) && (time() - (int) @filemtime($failFile)) < 300) {
         // A fetch failed in the last five minutes: do not make every visitor
         // wait for the same failure. They get the fallback straight away.
@@ -391,8 +433,15 @@ function nxg_ensure($platform, $upstream, $timeout, $wait, $verbose)
             fclose($lock);
             return '';
         }
+        if ($end - time() < 5) {
+            // Too little of the budget left to be worth starting.
+            $say('no time left for a fetch');
+            flock($lock, LOCK_UN);
+            fclose($lock);
+            return '';
+        }
         $t0 = microtime(true);
-        $ok = nxg_fetch($platform, $rel['url'], $dest, $timeout);
+        $ok = nxg_fetch($platform, $rel['url'], $dest, $end - time());
         $say(($ok ? 'fetched ' . filesize($dest) . ' bytes' : 'fetch failed') . ' in ' . round(microtime(true) - $t0, 2) . ' s');
         if ($ok) {
             @unlink($failFile);
@@ -425,7 +474,7 @@ if (PHP_SAPI === 'cli' && !isset($_SERVER['REQUEST_URI'])) {
             exit(2);
         }
         $up = trim((string) nxg_cfg($all[$p]['cfg'], ''));
-        $u = $up === '' ? '' : nxg_ensure($p, $up, 900, 900, true);
+        $u = $up === '' ? '' : nxg_ensure($p, $up, 900, true);
         echo $p . ': ' . ($u !== '' ? 'serving ' . $u : 'FALLBACK to the installer URL') . "\n";
         $status = $u !== '' ? $status : 1;
     }
@@ -457,12 +506,13 @@ if ($upstream === '') {
 $target = $upstream;
 if (nxg_cfg('installer_local_copy', false)) {
     ignore_user_abort(true);
-    // The fetch is bounded at 50 s, under the host's 60 s gateway timeout,
-    // so the visitor always gets an answer: a slower fetch is abandoned and
-    // this visitor gets the fallback. ignore_user_abort keeps a visitor who
-    // closes the tab from cutting a fetch short.
+    // One 45 s budget covers asking, waiting for another visitor's fetch
+    // and fetching, under the host's 60 s gateway timeout, so the visitor
+    // always gets an answer: a slower fetch is abandoned and this visitor
+    // gets the fallback. ignore_user_abort keeps a visitor who closes the
+    // tab from cutting a fetch short.
     @set_time_limit(120);
-    $local = nxg_ensure($platform, $upstream, 50, 50, false);
+    $local = nxg_ensure($platform, $upstream, 45, false);
     if ($local !== '') {
         $target = $local;
     }

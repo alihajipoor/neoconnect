@@ -167,10 +167,15 @@ return array(
     // false: the buttons go straight to the URLs above, as before.
     'installer_local_copy' => true,
 
-    // Where the copies live, relative to the site root. Inside data/
-    // because that is the one folder the web server's user can write to and
-    // the one every deploy leaves alone. Served as plain static files.
-    'installer_store_dir' => 'data/installers',
+    // Where the copies live, relative to the site root: a public folder of
+    // its own, served as plain static files. NOT inside data/, which the
+    // site's .htaccess and the nginx example both deny outright. The web
+    // server's user must be able to write to it, and deploys leave it alone.
+    'installer_store_dir' => 'dl',
+
+    // The bookkeeping beside the copies (the remembered release answer, the
+    // lock, the last failure). Private, so it stays inside data/.
+    'installer_state_dir' => 'data/installers',
 
     // Release files are fetched only from these hosts, over https, and the
     // first answer must start with installer_release_prefix. Anything else
@@ -195,10 +200,10 @@ return array(
     // hides the button; the direct file stays either way.
     'android_play_url' => 'https://play.google.com/store/apps/details?id=com.neoxify.mobile',
 
-    // Android builds are arm64-only. That is every phone and tablet sold
-    // for years, but it is stated on the page rather than left to fail at
-    // install time on something older.
-    'android_arm64_only' => true,
+    // Not read by any page. The Android builds stopped being arm64-only:
+    // release-android.yml builds aarch64 and armv7 (the 0.2.40 APK carries
+    // lib/arm64-v8a and lib/armeabi-v7a), so the page no longer says 64-bit.
+    'android_arm64_only' => false,
 
     // Optional link to published SHA-256 checksums, shown beside the download.
     //

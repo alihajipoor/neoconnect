@@ -331,13 +331,13 @@ return array(
 
     // --- Android ---------------------------------------------------
     'download.android.name' => 'Android',
-    'download.android.requirements' => 'Android 7 or newer, 64-bit',
+    'download.android.requirements' => 'Android 7 or newer',
     'download.android.button' => 'Download for Android',
     'download.android.play' => 'Get it on Google Play',
 
     'download.android.sideload.title' => 'Your phone will ask before installing',
     'download.android.sideload.body' => 'Android only installs apps from outside Google Play if you allow it. When you open the downloaded file, your phone asks whether to allow installs from your browser. Allow it, then tap Install. The warning is about where the file came from. It doesn\'t mean something is wrong with it.',
-    'download.android.sideload.play' => 'If you\'d rather not allow this, install the app from Google Play instead.',
+    'download.android.sideload.play' => 'If you\'d rather not allow this and Google Play works for you, you can install the app from there instead. The Google Play version can\'t take payments or voucher codes, so you buy a plan or enter a code in your account area on this website.',
 
     'download.android.steps.title' => 'Installing on Android',
     'download.android.steps.1' => 'Tap the download button, then open the file when it finishes.',
@@ -349,8 +349,8 @@ return array(
     'download.ios.button' => 'Get it on the App Store',
     'download.ios.note' => 'Updates come from the App Store',
     'download.ios.differs.title' => 'On iPhone and iPad',
-    'download.ios.differs.1' => 'You buy a plan in the app, through the App Store. If you already have a plan, sign in with the same account and it works there too.',
-    'download.ios.differs.2' => 'The iPhone app has no field for voucher codes. Enter a code in your account area on this website, or in the Windows or Android app.',
+    'download.ios.differs.1' => 'You can buy a plan in the app, through the App Store, or in your account area on this website by card or crypto. If you already have a plan, just sign in with the same account.',
+    'download.ios.differs.2' => 'The iPhone app has no field for voucher codes. Enter a code in your account area on this website, or in the Windows app.',
     'download.ios.differs.3' => 'Custom mode isn\'t there. Apple allows choosing which apps use the VPN only on devices an organisation manages.',
 
     'download.other.title' => 'Other platforms',
@@ -713,13 +713,13 @@ return array(
     'pricing.trial.body' => 'You don\'t need a payment method to start. Create an account in the app, confirm your email and connect. You can see whether it works on your network before you pay anything.',
 
     'pricing.payment.title' => 'How to pay',
-    'pricing.payment.body' => 'In the Windows and Android apps, pay by international card or crypto. Local bank cards aren\'t accepted, so if your card doesn\'t work abroad, pay with crypto. On iPhone and iPad you pay through the App Store. You get an invoice for every card or crypto payment, which you can open and print.',
+    'pricing.payment.body' => 'Pay by international card or crypto in the Windows app, in the Android app downloaded from this website, or in your account area on this website. Local bank cards aren\'t accepted, so if your card doesn\'t work abroad, pay with crypto. On iPhone and iPad you pay through the App Store. The Google Play version of the Android app has no way to pay, so buy in your account area instead. You get an invoice for every card or crypto payment, which you can open and print.',
 
     'pricing.refund.title' => 'Before you buy',
     'pricing.refund.body' => 'Use the free trial to check that it works on your network before you pay. We don\'t have a written money-back guarantee, so we won\'t promise one. If something goes wrong, contact support and we\'ll talk it through.',
 
     'pricing.voucher.title' => 'Bought from a reseller?',
-    'pricing.voucher.body' => 'Enter your voucher code in the Windows or Android app, or in your account area on this website. A valid code activates the plan right away, with no payment step.',
+    'pricing.voucher.body' => 'Enter your voucher code in the Windows app, in the Android app downloaded from this website, or in your account area on this website. The iPhone app and the Google Play version have no field for codes. A valid code activates the plan right away, with no payment step.',
 
     // =================================================================
     // FAQ page
