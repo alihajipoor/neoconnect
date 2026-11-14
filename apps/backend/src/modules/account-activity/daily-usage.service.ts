@@ -1,6 +1,6 @@
-import { BadRequestException, HttpStatus, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, HttpStatus, Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
-import { PrismaService } from "../../prisma/prisma.service";
+import { PrismaService, ReportingPrismaService } from "../../prisma/prisma.service";
 import {
   addDays,
   BUCKET_SECONDS,
@@ -41,6 +41,13 @@ export interface DailyUsageOptions {
  * is a constant, and a literal leaves Postgres no parameter type to infer. */
 const BUCKET = Prisma.raw(String(BUCKET_SECONDS));
 
+/** The longest one usage read may run. Its runtime on the busiest account
+ * (~100k rows over 14 days) has not been measured; this is far above
+ * what an index-served aggregate of that size should need, and short
+ * enough that a stuck one frees its connection well inside the client's
+ * own 20 s patience. */
+export const REPORT_STATEMENT_TIMEOUT_MS = 8_000;
+
 interface BucketRow {
   bucket: bigint | number | string;
   up: string | null;
@@ -64,7 +71,15 @@ interface BucketRow {
  * subscription: a history per subscription starts again at every one. */
 @Injectable()
 export class DailyUsageService {
-  constructor(private readonly prisma: PrismaService) {}
+  /** Reads in flight, by everything that decides their answer. */
+  private readonly inFlight = new Map<string, Promise<DailyUsage>>();
+
+  constructor(
+    private readonly prisma: PrismaService,
+    // Optional so a test module that provides only PrismaService still
+    // builds; the app always has it (PrismaModule is global).
+    @Optional() private readonly reporting?: ReportingPrismaService,
+  ) {}
 
   async forSubscription(customerId: string, subscriptionId: string, options: DailyUsageOptions = {}): Promise<DailyUsage> {
     const window = parseOptions(options);
@@ -90,7 +105,32 @@ export class DailyUsageService {
     );
   }
 
-  private async read(
+  /** One query for any number of identical reads at once.
+   *
+   * The desktop client races a read that its remembered address has not
+   * answered within 1.5 s across every API address it knows -- about a
+   * dozen -- and drops the losers; the backend cannot cancel a query whose
+   * client has gone, so every copy used to run to the end. On 2026-11-14
+   * one account's Activity screen put 25 copies of this read on a 5
+   * connection pool. Copies arriving while the first is in flight now
+   * share its answer. The key is everything the answer depends on, and is
+   * only ever reached after the ownership check, so no two customers can
+   * share one. */
+  private read(
+    subscriptionId: string | null,
+    scope: Prisma.Sql,
+    createdAt: Date,
+    window: { days: number; timeZone: string },
+  ): Promise<DailyUsage> {
+    const key = JSON.stringify([scope.sql, scope.values, createdAt.toISOString(), window.days, window.timeZone]);
+    const pending = this.inFlight.get(key);
+    if (pending) return pending;
+    const started = this.query(subscriptionId, scope, createdAt, window).finally(() => this.inFlight.delete(key));
+    this.inFlight.set(key, started);
+    return started;
+  }
+
+  private async query(
     subscriptionId: string | null,
     scope: Prisma.Sql,
     createdAt: Date,
@@ -111,7 +151,15 @@ export class DailyUsageService {
     // epoch. The bounds are passed as text and pinned to UTC, so neither
     // the driver's parameter type nor the server's TimeZone setting can
     // shift them. Served by the (subscriptionId, reportedAt) index.
-    const rows = await this.prisma.$queryRaw<BucketRow[]>`
+    //
+    // On the reporting pool, so however long it runs it holds none of the
+    // control plane's connections, and under a statement timeout, so a
+    // read that has gone wrong gives its connection back. SET LOCAL lasts
+    // only for this transaction.
+    const db = this.reporting ?? this.prisma;
+    const [, rows] = await db.$transaction([
+      db.$executeRawUnsafe(`SET LOCAL statement_timeout = ${REPORT_STATEMENT_TIMEOUT_MS}`),
+      db.$queryRaw<BucketRow[]>`
       SELECT (FLOOR(EXTRACT(EPOCH FROM "reportedAt") / ${BUCKET}) * ${BUCKET})::bigint AS "bucket",
              SUM("bytesUp")::text AS "up",
              SUM("bytesDown")::text AS "down"
@@ -120,7 +168,8 @@ export class DailyUsageService {
         AND "reportedAt" >= (${since.toISOString()}::timestamptz AT TIME ZONE 'UTC')
         AND "reportedAt" < (${until.toISOString()}::timestamptz AT TIME ZONE 'UTC')
       GROUP BY 1
-      ORDER BY 1`;
+      ORDER BY 1`,
+    ]);
 
     return {
       subscriptionId,
