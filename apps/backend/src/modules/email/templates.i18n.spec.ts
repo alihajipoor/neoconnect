@@ -52,7 +52,7 @@ function renderAll(locale: Locale) {
       code: "ABCD1234",
       planName: "Pro",
       activationUrl: "https://api.example.com/redeem?code=ABCD1234",
-      publicApiUrl: "https://api.example.com",
+      siteUrl: "https://example.com",
       expiresAt: new Date("2026-12-31T00:00:00Z"),
     }),
   };

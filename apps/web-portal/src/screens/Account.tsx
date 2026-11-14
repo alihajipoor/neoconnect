@@ -22,6 +22,9 @@ import type { Customer, Subscription } from "@shared/lib/types";
  * "Connected" label that has not been verified.
  */
 
+/** The iPhone and iPad app's App Store listing. */
+const APP_STORE_URL = "https://apps.apple.com/app/id6815764263";
+
 const COPY = {
   en: {
     signOut: "Sign out",
@@ -38,6 +41,7 @@ const COPY = {
     connectBody:
       "This page is for managing your account. To connect, install the Neoxify app and sign in with the same email.",
     download: "Download the app",
+    appStore: "iPhone and iPad: get it on the App Store",
     settings: "Settings",
     support: "Support",
     referrals: "Invite friends",
@@ -62,6 +66,7 @@ const COPY = {
     connectBody:
       "این صفحه برای مدیریت حساب شماست. برای وصل شدن، برنامهٔ نئوکسیفای را نصب کنید و با همین ایمیل وارد شوید.",
     download: "دانلود برنامه",
+    appStore: "نسخهٔ آیفون و آیپد در اپ‌استور",
     settings: "تنظیمات",
     support: "پشتیبانی",
     referrals: "دعوت از دوستان",
@@ -208,6 +213,16 @@ export function Account({
           className="mt-1 text-sm text-primary underline-offset-4 hover:underline"
         >
           {c.download}
+        </a>
+        {/* The download page offers the files for Windows and Android.
+            iPhone and iPad have no file: the app is on the App Store. */}
+        <a
+          href={APP_STORE_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-sm text-primary underline-offset-4 hover:underline"
+        >
+          {c.appStore}
         </a>
       </Card>
 

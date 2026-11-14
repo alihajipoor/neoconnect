@@ -187,7 +187,7 @@ function world(start: { balances?: Record<string, number> } = {}) {
 
   const redeemer = new VouchersService(prisma as never, subscriptionsService as never, protocolUsers as never);
   const redeem = jest.spyOn(redeemer, "redeem");
-  const service = new ResellersService(prisma as never, email as never, {} as never, {} as never, redeemer);
+  const service = new ResellersService(prisma as never, email as never, {} as never, redeemer);
 
   return {
     service,

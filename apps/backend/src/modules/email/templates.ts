@@ -241,6 +241,7 @@ const HEAD_CSS = [
   ".nx-outer{padding:14px 8px!important;}",
   ".nx-pad{padding-left:22px!important;padding-right:22px!important;}",
   ".nx-h1{font-size:22px!important;}",
+  ".nx-tile{display:block!important;width:100%!important;padding:0 0 8px 0!important;}",
   "}",
   "@media (prefers-color-scheme:dark){",
   `.nx-bg{background:${DARK.base}!important;}`,
@@ -647,20 +648,27 @@ const EN = {
       `You've been given a <strong>${planName}</strong> plan on Neoxify. Activate it with the code below. No payment is needed.`,
     codeLabel: "Activation code",
     button: "Activate my plan",
-    thenInstall: "Then install the app and sign in with the same email:",
-    noLinks: "Download the app from neoxify.net to get started.",
+    thenInstall: "Then install the app on Windows, Android or iPhone and sign in with the same email:",
+    /** Only when no website address is known. The reseller service
+     * always passes one, so this keeps the template whole on its own. */
+    noLinks: (appStore: string) =>
+      `Get the app for Windows or Android from neoxify.net, and for iPhone from the ${appStore}.`,
     installerSub: "Installer",
     apkSub: "APK",
+    appStoreSub: "App Store",
     /** Takes an already-rendered date so the html body can wrap it in
      * `ltr()` and the text/plain body cannot -- markup in a plain part
      * shows up as literal `<span dir="ltr">` in the reader's client. */
     expiresOn: (date: string) => `This code expires on ${date}.`,
     neverExpires: "This code does not expire.",
     byHand: "If the button doesn't work, go to neoxify.net/account and enter the code by hand.",
-    text: (planName: string, code: string, activationUrl: string, expiry: string) =>
+    /** `install` is the finished install step, links included: the
+     * same sentence as the html above the tiles. */
+    text: (planName: string, code: string, activationUrl: string, install: string, expiry: string) =>
       `Your Neoxify ${planName} plan is ready.\n\n` +
       `Activation code: ${code}\n` +
       `Activate here: ${activationUrl}\n\n` +
+      `${install}\n\n` +
       `${expiry}\n`,
   },
 };
@@ -816,17 +824,20 @@ const FA: Strings = {
       `یک پلن <strong>${planName}</strong> در نئوکسیفای به شما داده شده است. با کد زیر فعالش کنید. نیازی به پرداخت نیست.`,
     codeLabel: "کد فعال‌سازی",
     button: "فعال کردن پلن",
-    thenInstall: "بعد برنامه را نصب کنید و با همین ایمیل وارد شوید:",
-    noLinks: "برای شروع، برنامه را از neoxify.net دانلود کنید.",
+    thenInstall: "بعد برنامه را روی ویندوز، اندروید یا آیفون نصب کنید و با همین ایمیل وارد شوید:",
+    noLinks: (appStore: string) =>
+      `نسخهٔ ویندوز و اندروید را از neoxify.net و نسخهٔ آیفون را از ${appStore} بگیرید.`,
     installerSub: "فایل نصب",
     apkSub: "فایل APK",
+    appStoreSub: "اپ‌استور",
     expiresOn: (date: string) => `این کد تا تاریخ ${date} اعتبار دارد.`,
     neverExpires: "این کد تاریخ انقضا ندارد.",
     byHand: "اگر دکمه کار نکرد، به neoxify.net/account بروید و کد را خودتان وارد کنید.",
-    text: (planName: string, code: string, activationUrl: string, expiry: string) =>
+    text: (planName: string, code: string, activationUrl: string, install: string, expiry: string) =>
       `پلن ${planName} شما در نئوکسیفای آماده است.\n\n` +
       `کد فعال‌سازی: ${code}\n` +
       `فعال‌سازی: ${activationUrl}\n\n` +
+      `${install}\n\n` +
       `${expiry}\n`,
   },
 };
@@ -1160,35 +1171,69 @@ export function invoiceOverdueEmail(params: {
   };
 }
 
+/** The iPhone and iPad app's App Store page. Apple's own address for the
+ * listing: it opens the App Store app on an iPhone and the web listing
+ * anywhere else, and it never changes between versions. */
+export const APP_STORE_URL = "https://apps.apple.com/app/id6815764263";
+
+/** Where each platform's app comes from, given the website's address.
+ *
+ * Windows and Android go through the website's own `/get/*` addresses,
+ * which redirect to whatever the current release is, so an email sent
+ * months ago still hands someone the current build. A pasted release
+ * URL would rot the day after it was sent, and this email is the one a
+ * reseller forwards repeatedly.
+ *
+ * They are on the website and not on the API's `/updates/installer/*`
+ * because the API's domain is blocked on the networks many recipients
+ * are on, while the website loads there. iPhone has no file to hand
+ * over: it is the App Store listing.
+ *
+ * No website address, no Windows or Android links: a link that might
+ * not work outside our own network is worse than saying where to go. */
+interface InstallLink {
+  label: string;
+  href: string;
+  /** Which voucher string names the second line of the tile. */
+  sub: "installerSub" | "apkSub" | "appStoreSub";
+}
+
+export function installLinks(siteUrl?: string): InstallLink[] {
+  const site = siteUrl?.replace(/\/+$/, "");
+  const iphone: InstallLink = { label: "iPhone", href: APP_STORE_URL, sub: "appStoreSub" };
+  if (!site) return [iphone];
+  return [
+    { label: "Windows", href: `${site}/get/windows`, sub: "installerSub" },
+    { label: "Android", href: `${site}/get/android`, sub: "apkSub" },
+    iphone,
+  ];
+}
+
 /** A row of platform download links, laid out as a table so it survives
  * Outlook, which ignores flexbox entirely.
  *
- * Every href goes through the API's own `/updates/installer/*` redirects
- * rather than a GitHub release URL. Those redirect to whatever the
- * current release is (verified live: they resolve to desktop-v0.9.4 and
- * android-v0.2.9 today), so an email sent months ago still hands someone
- * the current build. A pasted release URL would rot the day after it was
- * sent, and this email is the one a reseller forwards repeatedly.
+ * Three tiles side by side from a tablet up. On a phone the stylesheet
+ * stacks them (`.nx-tile`), because three across at 320px leaves under
+ * sixty pixels for "Windows". A client that drops the stylesheet keeps
+ * them in a row with tighter padding.
  *
- * "Windows" and "Android" are not translated: they are what is written
- * on the reader's own device and on the page the link opens.
+ * "Windows", "Android" and "iPhone" are not translated: they are what is
+ * written on the reader's own device and on the page the link opens.
  */
-function downloadRow(s: Style, publicApiUrl?: string): string {
+function downloadRow(s: Style, siteUrl?: string): string {
   const t = STRINGS[s.locale].voucher;
-  const base = publicApiUrl ? publicApiUrl.replace(/\/$/, "") : "";
-  if (!base) {
-    // No configured public address means we cannot build a link that
-    // works outside our own network. Saying where to go beats printing
-    // a broken one.
-    return paragraph(s, t.noLinks);
+  const links = installLinks(siteUrl);
+  if (links.length < 3) {
+    const appStore = `<a href="${APP_STORE_URL}" class="nx-link" style="color:${COBALT};text-decoration:underline;">${t.appStoreSub}</a>`;
+    return paragraph(s, t.noLinks(appStore));
   }
 
-  // The gap between the two tiles is on the first one's trailing side,
-  // whichever side that is.
-  const gap = (first: boolean) => (first ? (s.rtl ? "0 0 0 10px" : "0 10px 0 0") : "0");
-  const cell = (first: boolean, label: string, sub: string, href: string) =>
-    `<td width="50%" style="width:50%;padding:${gap(first)};text-align:${s.align};" valign="top">
-      <a href="${href}" class="nx-well" style="display:block;padding:12px 16px;border:1px solid ${RULE};border-radius:${R_WELL}px;text-decoration:none;background:${PEARL};">
+  // The gap between tiles is on each one's trailing side, whichever side
+  // that is, and the last has none.
+  const gap = (last: boolean) => (last ? "0" : s.rtl ? "0 0 0 8px" : "0 8px 0 0");
+  const cell = (last: boolean, label: string, sub: string, href: string) =>
+    `<td width="33%" class="nx-tile" style="width:33%;padding:${gap(last)};text-align:${s.align};" valign="top">
+      <a href="${href}" class="nx-well" style="display:block;padding:12px 12px;border:1px solid ${RULE};border-radius:${R_WELL}px;text-decoration:none;background:${PEARL};">
         <span dir="ltr" class="nx-ink" style="display:block;font-size:15px;font-weight:600;color:${INK};text-align:${s.align};">${label}</span>
         <span class="nx-ink2" style="display:block;font-size:12px;color:${INK_2};text-align:${s.align};">${sub}</span>
       </a>
@@ -1196,10 +1241,18 @@ function downloadRow(s: Style, publicApiUrl?: string): string {
 
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" dir="${s.dir}" style="margin:0 0 20px 0;width:100%;">
     <tr>
-      ${cell(true, "Windows", t.installerSub, `${base}/updates/installer/windows`)}
-      ${cell(false, "Android", t.apkSub, `${base}/updates/installer/android`)}
+      ${links.map((link, i) => cell(i === links.length - 1, link.label, t[link.sub], link.href)).join("")}
     </tr>
   </table>`;
+}
+
+/** The install step as plain text: the same sentence as the html, then
+ * one line per platform. */
+function installText(locale: Locale, siteUrl?: string): string {
+  const t = STRINGS[locale].voucher;
+  const links = installLinks(siteUrl);
+  if (links.length < 3) return `${t.thenInstall}\n${t.noLinks(t.appStoreSub)}\niPhone: ${APP_STORE_URL}`;
+  return [t.thenInstall, ...links.map((link) => `${link.label}: ${link.href}`)].join("\n");
 }
 
 /**
@@ -1211,6 +1264,11 @@ function downloadRow(s: Style, publicApiUrl?: string): string {
  * it has to answer "what is this, is it real, what do I do" in one
  * screen: what they have been given, the code itself, one button that
  * activates it, and where to get the app.
+ *
+ * The order is the order that works on every platform: activate on the
+ * web first, then install, then sign in with the same email. The iPhone
+ * app has no field for a code, so nothing here asks anyone to type the
+ * code into the app; the code is printed for the account page.
  *
  * The activation link carries the code so the common path is a single
  * tap. The code is also printed, because a link that arrives mangled by
@@ -1234,7 +1292,9 @@ export function resellerVoucherEmail(params: {
   code: string;
   planName: string;
   activationUrl: string;
-  publicApiUrl?: string;
+  /** The website, e.g. https://neoxify.net. The Windows and Android
+   * tiles link to its `/get/*` addresses (see installLinks). */
+  siteUrl?: string;
   expiresAt?: Date | null;
 }) {
   const s = styleFor(params.locale);
@@ -1255,11 +1315,17 @@ export function resellerVoucherEmail(params: {
         ${bigCode(params.code)}
         ${button(s, params.activationUrl, t.button)}
         ${paragraph(s, t.thenInstall)}
-        ${downloadRow(s, params.publicApiUrl)}
+        ${downloadRow(s, params.siteUrl)}
         ${fineprint(s, `${expiryHtml} ${t.byHand}`)}
       `,
     }),
-    text: t.text(params.planName, params.code, params.activationUrl, expiryText),
+    text: t.text(
+      params.planName,
+      params.code,
+      params.activationUrl,
+      installText(params.locale, params.siteUrl),
+      expiryText,
+    ),
   };
 }
 
