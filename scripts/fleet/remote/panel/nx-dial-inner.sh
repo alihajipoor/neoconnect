@@ -16,7 +16,7 @@ HN=$(sed -E 's#^https?://([^/:]+).*#\1#' <<<"$H")
 say() { echo "$L | $*"; }
 fail() {
   say "$*"
-  for f in /tmp/client.log; do [ -f "$f" ] && grep -iE "error|fail|refus|timeout|denied|AUTH|no route|verif" "$f" | grep -viE "secret|password|key" | tail -4 | cut -c1-160; done
+  [ -f /tmp/client.log ] && grep -iE "error|fail|refus|timeout|denied|AUTH|no route|verif" /tmp/client.log | grep -viE "secret|password|key" | tail -4 | cut -c1-160
   echo "E2E-FAIL $L"
   exit 1
 }
