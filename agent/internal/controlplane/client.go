@@ -112,6 +112,7 @@ func Run(ctx context.Context, cfg *config.Config, dispatcher *dispatch.Dispatche
 		}
 		var wait time.Duration
 		wait, backoff = nextBackoff(backoff, time.Since(started))
+		wait = jittered(wait)
 		log.Printf("agent sync stream error: %v (retrying in %s)", err, wait)
 
 		select {
@@ -235,8 +236,8 @@ func runStream(
 
 	// The writer starts before the hello, because the hello is itself a
 	// stream write and goes through the same queue as everything else.
-	// errCh has room for all four so none can block on the way out.
-	errCh := make(chan error, 4)
+	// errCh has room for all five so none can block on the way out.
+	errCh := make(chan error, 5)
 	snd := &sender{reqs: make(chan writeReq)}
 	go func() { errCh <- writerLoop(streamCtx, stream, snd.reqs) }()
 
@@ -247,7 +248,9 @@ func runStream(
 
 	go func() { errCh <- heartbeatLoop(streamCtx, snd, prober) }()
 	go func() { errCh <- statsLoop(streamCtx, snd, dispatcher) }()
-	go func() { errCh <- receiveLoop(streamCtx, stream, snd, dispatcher) }()
+	watch := &linkWatch{}
+	go func() { errCh <- receiveLoop(streamCtx, stream, snd, dispatcher, watch) }()
+	go func() { errCh <- watchdogLoop(streamCtx, watch) }()
 
 	err = <-errCh
 	cancel()
@@ -507,12 +510,20 @@ func (t *reassertTally) add(now time.Time) string {
 	return line
 }
 
-func receiveLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, snd *sender, dispatcher *dispatch.Dispatcher) error {
+func receiveLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, snd *sender, dispatcher *dispatch.Dispatcher, watch *linkWatch) error {
 	var tally reassertTally
 	for {
+		watch.waiting(time.Now())
 		msg, err := stream.Recv()
 		if err != nil {
 			return fmt.Errorf("receive: %w", err)
+		}
+		watch.busy()
+		if msg.GetServerHeartbeat() != nil {
+			// Proof the control plane is still talking on this stream, and
+			// that it is one that promises to keep doing so: see watchdog.go.
+			watch.arm()
+			continue
 		}
 		cmd := msg.GetCommand()
 		if cmd == nil {
