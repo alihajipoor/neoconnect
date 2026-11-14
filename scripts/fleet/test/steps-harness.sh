@@ -81,6 +81,12 @@ rsh() {
         printf '%s\n' "x $k issued | no WireGuard handshake in 20 s" "E2E-FAIL x $k issued"
       fi
       ;;
+    # A recorded dump, looked at before reuse: T_DUMP=gone fails, else
+    # T_DUMP_AGE seconds old (default 60), 62 MB.
+    *"gzip -t '"*"stat -c '%s %Y'"*)
+      [[ "${T_DUMP:-}" == gone ]] && return 1
+      echo "62000000 $(($(date +%s) - ${T_DUMP_AGE:-60}))"
+      ;;
     # The server's own view: T_SESSION_<KIND> is the line session.sh prints.
     *session.sh*)
       local v

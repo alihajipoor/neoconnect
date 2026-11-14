@@ -818,7 +818,7 @@ do_add_postfix() {
   undo "on the new box: the unit and rules it replaced are saved beside it (/root/xray.service.before-fleet-*, /etc/iptables/rules.v4.bak-pre-selfloop-*)"
 }
 ok_add_postfix() {
-  expect "seven times ok: Xray as nobody at the pinned version, readable certificate copy, strongSwan loader bound to the unit that exists, WireGuard public key readable, self-connect guard, conntrack limit"
+  expect "every line ok, one per check and one per engine: Xray as nobody at the pinned version, readable certificate copy, strongSwan loader bound to the unit that exists, WireGuard public key readable, self-connect guard, conntrack limit"
   rsh new "$REMOTE_DIR/postinstall.sh check $XRAY_VERSION $NEW_IP"
 }
 
@@ -1149,7 +1149,7 @@ do_add_udp_reach() {
 }
 ok_add_udp_reach() {
   local p n bad=0
-  expect "datagrams sent from outside to the WireGuard, OpenVPN and IKEv2 ports show up on the server's interface: no provider firewall in the way. This is NOT a handshake: those three tunnels are proven only by a real app (add.owner-after)."
+  expect "datagrams sent from outside to the WireGuard, OpenVPN and IKEv2 ports show up on the server's interface: no provider firewall in the way. This is NOT a handshake: the tool dials those three tunnels itself at add.canary-other."
   dry && { rsh new "grep -c '\\.<port>: ' $REMOTE_DIR/udp.cap   (once per port)"; return 0; }
   for p in $(st udp_ports); do
     n="$(rsh new "grep -c '\\.$p: ' $REMOTE_DIR/udp.cap || true")" || n=0

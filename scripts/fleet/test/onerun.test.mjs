@@ -117,8 +117,32 @@ describe("one database dump per run", () => {
     state({ run_dump_file: "/root/db-backups/pre-germany-4-20261114T000000Z.sql.gz", run_dump_at: "2026-11-14T00:00:00Z" });
     const r = step("run_dump", {}, "pre-germany-4");
     assert.equal(r.code, 0, r.out);
-    assert.match(r.out, /reusing this run's dump \/root\/db-backups\/pre-germany-4-/);
+    assert.match(r.out, /reusing this run's dump \/root\/db-backups\/pre-germany-4-[^\n]*1 minutes old, gzip -t ok/);
     assert.doesNotMatch(calls(), /pg_dump/);
+  });
+  it("a recorded dump that is gone from the panel host is not reused: a new one is taken, and logged", () => {
+    state({ run_dump_file: "/root/db-backups/pre-germany-4-20261114T000000Z.sql.gz", run_dump_at: "2026-11-14T00:00:00Z" });
+    const r = step("run_dump", { T_DUMP: "gone" }, "pre-germany-4");
+    assert.match(r.out, /cannot be reused \(not on the panel host/);
+    assert.doesNotMatch(r.out, /reusing this run's dump/);
+    assert.match(calls(), /pg_dump/);
+    assert.match(readFileSync(join(dir, "run.log"), "utf8"), /DUMP-STALE/);
+  });
+  it("a recorded dump older than the limit (a run continued the next day) is not reused", () => {
+    state({ run_dump_file: "/root/db-backups/pre-germany-4-20261114T000000Z.sql.gz", run_dump_at: "2026-11-14T00:00:00Z" });
+    const r = step("run_dump", { T_DUMP_AGE: String(26 * 3600) }, "pre-germany-4");
+    assert.match(r.out, /cannot be reused \(1560 minutes old/);
+    assert.match(calls(), /pg_dump/);
+  });
+  it("--use-dump refuses a dump older than the limit, and accepts a recent one", () => {
+    const f = "/root/db-backups/pre-session-20261114T000000Z.sql.gz";
+    let r = step("use_dump_given", { OPT_USE_DUMP: f, T_DUMP_AGE: String(5 * 3600) });
+    assert.equal(r.code, 1);
+    assert.match(r.out, /minutes old \(more than 4 hours\)/);
+    assert.equal(stateOf("run_dump_file"), undefined);
+    r = step("use_dump_given", { OPT_USE_DUMP: f, T_DUMP_AGE: "300" });
+    assert.equal(r.code, 0, r.out);
+    assert.equal(stateOf("run_dump_file"), f);
   });
   it("the first step that needs one takes it", () => {
     const r = step("run_dump", {}, "pre-germany-4");

@@ -268,14 +268,47 @@ run_dump() {
     f=""
   fi
   if [[ -n "$f" ]]; then
-    say "database dump: reusing this run's dump $f (taken $(st run_dump_at "?")); --fresh-dump takes a new one"
-    undo "restore the rows this step changes from $f"
-    return 0
+    # A run can be continued days later, and the daily prune keeps only the
+    # newest dump of each day: the recorded file may be gone, or old.
+    # Look at it on the panel host before trusting it.
+    local why
+    if why="$(dump_fresh_enough "$f")"; then
+      say "database dump: reusing this run's dump $f (taken $(st run_dump_at "?"), $why); --fresh-dump takes a new one"
+      undo "restore the rows this step changes from $f"
+      return 0
+    fi
+    say "database dump: this run's dump $f cannot be reused ($why); taking a new one"
+    log_line "DUMP-STALE $f ($why): a new dump taken"
   fi
   panel_dump "$label" || return 1
   state_set run_dump_file "$(st last_dump_file)"
   state_set run_dump_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "$(st last_dump_file)" >"$RUN_DIR/dump.txt"
+}
+
+# How old a dump a step may lean on (seconds). A run continued the next
+# day takes a new one.
+DUMP_MAX_AGE_S="${DUMP_MAX_AGE_S:-14400}"
+
+# dump_stat <file>: "<size> <mtime>" of a dump on the panel host, or a
+# failure when it is missing or not a whole gzip file.
+dump_stat() {
+  local out
+  out="$(rsh panel "gzip -t '$1' && stat -c '%s %Y' '$1'")" || return 1
+  [[ "$out" =~ ^[0-9]+[[:space:]][0-9]+$ ]] || return 1
+  echo "$out"
+}
+
+# dump_fresh_enough <file>: succeeds, printing its age, when the dump is
+# on the panel host, whole, the size of a dump and younger than
+# DUMP_MAX_AGE_S; otherwise fails, printing why.
+dump_fresh_enough() {
+  local out age
+  out="$(dump_stat "$1")" || { echo "not on the panel host, or not a whole gzip file"; return 1; }
+  ((${out%% *} > 1000000)) || { echo "too small to be a dump"; return 1; }
+  age=$(($(date +%s) - ${out#* }))
+  ((age <= DUMP_MAX_AGE_S)) || { echo "$((age / 60)) minutes old, more than $((DUMP_MAX_AGE_S / 3600)) hours"; return 1; }
+  echo "$((age / 60)) minutes old, gzip -t ok"
 }
 
 # use_dump_given: --use-dump <file>, a dump this job already took (say,
@@ -285,8 +318,10 @@ use_dump_given() {
   local f="${OPT_USE_DUMP:-}" out
   [[ -n "$f" ]] || return 0
   [[ "$f" =~ ^/root/db-backups/[A-Za-z0-9._-]+\.sql\.gz$ ]] || { echo "fleet: --use-dump must name a file in /root/db-backups/ ending .sql.gz" >&2; return 1; }
-  out="$(rsh panel "gzip -t '$f' && stat -c '%s %Y' '$f'")" || { echo "fleet: --use-dump: $f is not a good gzip file on the panel host" >&2; return 1; }
+  out="$(dump_stat "$f")" || { echo "fleet: --use-dump: $f is not a good gzip file on the panel host" >&2; return 1; }
   ((${out%% *} > 1000000)) || { echo "fleet: --use-dump: $f is too small to be a dump" >&2; return 1; }
+  local age=$(($(date +%s) - ${out#* }))
+  ((age <= DUMP_MAX_AGE_S)) || { echo "fleet: --use-dump: $f is $((age / 60)) minutes old (more than $((DUMP_MAX_AGE_S / 3600)) hours); leave --use-dump off and the run takes a new one" >&2; return 1; }
   state_set run_dump_file "$f"
   state_set last_dump_file "$f"
   state_set last_dump "${out#* }"

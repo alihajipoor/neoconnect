@@ -153,10 +153,16 @@ exit-matched, 256 KB each way, the server's own view agreeing, in 50 s.
 The first step of a run that writes to the database takes the dump
 (`add.dump-node`, or `retire.dump`), records it in the run directory
 (`dump.txt`, and `run_dump_file` in `state`), and every later step that
-writes reuses it and says so. `--fresh-dump` takes a new one at the
+writes reuses it and says so. Before reusing it the step looks at the
+file on the panel host (`gzip -t` and its age): a dump that is gone (the
+daily prune keeps only the newest of each day) or older than four hours
+(`DUMP_MAX_AGE_S`) is not reused; a new one is taken and `DUMP-STALE`
+goes into the run log, so a run continued the next day never edits
+plans on a missing or day-old dump. `--fresh-dump` takes a new one at the
 next step that asks; `--use-dump /root/db-backups/<file>.sql.gz` makes a
 dump this job already took (say, at the start of the session) the
-run's one dump. A write query refuses to run while the run has none.
+run's one dump, and refuses one older than the same four hours. A write
+query refuses to run while the run has none.
 
 ### --done never re-runs an action
 
