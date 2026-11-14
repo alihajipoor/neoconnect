@@ -16,7 +16,45 @@ import { rateLimitFor } from "../protocol-users/rate-limit";
 import { AgentConnectionRegistry } from "./agent-connection-registry";
 import { resolveProtoPath } from "./proto-path";
 import { verifyEd25519 } from "./ed25519";
+import { endAgentCall, forceAgentCallStatus, isTransientDbError } from "./stream-end";
 import type { AgentDuplexCall, AgentMessageEnvelope, HelloMessage } from "./agent-messages";
+
+/** A Hello that was refused for what it says (unknown node, stale
+ * timestamp, bad signature), as opposed to one that could not be checked
+ * because the database did not answer. The two end the stream with
+ * different codes, so the agent's log says which. */
+class HelloRejected extends Error {}
+
+/** What the gateway knows about one open AgentSync call, authenticated or
+ * not. Kept apart from AgentConnectionRegistry, which is the routing table
+ * and drops a call the moment it should stop being handed work: this map
+ * holds a call until grpc-js says it has closed, so the sweep can still
+ * find -- and end -- a call that has gone quiet without closing. */
+interface LiveCall {
+  nodeId: string | null;
+  openedAt: number;
+  /** When anything last arrived from the agent on this call. */
+  lastMessageAt: number;
+}
+
+/** How often the backend writes a ServerHeartbeat on every connected
+ * stream. Agents from the one after v0.2.12 treat a long silence after
+ * the first one as a dead link and redial (agent/internal/controlplane,
+ * serverSilenceLimit); older agents skip the message. */
+const SERVER_HEARTBEAT_INTERVAL_MS = 20_000;
+
+/** How long a call may stay open without a valid Hello. An agent sends
+ * its Hello as its first write; a call still anonymous after this long is
+ * either not an agent or one whose Hello was lost. */
+const UNAUTHENTICATED_LIMIT_MS = 30_000;
+
+/** Calls for one node are torn down at most once per this interval, so a
+ * node whose stream cannot be closed cleanly is not hammered every sweep. */
+const TEARDOWN_MIN_INTERVAL_MS = 60_000;
+
+/** One log line per node per kind of message per this interval when its
+ * handling keeps failing, with a count of the ones not logged. */
+const MESSAGE_FAILURE_LOG_EVERY_MS = 60_000;
 
 // Hello timestamps must fall within this window of the server's clock --
 // bounds replay of a captured Hello without requiring an interactive
@@ -154,6 +192,15 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * See reassertProvisionedUsers. */
   private readonly unackedReasserts = new Map<string, { nodeId: string; at: number }>();
 
+  /** Every open call, from accept until grpc-js reports it closed. */
+  private readonly liveCalls = new Map<AgentDuplexCall, LiveCall>();
+  /** When each node's calls were last torn down by the sweep. */
+  private readonly lastTeardown = new Map<string, number>();
+  /** Per node and message kind: when a failure was last logged, and how
+   * many have failed since without a line of their own. */
+  private readonly messageFailures = new Map<string, { loggedAt: number; suppressed: number }>();
+  private serverHeartbeatHandle?: NodeJS.Timeout;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly nodesService: NodesService,
@@ -286,9 +333,12 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`Route re-assert sweep failed: ${err}`);
       });
     }, ROUTE_REASSERT_INTERVAL_MS);
+
+    this.serverHeartbeatHandle = setInterval(() => this.sendServerHeartbeats(), SERVER_HEARTBEAT_INTERVAL_MS);
   }
 
   onModuleDestroy() {
+    if (this.serverHeartbeatHandle) clearInterval(this.serverHeartbeatHandle);
     if (this.sweepHandle) clearInterval(this.sweepHandle);
     if (this.reassertHandle) clearInterval(this.reassertHandle);
     if (this.routeReassertHandle) clearInterval(this.routeReassertHandle);
@@ -336,17 +386,34 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async sweepStaleNodes() {
-    const staleBefore = new Date(Date.now() - HEARTBEAT_STALE_MS);
+    const now = Date.now();
+    // In memory and first, so this half still runs when the database
+    // cannot answer -- which is exactly when a stream is most likely to
+    // have been left open with nobody on our side reading it.
+    this.endSilentCalls(now);
+
+    const staleBefore = new Date(now - HEARTBEAT_STALE_MS);
     const stale = await this.prisma.node.findMany({
       where: { status: "ONLINE", lastHeartbeatAt: { lt: staleBefore } },
       select: { id: true, name: true },
     });
     for (const node of stale) {
-      const call = this.registry.get(node.id);
-      if (call) {
-        call.destroy(new Error("heartbeat stale"));
-        this.registry.delete(node.id, call);
+      // The database says no heartbeat, but this process has heard from
+      // the node: its heartbeats arrive and their writes failed. A node
+      // that is talking to us is never dropped or marked OFFLINE for
+      // that -- the write is retried here instead.
+      if (this.heardFromRecently(node.id, now)) {
+        try {
+          await this.nodesService.touchHeartbeat(node.id);
+        } catch (err) {
+          this.logger.warn(`Node ${node.id} (${node.name}) is heartbeating but its heartbeat could not be stored: ${(err as Error).message}`);
+        }
+        continue;
       }
+      // The backstop for every way a stream can die without closing: a
+      // node gone quiet is told its stream is over, so an agent still
+      // waiting on it redials instead of sitting on a dead call.
+      this.tearDownNodeCalls(node.id, now, "no heartbeat");
       await this.nodesService.setStatus(node.id, "OFFLINE");
       // setStatus has just alerted on the transition; hold the repeat
       // reminder back one interval so both do not arrive at once.
@@ -362,6 +429,99 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     // And the one that reaches a person: a gap past the paging threshold,
     // once per gap (NodesService.pageHeartbeatGaps).
     await this.nodesService.pageHeartbeatGaps();
+  }
+
+  /** Whether any open call for this node has carried a message within
+   * the heartbeat deadline. */
+  private heardFromRecently(nodeId: string, now: number): boolean {
+    for (const live of this.liveCalls.values()) {
+      if (live.nodeId === nodeId && now - live.lastMessageAt <= HEARTBEAT_STALE_MS) return true;
+    }
+    return false;
+  }
+
+  /** Ends calls that have stopped carrying anything: an authenticated one
+   * with no message for longer than the heartbeat deadline, an anonymous
+   * one with no valid Hello for UNAUTHENTICATED_LIMIT_MS. Independent of
+   * the database and of the registry, which a call can have left while
+   * staying open on the wire. */
+  private endSilentCalls(now: number) {
+    const silentNodes = new Set<string>();
+    for (const [call, live] of this.liveCalls) {
+      if (live.nodeId === null) {
+        if (now - live.openedAt > UNAUTHENTICATED_LIMIT_MS) {
+          endAgentCall(call, grpc.status.UNAUTHENTICATED, `no valid Hello within ${UNAUTHENTICATED_LIMIT_MS}ms`);
+        }
+      } else if (now - live.lastMessageAt > HEARTBEAT_STALE_MS) {
+        silentNodes.add(live.nodeId);
+      }
+    }
+    for (const nodeId of silentNodes) {
+      if (!this.heardFromRecently(nodeId, now)) this.tearDownNodeCalls(nodeId, now, "no message");
+    }
+  }
+
+  /** Ends every silent call for a node with UNAVAILABLE, so its agent's
+   * Recv() returns and it redials. At most once per node per
+   * TEARDOWN_MIN_INTERVAL_MS, and never a call that is still carrying
+   * messages -- a newer stream for the same node is left alone. */
+  private tearDownNodeCalls(nodeId: string, now: number, reason: string) {
+    const last = this.lastTeardown.get(nodeId);
+    if (last !== undefined && now - last < TEARDOWN_MIN_INTERVAL_MS) return;
+    const calls = new Set<AgentDuplexCall>();
+    for (const [call, live] of this.liveCalls) {
+      if (live.nodeId === nodeId && now - live.lastMessageAt > HEARTBEAT_STALE_MS) calls.add(call);
+    }
+    const routed = this.registry.get(nodeId);
+    const routedLive = routed ? this.liveCalls.get(routed) : undefined;
+    if (routed && !(routedLive && now - routedLive.lastMessageAt <= HEARTBEAT_STALE_MS)) calls.add(routed);
+    if (calls.size === 0) return;
+    this.lastTeardown.set(nodeId, now);
+    for (const call of calls) {
+      this.registry.delete(nodeId, call);
+      endAgentCall(call, grpc.status.UNAVAILABLE, `control stream ended by the control plane: ${reason} for >${HEARTBEAT_STALE_MS}ms`);
+    }
+    this.logger.warn(`Node ${nodeId}: ended ${calls.size} silent stream(s) (${reason}) so the agent redials`);
+  }
+
+  /** Writes a ServerHeartbeat on every connected stream: the guaranteed
+   * periodic message an agent's receive watchdog needs, since a node with
+   * no users and no routes gets nothing else. Agents up to v0.2.12 do not
+   * know the field and skip it. */
+  private sendServerHeartbeats() {
+    for (const nodeId of this.registry.connectedNodeIds()) {
+      const call = this.registry.get(nodeId);
+      if (!call || call.destroyed || call.writableEnded) continue;
+      try {
+        call.write({ serverHeartbeat: { sentAtUnix: String(Math.floor(Date.now() / 1000)) } });
+      } catch (err) {
+        this.logger.warn(`Node ${nodeId}: server heartbeat write failed: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  /** Runs one message's work. A failure costs that message -- logged, at
+   * most once a minute per node and kind -- and never the stream: the
+   * stream is the node's only way to receive commands, and a database
+   * that is busy for ten seconds must not take it away. Liveness is the
+   * sweep's to decide, from heartbeats. */
+  private async perMessage(nodeId: string, kind: string, work: () => Promise<void>) {
+    try {
+      await work();
+    } catch (err) {
+      const key = `${nodeId}:${kind}`;
+      const now = Date.now();
+      const seen = this.messageFailures.get(key);
+      if (seen && now - seen.loggedAt < MESSAGE_FAILURE_LOG_EVERY_MS) {
+        seen.suppressed++;
+        return;
+      }
+      const more = seen?.suppressed ? ` (${seen.suppressed} more since the last line)` : "";
+      this.messageFailures.set(key, { loggedAt: now, suppressed: 0 });
+      this.logger.warn(
+        `Node ${nodeId}: ${kind} not handled, stream kept${isTransientDbError(err) ? " (database busy)" : ""}: ${(err as Error).message}${more}`,
+      );
+    }
   }
 
   /** A stream ending is not the same as the node being down.
@@ -422,24 +582,36 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     // is dropped rather than taken as a reason to close the stream.
     let helloInFlight = false;
     let closed = false;
+    const live: LiveCall = { nodeId: null, openedAt: Date.now(), lastMessageAt: Date.now() };
+    this.liveCalls.set(call, live);
+
+    /** Ends the stream with a status the agent sees (see endAgentCall --
+     * call.destroy() would leave it waiting forever). */
+    const giveUp = (code: grpc.status, details: string) => {
+      if (closed) return;
+      this.logger.warn(`AgentSync stream ended${nodeId ? ` for node ${nodeId}` : ""}: ${details}`);
+      endAgentCall(call, code, details);
+    };
 
     /** No node behind this stream (yet). Drops the message while a Hello
      * is being checked, and otherwise closes the stream. */
     const refuseUnauthenticated = (what: string) => {
-      if (!helloInFlight) call.destroy(new Error(`${what} received before a valid Hello`));
+      if (!helloInFlight) giveUp(grpc.status.UNAUTHENTICATED, `${what} received before a valid Hello`);
     };
 
     call.on("data", (msg: AgentMessageEnvelope) => {
+      live.lastMessageAt = Date.now();
       void (async () => {
         try {
           if (msg.payload === "hello") {
             helloInFlight = true;
             let node: { id: string; name: string };
             try {
-              node = await this.authenticateHello(call, msg.hello!);
+              node = await this.authenticateHello(msg.hello!);
             } finally {
               helloInFlight = false;
             }
+            live.nodeId = node.id;
             // The node is known from here, before anything slow. It used to
             // be assigned only once the whole Hello had been handled --
             // replaying the outbox and re-asserting every credential and
@@ -461,15 +633,18 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
               refuseUnauthenticated("heartbeat");
               return;
             }
-            await this.nodesService.touchHeartbeat(nodeId);
+            const id = nodeId;
+            // Each write on its own: the dest's health failing to store
+            // must not cost the heartbeat, nor the other way round. A
+            // heartbeat that cannot be stored is retried by the sweep,
+            // which knows from liveCalls that this node is talking.
+            await this.perMessage(id, "heartbeat", () => this.nodesService.touchHeartbeat(id));
             // Agents older than v0.2.8 send no dest at all, so this is a
             // no-op for them rather than a downgrade to "unreachable".
             const hb = msg.heartbeat;
             if (hb?.realityDest) {
-              await this.nodesService.recordRealityDestHealth(
-                nodeId,
-                hb.realityDest,
-                hb.realityDestReachable === true,
+              await this.perMessage(id, "reality dest health", () =>
+                this.nodesService.recordRealityDestHealth(id, hb.realityDest!, hb.realityDestReachable === true),
               );
             }
           } else if (msg.payload === "commandAck") {
@@ -484,66 +659,114 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
               refuseUnauthenticated("commandAck");
               return;
             }
-            await this.handleCommandAck(nodeId, msg.commandAck!);
+            const id = nodeId;
+            // A stored command whose ack is lost stays SENT and is replayed
+            // on the next connect; a lost re-assert ack is covered by
+            // REASSERT_ACK_PATIENCE_MS.
+            await this.perMessage(id, "command ack", () => this.handleCommandAck(id, msg.commandAck!));
           } else if (msg.payload === "statsBatch") {
             if (!nodeId) {
               refuseUnauthenticated("statsBatch");
               return;
             }
+            const id = nodeId;
             // Taken before anything slow: the sources' ages are relative to
             // when the node sent this, and arrival is the nearest we know.
             const receivedAt = Date.now();
-            await this.usageService.recordDeltas(nodeId, msg.statsBatch?.deltas ?? []);
+            // Not retried: recordDeltas writes delta by delta, so a retry
+            // after a partial failure would count some traffic twice. A
+            // failed batch is that batch's usage lost, as it was before --
+            // when it also cost the node its stream.
+            await this.perMessage(id, "stats batch", () => this.usageService.recordDeltas(id, msg.statsBatch?.deltas ?? []));
             // The device limit rides along with usage: same poll. Which
             // devices are active comes from the usage deltas as much as
             // from the session counts (see ConcurrencyService), and an
             // engine that reports no counts is unknown rather than zero.
-            // handleReport never throws, so a counting problem cannot
-            // close this node's control stream.
-            await this.concurrencyService.handleReport(nodeId, {
-              sessions: msg.statsBatch?.sessions ?? [],
-              deltas: msg.statsBatch?.deltas ?? [],
-            });
+            // handleReport is written never to throw, and is wrapped all
+            // the same: a counting problem must not cost the stream.
+            await this.perMessage(id, "session counts", () =>
+              this.concurrencyService.handleReport(id, {
+                sessions: msg.statsBatch?.sessions ?? [],
+                deltas: msg.statsBatch?.deltas ?? [],
+              }),
+            );
             // And the addresses behind those counts, for the customers
             // whose connect report came through the VPN and so arrived
             // from a server's address. Never throws either.
-            await this.sourceAddresses.observe(nodeId, msg.statsBatch?.sessions ?? [], receivedAt);
+            await this.perMessage(id, "source addresses", () =>
+              this.sourceAddresses.observe(id, msg.statsBatch?.sessions ?? [], receivedAt),
+            );
           }
           // stateSnapshot: no handling yet -- full reconciliation is later work.
         } catch (err) {
-          this.logger.warn(`AgentSync stream error: ${(err as Error).message}`);
-          call.destroy(err as Error);
+          // Only a Hello reaches here now: its check, its status write or
+          // its sync. Ending the stream is the retry -- the agent redials
+          // with its backoff and the next Hello syncs from the start. It
+          // is ended with a status, never destroy(): see endAgentCall.
+          if (err instanceof HelloRejected) {
+            giveUp(grpc.status.UNAUTHENTICATED, err.message);
+          } else {
+            giveUp(
+              grpc.status.UNAVAILABLE,
+              `${isTransientDbError(err) ? "control plane busy" : "control plane error"} during Hello, redial: ${(err as Error).message}`,
+            );
+          }
         }
       })();
     });
 
+    // grpc-js reports a stream's end four ways and the old code listened
+    // for two. A client cancel or a keepalive timeout emits only
+    // 'cancelled' then 'close', which left a dead call in the registry --
+    // re-asserts and commands written into it and lost until the next
+    // Hello. Every one of them now runs the same, idempotent, cleanup.
     const onClose = () => {
+      if (closed) return;
       closed = true;
       if (nodeId) this.handleStreamClosed(nodeId, call);
     };
+    // liveCalls keeps a call until its status has really gone out
+    // ('finish': _final ran) or the transport is gone ('cancelled'), so a
+    // call whose end is stuck behind writes the agent never reads is still
+    // there for the sweep to force.
+    const forget = () => this.liveCalls.delete(call);
     call.on("end", () => {
       onClose();
       call.end();
     });
     call.on("error", onClose);
+    call.on("finish", forget);
+    call.on("cancelled", () => {
+      onClose();
+      forget();
+    });
+    call.on("close", () => {
+      onClose();
+      // Closed without its status sent: someone destroy()ed it. Nothing
+      // in this file does any more, but a library or a future edit might,
+      // and the result is the outage this guards against -- an agent
+      // waiting on a stream nobody reads. Say it is over.
+      if (!call.writableFinished) forceAgentCallStatus(call, grpc.status.UNAVAILABLE, "control stream closed by the control plane");
+      forget();
+    });
   }
 
   /** Checks a Hello: the node exists and is claimed, the timestamp is
-   * fresh, and the signature is its key's. Closes the stream and throws
-   * on any failure. Nothing is written and nothing registered here; see
-   * handleAgentSync for what follows and why it is split. */
-  private async authenticateHello(call: AgentDuplexCall, hello: HelloMessage): Promise<{ id: string; name: string }> {
+   * fresh, and the signature is its key's. Throws HelloRejected when the
+   * Hello is refused, and the database's own error when it could not be
+   * checked; the caller ends the stream with the matching status. Nothing
+   * is written and nothing registered here; see handleAgentSync for what
+   * follows and why it is split. */
+  private async authenticateHello(hello: HelloMessage): Promise<{ id: string; name: string }> {
     const node = await this.prisma.node.findUnique({ where: { id: hello.nodeId } });
     if (!node || !node.agentPubKey) {
-      call.destroy(new Error(`unknown or unclaimed node: ${hello.nodeId}`));
-      throw new Error("rejected");
+      throw new HelloRejected(`unknown or unclaimed node: ${hello.nodeId}`);
     }
 
     const now = Math.floor(Date.now() / 1000);
     const ts = Number(hello.timestamp);
     if (!Number.isFinite(ts) || Math.abs(now - ts) > HELLO_FRESHNESS_SECONDS) {
-      call.destroy(new Error("Hello timestamp outside freshness window"));
-      throw new Error("rejected");
+      throw new HelloRejected("Hello timestamp outside freshness window");
     }
 
     const message = Buffer.from(`${hello.nodeId}.${hello.timestamp}.${hello.nonce}`, "utf8");
@@ -551,8 +774,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     const signature = Buffer.isBuffer(hello.signature) ? hello.signature : Buffer.from(hello.signature);
 
     if (!verifyEd25519(publicKey, message, signature)) {
-      call.destroy(new Error("invalid Hello signature"));
-      throw new Error("rejected");
+      throw new HelloRejected("invalid Hello signature");
     }
 
     return { id: node.id, name: node.name };
