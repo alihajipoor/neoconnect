@@ -440,6 +440,10 @@ describe("where the voucher email sends people to install", () => {
   it("stacks the tiles on a phone and lays them out as a table for Outlook", () => {
     const { html } = render("en", "https://example.com");
     expect(html).toContain(".nx-tile{display:block!important;width:100%!important;");
+    // Inline padding is cut so three fit at 320px without the sheet; the
+    // sheet gives it back.
+    expect(html).toContain("padding:12px 4px;");
+    expect(html).toContain(".nx-tile-a{padding:12px!important;}");
     expect(html).not.toMatch(/display:\s*flex/);
   });
 
@@ -447,7 +451,7 @@ describe("where the voucher email sends people to install", () => {
     const { html } = render("fa", "https://example.com");
     // The row runs right to left, so the gap sits on each tile's left.
     expect(html).toContain('dir="rtl" style="margin:0 0 20px 0;width:100%;"');
-    expect(html).toContain("padding:0 0 0 8px");
+    expect(html).toContain("padding:0 0 0 6px");
   });
 
   it("never links customers to the API's download redirects", () => {
@@ -470,5 +474,22 @@ describe("where the voucher email sends people to install", () => {
       expect(html).toContain("neoxify.net");
       expect(text).toContain(`iPhone: ${APP_STORE_URL}`);
     }
+  });
+
+  it("does not tell a stranger they have an account", () => {
+    // The recipient may never have heard of us: a reseller set a plan up
+    // for their address. The footer says that instead.
+    const en = render("en", "https://example.com").html;
+    const fa = render("fa", "https://example.com").html;
+    expect(en).not.toContain("because you have a Neoxify account");
+    expect(en).toContain("someone set up a Neoxify plan for this email address");
+    expect(fa).not.toContain("حساب کاربری دارید");
+    expect(fa).toContain("یک پلن نئوکسیفای آماده کرده است");
+  });
+
+  it("escapes a site address that would break out of href", () => {
+    const { html } = render("en", 'https://example.com/a"b');
+    expect(html).not.toContain('a"b/get/');
+    expect(html).toContain("https://example.com/a&quot;b/get/windows");
   });
 });

@@ -636,10 +636,14 @@ export class ResellersService {
   /** The website this email points at: the configured one, or
    * neoxify.net. The activation link and the Windows and Android download
    * tiles are both built from it, so they cannot name two different
-   * sites. */
+   * sites.
+   *
+   * Always https: the tiles hand over an installer, and on a network that
+   * tampers with traffic a plain-http download can be swapped in transit.
+   * An http value in the settings is upgraded rather than trusted. */
   private async siteUrl(): Promise<string> {
     const links = await this.appLinks.get();
-    return (links.websiteUrl ?? DEFAULT_WEBSITE).replace(/\/+$/, "");
+    return (links.websiteUrl ?? DEFAULT_WEBSITE).replace(/\/+$/, "").replace(/^http:\/\//i, "https://");
   }
 
   /** Best-effort, like every other send in this codebase: a mail failure

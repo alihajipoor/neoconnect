@@ -237,6 +237,9 @@ function styleFor(locale: Locale): Style {
  * design, whose near-black on white survives any inversion. */
 const HEAD_CSS = [
   ":root{color-scheme:light dark;supported-color-schemes:light dark;}",
+  // Download tiles: roomier than their inline padding, which is cut to
+  // fit three across at 320px for a client that drops this sheet.
+  ".nx-tile-a{padding:12px!important;}",
   "@media only screen and (max-width:620px){",
   ".nx-outer{padding:14px 8px!important;}",
   ".nx-pad{padding-left:22px!important;padding-right:22px!important;}",
@@ -341,10 +344,14 @@ function shell({
   preheader,
   bodyHtml,
   footerHtml,
+  reasonHtml,
 }: {
   locale: Locale;
   preheader: string;
   bodyHtml: string;
+  /** Replaces the default "you have an account" reason, for the one send
+   * whose recipient may have no account at all (the voucher email). */
+  reasonHtml?: string;
   /** Replaces the default closing sentence. Bulk mail needs to say how
    * to stop receiving it; transactional mail must not, since there is
    * nothing to opt out of. */
@@ -360,7 +367,7 @@ function shell({
     bodyHtml,
     footerHtml: `${BRAND_LINKS_SLOT}
                 <p class="nx-muted" style="margin:0;font-size:12px;color:${MUTED};line-height:${s.lineHeight};text-align:${s.align};">
-                  ${chrome.accountNotice}
+                  ${reasonHtml ?? chrome.accountNotice}
                   ${footerHtml ?? chrome.ignoreNotice}
                 </p>`,
   });
@@ -656,6 +663,9 @@ const EN = {
     installerSub: "Installer",
     apkSub: "APK",
     appStoreSub: "App Store",
+    /** The footer's reason. The recipient may have no account: a
+     * reseller set the plan up for an address, which is all we know. */
+    reason: "You're receiving this because someone set up a Neoxify plan for this email address.",
     /** Takes an already-rendered date so the html body can wrap it in
      * `ltr()` and the text/plain body cannot -- markup in a plain part
      * shows up as literal `<span dir="ltr">` in the reader's client. */
@@ -826,10 +836,11 @@ const FA: Strings = {
     button: "فعال کردن پلن",
     thenInstall: "بعد برنامه را روی ویندوز، اندروید یا آیفون نصب کنید و با همین ایمیل وارد شوید:",
     noLinks: (appStore: string) =>
-      `نسخهٔ ویندوز و اندروید را از neoxify.net و نسخهٔ آیفون را از ${appStore} بگیرید.`,
+      `نسخهٔ ویندوز و اندروید را از neoxify.net بگیرید و نسخهٔ آیفون را از ${appStore}.`,
     installerSub: "فایل نصب",
     apkSub: "فایل APK",
     appStoreSub: "اپ‌استور",
+    reason: "این ایمیل را گرفته‌اید چون کسی برای این نشانی ایمیل یک پلن نئوکسیفای آماده کرده است.",
     expiresOn: (date: string) => `این کد تا تاریخ ${date} اعتبار دارد.`,
     neverExpires: "این کد تاریخ انقضا ندارد.",
     byHand: "اگر دکمه کار نکرد، به neoxify.net/account بروید و کد را خودتان وارد کنید.",
@@ -1215,7 +1226,9 @@ export function installLinks(siteUrl?: string): InstallLink[] {
  * Three tiles side by side from a tablet up. On a phone the stylesheet
  * stacks them (`.nx-tile`), because three across at 320px leaves under
  * sixty pixels for "Windows". A client that drops the stylesheet keeps
- * them in a row with tighter padding.
+ * them in a row, with padding cut so all three still fit at 320px
+ * (measured: 12px side padding pushed the card 29px past a 320px screen
+ * in English and 44px in Persian).
  *
  * "Windows", "Android" and "iPhone" are not translated: they are what is
  * written on the reader's own device and on the page the link opens.
@@ -1230,10 +1243,10 @@ function downloadRow(s: Style, siteUrl?: string): string {
 
   // The gap between tiles is on each one's trailing side, whichever side
   // that is, and the last has none.
-  const gap = (last: boolean) => (last ? "0" : s.rtl ? "0 0 0 8px" : "0 8px 0 0");
+  const gap = (last: boolean) => (last ? "0" : s.rtl ? "0 0 0 6px" : "0 6px 0 0");
   const cell = (last: boolean, label: string, sub: string, href: string) =>
     `<td width="33%" class="nx-tile" style="width:33%;padding:${gap(last)};text-align:${s.align};" valign="top">
-      <a href="${href}" class="nx-well" style="display:block;padding:12px 12px;border:1px solid ${RULE};border-radius:${R_WELL}px;text-decoration:none;background:${PEARL};">
+      <a href="${escapeAttribute(href)}" class="nx-well nx-tile-a" style="display:block;padding:12px 4px;border:1px solid ${RULE};border-radius:${R_WELL}px;text-decoration:none;background:${PEARL};">
         <span dir="ltr" class="nx-ink" style="display:block;font-size:15px;font-weight:600;color:${INK};text-align:${s.align};">${label}</span>
         <span class="nx-ink2" style="display:block;font-size:12px;color:${INK_2};text-align:${s.align};">${sub}</span>
       </a>
@@ -1308,12 +1321,13 @@ export function resellerVoucherEmail(params: {
     html: shell({
       locale: params.locale,
       preheader: t.preheader(params.planName, params.code),
+      reasonHtml: t.reason,
       bodyHtml: `
         ${heading(s, t.heading)}
         ${paragraph(s, t.body(params.planName))}
         ${wellLabel(s, t.codeLabel)}
         ${bigCode(params.code)}
-        ${button(s, params.activationUrl, t.button)}
+        ${button(s, escapeAttribute(params.activationUrl), t.button)}
         ${paragraph(s, t.thenInstall)}
         ${downloadRow(s, params.siteUrl)}
         ${fineprint(s, `${expiryHtml} ${t.byHand}`)}

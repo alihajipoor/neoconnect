@@ -78,6 +78,8 @@ describe("ResellersService activation links", () => {
     for (const [configured, site] of [
       [undefined, "https://neoxify.net"],
       ["https://staging.neoxify.net/", "https://staging.neoxify.net"],
+      // An http setting is upgraded: these links hand over an installer.
+      ["http://staging.neoxify.net", "https://staging.neoxify.net"],
     ] as const) {
       const { service, sendMail } = build(configured);
 
