@@ -9878,3 +9878,41 @@ same window had customers moving traffic, so reporting works.
   france-2.
 - The apps' endpoint lists still carry finland-3's mirror. They are
   re-signed once, together with the next new server.
+
+## 2026-11-14 — fleet add as one command, straight through
+
+**Status:** merged (`ee919586`); never yet run unattended on a real box
+**Touches:** `scripts/fleet` and its runbook only; no server, plan or database changed
+
+**Why.** Adding finland-4 took hours because the tool could not be
+trusted to run through, so an agent ran it step by step. The owner:
+adding a server should be one command and a few minutes.
+
+**What changed** (branch `claude/fleet-one-run`):
+- one database dump per run, reused by every later step; before reuse it
+  is checked on the panel host (`gzip -t`, age) and a missing, broken or
+  over-four-hour-old dump is replaced, logged as DUMP-STALE (a run
+  continued the next day would otherwise have edited plans on a dump the
+  daily prune had deleted); `--use-dump` refuses an old one too;
+- `--done` on a non-owner step runs only its verify; every stop prints
+  the exact `fleet continue` line; every step is timed;
+- the post-install check looks at Xray and the IKEv2 loader running and
+  listening; the UDP-over-TCP test no longer counts dig's error line;
+  the second operator key is a stop when unset;
+- canary first: every protocol proven on "Internal test" before any
+  customer plan; WireGuard, OpenVPN and IKEv2 are now dialled by the
+  tool from a throwaway container on the panel host, with the server's
+  own counters read, instead of by hand in the app on the VM.
+
+**Proven:** fleet suite 283 of 287 on this PC (the 4 failures are the
+run-directory test whose `date` stand-in Git Bash does not pick up; CI
+on Linux runs it), CI green on the branch. The new dials were run live
+from the panel host during chunk B.
+
+**Not proven:** a whole `fleet add` running unattended on a real box.
+The next server (Spain) is that first run. From finland-4's recorded
+step times it should take about 25-35 minutes, not five: the install
+alone is about 5 minutes, then packages, reboot and the end-to-end
+proofs, all run one after another. Open: a run that stops after
+canary-open leaves "Internal test" active until it is continued; two
+fleet jobs at once share `/dev/shm/nxf`.
