@@ -150,6 +150,51 @@ return array(
     // says so rather than offering a dead button.
     'android_installer_url' => 'https://connect.neoxify.site/api/updates/installer/android',
 
+    // ---------------------------------------------------------------
+    // Downloads served from this site (get/index.php)
+    // ---------------------------------------------------------------
+
+    // The two installer URLs above are on the control plane's domain,
+    // which networks that block VPNs often block too: a visitor there can
+    // load this page and still not download. So the buttons point at
+    // /get/windows and /get/android on THIS site instead. On a request,
+    // the site (which sits outside) asks the URL above where the current
+    // release is, keeps one copy of that file in installer_store_dir, and
+    // sends the visitor to the copy here. The visitor's browser needs no
+    // other host. Still no version number in the site: the answer comes
+    // from the same endpoint as before, so a new release shows up by itself.
+    //
+    // false: the buttons go straight to the URLs above, as before.
+    'installer_local_copy' => true,
+
+    // Where the copies live, relative to the site root. Inside data/
+    // because that is the one folder the web server's user can write to and
+    // the one every deploy leaves alone. Served as plain static files.
+    'installer_store_dir' => 'data/installers',
+
+    // Release files are fetched only from these hosts, over https, and the
+    // first answer must start with installer_release_prefix. Anything else
+    // is ignored and the button falls back to the URL above.
+    'installer_release_hosts' => array(
+        'github.com',
+        'objects.githubusercontent.com',
+        'release-assets.githubusercontent.com',
+    ),
+    'installer_release_prefix' => 'https://github.com/alihajipoor/neoxify-releases/releases/download/',
+
+    // Refuse anything bigger than this. Today: Windows ~21 MB, Android ~87 MB.
+    'installer_max_bytes' => 200 * 1024 * 1024,
+
+    // How long the answer to "where is the current release" is trusted.
+    'installer_resolve_ttl' => 600,
+
+    // The iPhone and iPad app, on the App Store. Empty hides the card.
+    'ios_app_store_url' => 'https://apps.apple.com/app/id6815764263',
+
+    // The Android app on Google Play, shown beside the direct file. Empty
+    // hides the button; the direct file stays either way.
+    'android_play_url' => 'https://play.google.com/store/apps/details?id=com.neoxify.mobile',
+
     // Android builds are arm64-only. That is every phone and tablet sold
     // for years, but it is stated on the page rather than left to fail at
     // install time on something older.
@@ -173,8 +218,9 @@ return array(
 
     // Platforms that genuinely are not built yet. Listed on the download page
     // as "not available", never as a dead link. Android came off this list
-    // when android-v0.2.5 shipped.
-    'platforms_planned' => array('macos', 'ios'),
+    // when android-v0.2.5 shipped, iOS when the App Store listing went
+    // public (1.0.2, 2026-11-14).
+    'platforms_planned' => array('macos'),
 
     // ---------------------------------------------------------------
     // Release phase
@@ -192,7 +238,9 @@ return array(
     // Whether the site advertises the free trial, on the pricing section and
     // in the FAQ.
     //
-    // Defaults to OFF on purpose. Free trial mode is a switch in the admin
+    // ON since the panel's trial was switched on (checked 2026-11-14: the
+    // panel grants the Trial plan when a new account's email is verified).
+    // It was off by default on purpose: free trial mode is a switch in the admin
     // panel (FreeTrialSettings, which itself defaults to disabled) -- if the
     // website promised a trial the panel wasn't granting, people would sign
     // up and get nothing. Turn this on only once the trial is genuinely

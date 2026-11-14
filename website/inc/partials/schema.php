@@ -29,12 +29,12 @@
  *     are established facts about this service.
  *   - No foundingDate, no numberOfEmployees, no address. Not known.
  *   - SoftwareApplication entries only for platforms that genuinely ship
- *     (Windows, Android). macOS and iOS do not exist, so they get no
- *     entry, however much it would pad the graph out.
+ *     (Windows, Android, iPhone and iPad). macOS does not exist, so it
+ *     gets no entry, however much it would pad the graph out.
  *
  * KNOWN, AND ACCEPTED: Google shows a software-app rich result only with
  * an aggregateRating or a review, so Search Console's "Software apps"
- * report will list both SoftwareApplication nodes as invalid. That stays
+ * report will list every SoftwareApplication node as invalid. That stays
  * true until real reviews exist. The nodes still describe the apps
  * correctly for everything else that reads them. Never "fix" the report
  * with a rating nobody gave.
@@ -283,9 +283,8 @@ function nx_schema_graph()
 
     if ($page === 'download' || $page === 'home') {
         $apps = array();
-        // The platforms that genuinely ship, and nothing else: macOS and
-        // iOS do not exist and get no node, however much it would pad the
-        // graph.
+        // The platforms that genuinely ship, and nothing else: macOS does
+        // not exist and gets no node, however much it would pad the graph.
 
         if (nx_windows_available()) {
             $apps[] = array(
@@ -315,6 +314,26 @@ function nx_schema_graph()
                 'softwareRequirements' => nx_t('download.android.requirements'),
                 'publisher' => array('@id' => $orgId),
                 'offers' => nx_schema_app_offers(),
+            );
+        }
+
+        if (nx_ios_available()) {
+            // Offers: the trial only. Plans bought in the iPhone app go
+            // through the App Store at the store's prices, which this site
+            // does not hold, so the plan prices above are not repeated here.
+            $iosOffers = array_values(array_filter((array) nx_schema_app_offers(), function ($o) {
+                return isset($o['@type']) && $o['@type'] === 'Offer';
+            }));
+            $apps[] = array(
+                '@type' => 'SoftwareApplication',
+                '@id' => $localeHome . '#app-ios',
+                'name' => nx_t('schema.app.ios.name'),
+                'operatingSystem' => 'iOS 15.0+, iPadOS 15.0+',
+                'applicationCategory' => 'SecurityApplication',
+                'downloadUrl' => nx_ios_store_url(),
+                'softwareRequirements' => nx_t('download.ios.requirements'),
+                'publisher' => array('@id' => $orgId),
+                'offers' => $iosOffers ? $iosOffers : null,
             );
         }
 
@@ -356,8 +375,8 @@ function nx_schema_lang($locale, $key)
 }
 
 /**
- * What the app costs, as schema.org offers, for both SoftwareApplication
- * nodes.
+ * What the app costs, as schema.org offers, for the Windows and Android
+ * SoftwareApplication nodes (the iPhone node keeps only the trial).
  *
  * The download itself is free; using the service takes a plan (or the
  * trial, when the panel grants one). So: the trial as a zero-price Offer

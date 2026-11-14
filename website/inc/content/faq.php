@@ -27,8 +27,8 @@ return array(
             'fa' => 'روی چه دستگاه‌هایی کار می‌کند؟',
         ),
         'a' => array(
-            'en' => 'Windows and Android. There\'s no macOS or iOS app yet, and we haven\'t set a date for either. Your plan sets how many devices can be connected at once.',
-            'fa' => 'ویندوز و اندروید. هنوز نسخه مک و iOS نداریم و تاریخی هم برایشان اعلام نکرده‌ایم. تعداد دستگاه‌هایی که هم‌زمان وصل می‌شوند به پلنتان بستگی دارد.',
+            'en' => 'Windows, Android, iPhone and iPad. There\'s no Mac app yet, and we haven\'t set a date for it. Your plan sets how many devices can be connected at once.',
+            'fa' => 'ویندوز، اندروید، آیفون و آیپد. نسخه مک هنوز نداریم و تاریخی هم برایش اعلام نکرده‌ایم. تعداد دستگاه‌هایی که هم‌زمان وصل می‌شوند به پلنتان بستگی دارد.',
         ),
     ),
 
@@ -38,8 +38,8 @@ return array(
             'fa' => 'چطور پرداخت کنم؟',
         ),
         'a' => array(
-            'en' => 'By international card or crypto, in the app. Local bank cards aren\'t accepted, so if your card doesn\'t work abroad, pay with crypto.',
-            'fa' => 'با کارت بین‌المللی یا رمزارز، داخل برنامه. کارت بانکی داخلی پذیرفته نمی‌شود؛ اگر کارتتان در خارج کار نمی‌کند، با رمزارز پرداخت کنید.',
+            'en' => 'By international card or crypto, in the Windows and Android apps. Local bank cards aren\'t accepted, so if your card doesn\'t work abroad, pay with crypto. On iPhone and iPad you pay through the App Store.',
+            'fa' => 'با کارت بین‌المللی یا رمزارز، داخل برنامه ویندوز و اندروید. کارت بانکی داخلی پذیرفته نمی‌شود؛ اگر کارتتان در خارج کار نمی‌کند، با رمزارز پرداخت کنید. در آیفون و آیپد پرداخت از طریق اپ‌استور است.',
         ),
     ),
 
@@ -104,8 +104,8 @@ return array(
             'fa' => 'کد هدیه را کجا وارد کنم؟',
         ),
         'a' => array(
-            'en' => 'In the app. Sign in and enter the code. A valid code activates your plan right away, with no payment step.',
-            'fa' => 'داخل برنامه. وارد حسابتان شوید و کد را وارد کنید. کد معتبر بدون مرحله پرداخت، همان لحظه پلنتان را فعال می‌کند.',
+            'en' => 'In the Windows or Android app, or in your account area on this website. Sign in and enter the code. A valid code activates your plan right away, with no payment step. The iPhone app has no field for codes.',
+            'fa' => 'در برنامه ویندوز یا اندروید، یا در حساب کاربری‌تان در همین سایت. وارد حسابتان شوید و کد را وارد کنید. کد معتبر بدون مرحله پرداخت، همان لحظه پلنتان را فعال می‌کند. برنامه آیفون جایی برای وارد کردن کد ندارد.',
         ),
     ),
 

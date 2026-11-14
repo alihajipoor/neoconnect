@@ -399,6 +399,48 @@ function nx_android_download_url()
     return trim((string) nx_cfg('android_installer_url', ''));
 }
 
+/**
+ * What a download button links to: this site's own /get/<platform> when
+ * installer_local_copy is on, otherwise the configured installer URL.
+ * '' when the platform is not released.
+ *
+ * @param string $platform 'windows' or 'android'
+ */
+function nx_installer_button_url($platform)
+{
+    $upstream = $platform === 'windows' ? nx_windows_download_url() : nx_android_download_url();
+    if ($upstream === '') {
+        return '';
+    }
+    if (!nx_cfg('installer_local_copy', false)) {
+        return $upstream;
+    }
+    return nx_cfg('base_path', '/') . 'get/' . $platform;
+}
+
+/**
+ * Whether there is an iPhone/iPad app to link to: its App Store URL is set.
+ * Same rule as the other platforms -- empty means no card, never a dead one.
+ *
+ * @return bool
+ */
+function nx_ios_available()
+{
+    return nx_ios_store_url() !== '';
+}
+
+/** App Store URL of the iPhone and iPad app, or '' when not listed. */
+function nx_ios_store_url()
+{
+    return trim((string) nx_cfg('ios_app_store_url', ''));
+}
+
+/** Google Play URL of the Android app, or '' to show only the direct file. */
+function nx_android_play_url()
+{
+    return trim((string) nx_cfg('android_play_url', ''));
+}
+
 /** URL of published checksums, or '' when none is configured. */
 function nx_windows_checksum_url()
 {
