@@ -6,6 +6,7 @@ import { removeAllTrustedDevicesAction, removeTrustedDeviceAction } from "./acti
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 export interface TrustedDevice {
   id: string;
@@ -20,7 +21,7 @@ export interface TrustedDevice {
 const day = (iso: string) => new Date(iso).toISOString().slice(0, 10);
 
 /** Browsers that skip the code step (never the password) until their
- * fixed expiry. One column of stacked rows, so it reads on a phone. */
+ * fixed expiry. A table on a wide screen, stacked rows on a phone. */
 export function TrustedDevicesCard({ devices, currentId }: { devices: TrustedDevice[]; currentId?: string }) {
   const [pending, startTransition] = useTransition();
 
@@ -48,35 +49,50 @@ export function TrustedDevicesCard({ devices, currentId }: { devices: TrustedDev
           <p className="text-sm text-muted-foreground">No trusted devices.</p>
         ) : (
           <>
-            <ul className="flex flex-col divide-y divide-white/10 rounded-lg border border-white/10">
-              {devices.map((d) => (
-                <li key={d.id} className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex min-w-0 flex-col gap-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium break-words">{d.label}</span>
-                      {d.id === currentId ? <Badge variant="secondary">This device</Badge> : null}
-                    </div>
-                    <dl className="grid grid-cols-[auto_1fr] gap-x-3 text-xs text-muted-foreground">
-                      <dt>Added</dt>
-                      <dd>{day(d.createdAt)}</dd>
-                      <dt>Last used</dt>
-                      <dd>{day(d.lastUsedAt)}</dd>
-                      <dt>Expires</dt>
-                      <dd>{day(d.expiresAt)}</dd>
-                    </dl>
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="self-start sm:self-center"
-                    disabled={pending}
-                    onClick={() => run(() => removeTrustedDeviceAction(d.id), "Device removed")}
-                  >
-                    Remove
-                  </Button>
-                </li>
-              ))}
-            </ul>
+            <div className="rounded-lg border border-white/10">
+              <Table stack>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Device</TableHead>
+                    <TableHead>Added</TableHead>
+                    <TableHead>Last used</TableHead>
+                    <TableHead>Expires</TableHead>
+                    <TableHead className="w-0" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {devices.map((d) => (
+                    <TableRow key={d.id}>
+                      <TableCell cell="primary" className="whitespace-normal">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium break-words">{d.label}</span>
+                          {d.id === currentId ? <Badge variant="secondary">This device</Badge> : null}
+                        </div>
+                      </TableCell>
+                      <TableCell label="Added" phoneOrder={1} className="text-xs text-muted-foreground">
+                        {day(d.createdAt)}
+                      </TableCell>
+                      <TableCell label="Last used" phoneOrder={2} className="text-xs text-muted-foreground">
+                        {day(d.lastUsedAt)}
+                      </TableCell>
+                      <TableCell label="Expires" phoneOrder={3} className="text-xs text-muted-foreground">
+                        {day(d.expiresAt)}
+                      </TableCell>
+                      <TableCell phoneOrder={9} className="text-right">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={pending}
+                          onClick={() => run(() => removeTrustedDeviceAction(d.id), "Device removed")}
+                        >
+                          Remove
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
             <Button
               variant="destructive"
               size="sm"

@@ -13,7 +13,9 @@
 //   node scripts/standin-api.mjs [--port 4999]
 //
 // GET /__variant?empty=1 switches every list to empty (and back with
-// empty=0), so one running server serves both variants. Writes (POST,
+// empty=0), so one running server serves both variants; ?mfa=0 turns the
+// signed-in admin's two-factor off (and mfa=1 back on). Sign-in always
+// asks for the code (POST /auth/login answers mfaRequired). Writes (POST,
 // PATCH, PUT, DELETE) answer a plausible success and change nothing.
 
 import http from "node:http";
@@ -23,7 +25,7 @@ const NOW = Date.now();
 const iso = (offsetMs = 0) => new Date(NOW + offsetMs).toISOString();
 const pad = (n, w = 4) => String(n).padStart(w, "0");
 
-const state = { empty: false };
+const state = { empty: false, mfa: true };
 
 // ------------------------------------------------------------- fixtures
 
@@ -526,9 +528,22 @@ const relayAuth = () => ({
 
 const E = (list) => (state.empty ? [] : list);
 
+/** Browsers trusted to skip the code. check-phone.mjs marks
+ * TRUSTED_THIS_DEVICE as this browser's. */
+export const TRUSTED_THIS_DEVICE = "tdv_standin_0002";
+const trustedDevices = [
+  { id: "tdv_standin_0001", label: "Chrome on Windows", createdAt: iso(-21 * DAY), lastUsedAt: iso(-2 * DAY), expiresAt: iso(9 * DAY) },
+  { id: TRUSTED_THIS_DEVICE, label: "Safari on iPhone", createdAt: iso(-6 * DAY), lastUsedAt: iso(-3_600_000), expiresAt: iso(24 * DAY) },
+  { id: "tdv_standin_0003", label: "Firefox on Linux (a long browser description from an unusual user agent string)", createdAt: iso(-29 * DAY), lastUsedAt: iso(-29 * DAY), expiresAt: iso(DAY) },
+];
+
 /** [method, pattern, handler(match, url) -> body | {status, body, total}] */
 const ROUTES = [
-  ["GET", /^\/auth\/me$/, () => admins[0]],
+  ["GET", /^\/auth\/me$/, () => ({ ...admins[0], mfaEnabled: state.mfa })],
+  ["GET", /^\/auth\/trusted-devices$/, () => E(trustedDevices)],
+  ["POST", /^\/auth\/login$/, () => ({ mfaRequired: true, mfaToken: "standin-mfa-token" })],
+  // No proof-of-work challenge, so a stand-in sign-in goes straight on.
+  ["POST", /^\/login-challenge$/, () => ({ status: 404, body: { message: "stand-in: no challenge" } })],
   ["GET", /^\/admins$/, () => E(admins)],
   ["GET", /^\/customers$/, (m, url) => list(E(customers), url, 123456)],
   ["GET", /^\/customers\/([^/]+)\/activity$/, () => (state.empty ? { now: { lastSeenAt: null, connected: null }, devices: [], attempts: [], traffic: [] } : activity())],
@@ -603,6 +618,7 @@ export function startStandin({ port = 4999, host = "127.0.0.1", log = false } = 
     };
     if (url.pathname === "/__variant") {
       if (url.searchParams.has("empty")) state.empty = url.searchParams.get("empty") === "1";
+      if (url.searchParams.has("mfa")) state.mfa = url.searchParams.get("mfa") === "1";
       return send(200, { ...state });
     }
     // Drain the body; nothing is stored.
