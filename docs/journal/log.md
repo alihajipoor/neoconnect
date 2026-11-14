@@ -9778,3 +9778,103 @@ and connecting on a real server is not proven (only the CI database
 test shows the renewal provisions a new row). A second sweep doing
 nothing more (07:00Z) was not watched. Build cache prune freed 4.1 GB (image prune 0 B); panel
 host disk 34%.
+
+## 2026-11-14 — finland-4 built, proven and put into every plan
+
+**Status:** done
+**Touches:** a new server, production database, the panel's plans, the relay box's routes (through the API), the node zone in Cloudflare; no repository code
+
+**Why.** finland-3 was retired on 2026-11-13 because its address was
+blocked from inside. The owner gave a new server in Helsinki (Hetzner,
+Ubuntu 26.04.1, 2 vCPU, 3.8 GB) to bring the Finland location back.
+It is now **finland-4**. The fleet is seven exits (finland-4, france-2,
+germany-3, netherlands-1, sweden-1, turkey-1, uk-1) and the relay box.
+
+**Inside test before the build (23:54-00:01Z).** Raw TCP on the bare
+address, 256 KB each way: from the relay box 6 of 6 moved both ways.
+From the sign-in box every connect succeeded and then 0 bytes moved,
+the same hold it shows on france-2, sweden-1 and germany-3 (it passes
+turkey-1). Verdict: passes from the relay box only.
+
+**Build (00:04-00:39Z).** `scripts/fleet/fleet add`, step by step with
+`--only`, from a worktree at origin/main. 8 protocols, agent v0.2.12,
+Xray 26.3.27, IPv6 closed for Xray, firewall the same shape as
+germany-3's. The relay box reaches it directly, so it needs no hop. 4
+relay routes went onto the relay box's free "fi" entry set, and its
+Xray was not restarted. Scripted proof: from the panel host, 5 of 5
+Xray protocols left from the server's own address and moved 256 KB
+both ways; the server's own per-user counters matched. From the relay
+box, REALITY and Shadowsocks did the same. VLESS-TLS, WS and Trojan
+were reset inside, because names in the node zone are reset there (the
+same on every server). All 4 relay routes left from the right exit.
+
+**App proof (00:45-01:03Z).** Done on the "Internal test" plan only
+(made active but not purchasable, assigned to the VM account, then
+undone). The real Windows app 0.9.64 on the VM picked each of the 8
+protocols by hand. All 8 connected on the first try, and each exit
+address matched the server. The server's own counters moved for each:
+Xray per-user stats, WireGuard handshake and peer bytes, an OpenVPN
+session, an IKEv2 SA. These are the first WireGuard, OpenVPN and IKEv2
+handshakes on this server.
+
+**Into the plans (01:16-01:21Z).** One PATCH per plan, smallest first,
+add-only. No default route, isActive or isPurchasable changed. Each
+check: commands acknowledged, backend log, heartbeats, credentials per
+protocol.
+- Ultimate Max 48 -> 56 (1 s): 1 of 1 active subscription, 8 of 8 protocols.
+- Pro 48 -> 56 (4 s): 5 of 5.
+- Starter 48 -> 56 (26 s): 37 of 37, 296 commands acknowledged.
+- Trial 48 -> 56 (8 s): 13 of 13.
+- Ultimate (relay only) 24 -> 28 (1 s): 1 of 1 holds the 4 relay routes.
+  The relay box's Xray is the same process (started 2026-10-17), with
+  the same rule count.
+
+Every check came back clean: 0 commands left unacknowledged, 0 errors,
+0 pool errors, 0 duplicate credentials, every server online with a
+fresh heartbeat throughout. On the server: 56 users on each Xray
+inbound, 56 WireGuard peers for 56 active rows, 56 EAP secrets and 56
+live OpenVPN client files. No engine was restarted.
+
+**After.** A relay REALITY tunnel to each of the seven exits through
+the relay box (a client on the panel host, using the relay test
+account's own credentials): 7 of 7 left from the exit's address and
+moved 256 KB both ways. All 4 finland-4 relay routes passed too, with
+Shadowsocks DNS over UoT answered. From the VM's normal account
+(Trial), the app lists Finland with 8 protocols. Automatic connected on
+sweden-1 WireGuard, its last good route, and the exit matched. Picking
+Finland Stealth (REALITY) connected on finland-4, and the exit matched.
+The server counted the bytes (837 KB up, 8.7 MB down). After
+disconnect the guest had its own address back. The app's connection
+memory was restored afterwards. By 01:32Z no customer had used it yet:
+no usage rows and no app reports from real customers. Peers in the
+same window had customers moving traffic, so reporting works.
+
+**Not proven.**
+- Anything from home or mobile operators inside the restricted
+  country. The sign-in box gets 0 B both ways here, as on france-2,
+  sweden-1 and germany-3; the relay box is a datacentre line. The
+  inside tests ran around midnight UTC, so evening throttling was not
+  sampled. Nothing shows whether this range gets blocked later, as
+  finland-3's was.
+- VLESS-TLS, WS, Trojan, IKEv2 and the mirrors from inside: names in
+  the node zone are reset there.
+- WireGuard, OpenVPN and IKEv2 from inside the restricted country (the
+  VM is on a US home line).
+- Any IPv6 path.
+- The Android and iOS apps on finland-4.
+- Relay routes from a real app (proven by script only).
+- Automatic landing on finland-4 (it chose sweden-1).
+- Real customer traffic on it: none yet.
+
+**Left for later.**
+- The build took two database dumps, not one: the tool's `--done`
+  re-ran a step that dumps. Deleting the extra one is the owner's call.
+- The fleet tool's defects from this run are still unfixed: Xray's
+  access log created root-owned, so Xray died at install; uot-test.sh
+  gave a false pass; neoxify-swanctl-load was never started; steps take
+  dumps unconditionally; `--done` re-runs a step's action; the second
+  key does nothing. Fix them before the next build.
+- Security updates are manual on this server, as on germany-3 and
+  france-2.
+- The apps' endpoint lists still carry finland-3's mirror. They are
+  re-signed once, together with the next new server.
