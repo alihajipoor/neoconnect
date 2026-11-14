@@ -9979,3 +9979,45 @@ against a real Postgres; that 20 connections behave better than 5 under
 load. Not addressed here: the desktop client's mirror fan-out, other
 heavy `usage_records` readers still on the main pool, and turning on
 query statistics on production (the owner's call).
+
+## 2026-11-14 (later) — an ack could be overwritten back to SENT
+
+**Status:** merged, not deployed
+**Touches:** `apps/backend/src/modules/agent-gateway/agent-gateway.service.ts`
+
+**Defect.** The gateway wrote a command onto the node's stream and then
+ran an unconditional update setting it SENT. A fast node's ack could
+commit in between and be overwritten: status back to SENT while
+`ackedAt`, `error` and the ack's credential strip stayed. After the
+deploy's reconnect burst, 3 of 7,115 commands (all Xray CREATE_USER,
+on two exits) sat like that, `sentAt` 45-156 ms after `ackedAt`. Replay
+selected by status alone, so the next reconnect would have re-sent them
+without their credential. The order dates from 2026-07; it became
+harmful when acks began stripping credentials (2026-10-06).
+
+**Real effect (read from the agent code, not run).** Xray, WireGuard
+and IKEv2 reject a credential-less create before changing anything, so
+these three would only have produced FAILED nacks; their users are
+active and re-asserted every minute. OpenVPN accepts a create with only
+the name, so a credential-less replay could have re-allowed a revoked
+client. No OpenVPN row was stuck, and no FAILED row exists in the kept
+history, so no replay of a stuck row has happened.
+
+**Fix.** SENT is recorded only after a successful write and only by a
+conditional update (`status` QUEUED/SENT and `ackedAt` null), so an ack
+can no longer be undone. Replay skips rows with `ackedAt` set, and closes
+as FAILED (unsent) any user command whose payload lost its credential.
+At startup, before the gRPC server binds, rows acked but still QUEUED/SENT
+on non-retired nodes are put back to the outcome their ack recorded
+(ACKED if `error` is null, else FAILED), up to 1000 per start. In-memory
+spec plus a Postgres spec (CI's database step) for the race, the replay
+filter and the correction.
+
+**Not proven:** anything in production (not deployed). On deploy the log
+should show `Corrected 3 command(s) ... (3 to ACKED, 0 to FAILED)` once,
+and nothing on a later start. That the 5-to-20 pool change made the race
+more likely is inferred; history before 2026-11-07 is pruned. Already on
+main and left alone: a command enqueued live during replay can overtake
+older queued ones for the same credential (the post-replay re-assert
+repairs it); duplicate acks may flip ACKED/FAILED; a write to an ended
+stream is still recorded SENT (it is replayed later).
