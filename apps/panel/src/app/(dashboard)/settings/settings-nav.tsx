@@ -27,7 +27,9 @@ export function SettingsNav({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   const sections = SECTIONS.filter((s) => !s.superAdminOnly || isSuperAdmin);
 
   return (
-    <nav className="flex shrink-0 gap-1 overflow-x-auto md:w-48 md:flex-col md:overflow-visible">
+    // Below md a single row that scrolls sideways (declared with
+    // data-scroll-x for check:phone); from md the side list it always was.
+    <nav data-scroll-x="" className="flex shrink-0 gap-1 overflow-x-auto max-md:-mx-1 max-md:px-1 max-md:pb-1 md:w-48 md:flex-col md:overflow-visible">
       {sections.map((section) => {
         const active = pathname === section.href;
         const Icon = section.icon;
@@ -36,7 +38,7 @@ export function SettingsNav({ isSuperAdmin }: { isSuperAdmin: boolean }) {
             key={section.href}
             href={section.href}
             className={cn(
-              "flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors",
+              "flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors max-lg:min-h-10",
               active
                 ? "bg-primary/15 text-foreground"
                 : "text-muted-foreground hover:bg-white/5 hover:text-foreground",
