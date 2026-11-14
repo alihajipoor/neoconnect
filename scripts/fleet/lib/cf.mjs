@@ -4,7 +4,7 @@
  *
  * The token is read from the file CF_TOKEN_FILE names, whitespace
  * stripped, and sent only as a Bearer header; it is never printed. Every
- * address in every output line is masked (a.b.x.x).
+ * address in every output line is masked (<ip>).
  *
  *   cf.mjs list     <zone>                    all records, content masked
  *   cf.mjs get      <zone> <fqdn>             records with that exact name ("free" when none)

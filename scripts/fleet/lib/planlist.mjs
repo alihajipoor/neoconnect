@@ -92,11 +92,14 @@ export function planResult(resultIds, next) {
  * plan takes direct ones. Only routes the plan actually holds are
  * removed, so a re-run after a half-done pass asks for nothing twice.
  */
-export function planDelta(plan, incoming, outgoing) {
-  const kind = plan.relayOnly ? "relay" : "direct";
+export function planDelta(plan, incoming, outgoing, bothKinds = false) {
+  // The canary plan ("Internal test") takes both kinds: it is where a new
+  // server's relay routes are proven with panel-issued credentials too,
+  // before any customer plan holds either.
+  const kinds = bothKinds ? ["direct", "relay"] : [plan.relayOnly ? "relay" : "direct"];
   const held = new Set(plan.routeIds);
-  const add = (incoming?.[kind] ?? []).filter((id) => !held.has(id));
-  const del = (outgoing?.[kind] ?? []).filter((id) => held.has(id));
+  const add = kinds.flatMap((k) => incoming?.[k] ?? []).filter((id) => !held.has(id));
+  const del = kinds.flatMap((k) => outgoing?.[k] ?? []).filter((id) => held.has(id));
   return { add, del };
 }
 
@@ -110,14 +113,15 @@ export function planDelta(plan, incoming, outgoing) {
  *   outgoing  {direct:[ids], relay:[ids], shapes:{routeId: "PROTOCOL/TRANSPORT"}} (may be empty)
  *   fallback  {byShape:{...}}  routes of another server, used for a default
  *             only when nothing is incoming (a plain retirement)
+ *   bothKinds [plan names] that take direct AND relay routes (the canary)
  *
  * A plan with nothing to change is left out. Throws rather than send a
  * plan to an empty list or leave its default on a route that is going.
  */
-export function planSteps(plans, incoming = {}, outgoing = {}, fallback = {}) {
+export function planSteps(plans, incoming = {}, outgoing = {}, fallback = {}, bothKinds = []) {
   const steps = [];
   for (const plan of planOrder(plans)) {
-    const { add, del } = planDelta(plan, incoming, outgoing);
+    const { add, del } = planDelta(plan, incoming, outgoing, bothKinds.includes(plan.name));
     let def = "";
     const leaving = new Set([...(outgoing.direct ?? []), ...(outgoing.relay ?? [])]);
     if (plan.defaultRouteId && leaving.has(plan.defaultRouteId)) {

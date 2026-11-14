@@ -25,10 +25,10 @@ const commands = {
   // label -> one random six-character DNS label
   label: () => out(randomLabel(randomBytes(6))),
 
-  // plan-steps <plans.json> <incoming.json> <outgoing.json> [fallback.json]
+  // plan-steps <plans.json> <incoming.json> <outgoing.json> [fallback.json] [plan taking both kinds]
   //   -> one line per plan to edit, smallest first: id|name|addJson|delJson|default|nextJson
   "plan-steps": () => {
-    const steps = planSteps(json(a[0]), json(a[1]), json(a[2]), a[3] ? json(a[3]) : {});
+    const steps = planSteps(json(a[0]), json(a[1]), json(a[2]), a[3] ? json(a[3]) : {}, a[4] ? [a[4]] : []);
     for (const s of steps) {
       out([s.id, s.name, JSON.stringify(s.add), JSON.stringify(s.del), s.def, JSON.stringify(s.next)].join("|"));
     }

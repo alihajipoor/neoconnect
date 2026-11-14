@@ -40,6 +40,8 @@ CALLS="$RUN_DIR/calls"
 OPT_DRY=0 OPT_YES=1 OPT_FROM="" OPT_ONLY="" OPT_DONE="" OPT_WAIVE="" OPT_PLANS="" OPT_DEFAULT_TO=""
 OPT_HOP="${T_HOP:-auto}" OPT_NO_RELAY="${T_NO_RELAY:-0}" OPT_NO_PLANS="${T_NO_PLANS:-0}"
 OPT_ACCEPT_HELD=0 OPT_ACCEPT_ZONE=0 OPT_ACCEPT_DEST="${T_ACCEPT_DEST:-0}" OPT_RELAY_SET=""
+OPT_PROVEN="${T_PROVEN:-}" OPT_FRESH_DUMP="${T_FRESH:-0}" OPT_CANARY_PLAN="Internal test" OPT_PROVIDER_FW=0
+EXTRA_AUTHORIZED_KEY_FILE="${T_EXTRA_KEY-}"
 # --dest, as given on this pass (empty: not given).
 DEST="${T_DEST:-}"
 # T_OLD may be set and empty: a plain `add` has no old server.
@@ -66,6 +68,38 @@ rsh() {
     *reality-dest-audit.sh*) echo "${T_AUDIT:-OK    www.example.org             AS64500 EXAMPLE in ZZ}" ;;
     *"agent.json && echo enrolled"*) echo "${T_ENROLLED:-}" ;;
     *"provider-image.sh"*) printf '%s\n' "${T_IMAGE:-ok      ufw: not active, none of its chains loaded}" ;;
+    # The WireGuard/OpenVPN/IKEv2 dial on the panel host: T_DIAL is
+    # "wireguard=pass,openvpn=fail,..." (default pass).
+    *nx-dial.sh*)
+      local k r
+      for k in wireguard openvpn ikev2; do [[ "$2" == *" $k issued"* ]] && break; done
+      r="$(tr ',' '\n' <<<"${T_DIAL:-}" | sed -n "s/^$k=//p")"
+      echo "DIAL nxf-dial-test0"
+      if [[ "${r:-pass}" == pass ]]; then
+        printf '%s\n' "x $k issued | EXIT-MATCH | down 200 262144B 0.5s | up 200 262144B 0.5s" "E2E-PASS x $k issued" "HOLDING 25s"
+      else
+        printf '%s\n' "x $k issued | no WireGuard handshake in 20 s" "E2E-FAIL x $k issued"
+      fi
+      ;;
+    # A recorded dump, looked at before reuse: T_DUMP=gone fails, else
+    # T_DUMP_AGE seconds old (default 60), 62 MB.
+    *"gzip -t '"*"stat -c '%s %Y'"*)
+      [[ "${T_DUMP:-}" == gone ]] && return 1
+      echo "62000000 $(($(date +%s) - ${T_DUMP_AGE:-60}))"
+      ;;
+    # The server's own view: T_SESSION_<KIND> is the line session.sh prints.
+    *session.sh*)
+      local v
+      for k in wireguard openvpn ikev2; do [[ "$2" == *"session.sh $k "* ]] && break; done
+      v="T_SESSION_${k^^}"
+      # WireGuard's first read is the baseline, before the dial.
+      if [[ "$k" == wireguard && ! -e "$RUN_DIR/wg-baseline" ]]; then
+        : >"$RUN_DIR/wg-baseline"
+        echo "${T_SESSION_WIREGUARD_BEFORE:-SESSION wireguard absent (no such peer)}"
+      else
+        echo "${!v:-SESSION $k found rx=300000 tx=300000 age=0}"
+      fi
+      ;;
   esac
   return 0
 }
@@ -121,6 +155,9 @@ q() {
     plan-holds) echo "${T_PLAN_HOLDS:-Pro|0|f|8}" ;;
     provision) printf 'have|%s\nwant|0\nnot-acked|0\n' "${T_HAVE:-0}" ;;
     route-ids) echo "${T_ROUTE_IDS:-}" ;;
+    node-ports) echo "${T_NODE_PORTS:-}" | tr ';' '\n' ;;
+    canary-plan) echo "${T_CANARY_ROW:-}" ;;
+    dial-creds) echo "${T_DIAL_CREDS:-}" | tr ';' '\n' ;;
     *) return 0 ;;
   esac
 }

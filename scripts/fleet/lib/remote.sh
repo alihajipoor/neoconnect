@@ -45,6 +45,13 @@ role_ssh_opts() {
   echo "-o StrictHostKeyChecking=accept-new"
 }
 
+# used <role>: this run reached that host, so cleanup_hosts goes there.
+# Kept in a file: steps run on the left of a pipe.
+used() {
+  [[ -n "${RUN_DIR:-}" && -d "$RUN_DIR" ]] || return 0
+  grep -qxF -- "$1" "$RUN_DIR/hosts-used" 2>/dev/null || echo "$1" >>"$RUN_DIR/hosts-used"
+}
+
 # rsh <role> <command string>
 rsh() {
   local role="$1" cmd="$2"
@@ -52,6 +59,7 @@ rsh() {
     echo "ssh <$(role_label "$role")> \$ $cmd" >&2
     return 0
   fi
+  used "$role"
   # -n: ssh must not read this script's stdin. Inside a `while read`
   # loop it would swallow the rest of the loop's input.
   # shellcheck disable=SC2046,SC2029
@@ -67,6 +75,7 @@ rpipe() {
     echo "(piped) ssh <$(role_label "$role")> \$ $cmd" >&2
     return 0
   fi
+  used "$role"
   # shellcheck disable=SC2046,SC2029
   ssh -i "$(role_key "$role")" "${SSH_BASE[@]}" $(role_ssh_opts "$role") "root@$(role_addr "$role")" "$cmd"
 }
@@ -109,6 +118,7 @@ rput() {
     echo "copy ${src#"$RUN_DIR"/} -> <$(role_label "$role")>:$dst (mode $mode)" >&2
     return 0
   fi
+  used "$role"
   [[ -f "$src" ]] || die "nothing to copy: $src"
   # shellcheck disable=SC2046
   ssh -i "$(role_key "$role")" "${SSH_BASE[@]}" $(role_ssh_opts "$role") "root@$(role_addr "$role")" \
@@ -123,6 +133,7 @@ rget() {
     echo "fetch <$(role_label "$role")>:$src -> run directory" >&2
     return 0
   fi
+  used "$role"
   # shellcheck disable=SC2046,SC2029
   ssh -i "$(role_key "$role")" "${SSH_BASE[@]}" $(role_ssh_opts "$role") "root@$(role_addr "$role")" "cat '$src'" >"$dst"
 }
@@ -136,6 +147,7 @@ rpushdir() {
     echo "copy remote/$dir/* and remote/common/* -> <$(role_label "$role")>:$REMOTE_DIR/" >&2
     return 0
   fi
+  used "$role"
   # shellcheck disable=SC2046
   tar -C "$FLEET_DIR/remote" -cf - "$dir" common |
     ssh -i "$(role_key "$role")" "${SSH_BASE[@]}" $(role_ssh_opts "$role") "root@$(role_addr "$role")" \
@@ -153,9 +165,40 @@ rscript() {
   rsh "$role" "${RENV:-}$REMOTE_DIR/${rel#*/}$q"
 }
 
-# rclean <role>: shred what a run left in the scratch directory.
+# rclean <role> [keep]: shred what a run left in the scratch directory.
+# With "keep", the panel host's record of temporary test users stays
+# (temp/): a step that stopped with test users still in some Xray needs
+# their emails to take them out on the next pass. The tunnel test's port
+# lock is removed too, once nothing holds it (it used to be left in
+# /dev/shm itself, empty, on every host a tunnel was dialled from).
 rclean() {
-  rsh "$1" "if [ -d $REMOTE_DIR ]; then find $REMOTE_DIR -type f -exec shred -u {} + 2>/dev/null; rm -rf $REMOTE_DIR; fi; echo scratch-clean"
+  local keep="${2:-}" find_args="-type f"
+  [[ "$keep" == keep ]] && find_args="-path $REMOTE_DIR/temp -prune -o -type f"
+  rsh "$1" "if [ -d $REMOTE_DIR ]; then find $REMOTE_DIR $find_args -exec shred -u {} + 2>/dev/null; find $REMOTE_DIR -depth -mindepth 1 -type d ! -path '$REMOTE_DIR/temp*' -exec rmdir {} + 2>/dev/null; [ -d $REMOTE_DIR/temp ] && [ '$keep' = keep ] || rm -rf $REMOTE_DIR; fi; for l in /dev/shm/nx-e2e-port.lock; do [ -e \$l ] && flock -n \$l true 2>/dev/null && rm -f \$l; done; echo scratch-clean"
+}
+
+# cleanup_hosts: at the end of every pass, whatever ended it. The admin
+# token goes from the panel host and the new box; every host this run
+# reached loses its scratch directory, except the panel host's record of
+# temporary test users while some may still be in an Xray (rclean keep).
+cleanup_hosts() {
+  local r left=""
+  dry && return 0
+  [[ -n "${RUN_DIR:-}" && -s "$RUN_DIR/hosts-used" ]] || return 0
+  echo
+  echo "Cleaning up on every host this pass used:"
+  while read -r r; do
+    [[ -n "$r" ]] || continue
+    if [[ "$r" == panel ]]; then
+      left="$(rsh panel "ls $REMOTE_DIR/temp 2>/dev/null | tr '\n' ' '" 2>/dev/null)" || left=""
+      if [[ -n "${left// /}" ]]; then
+        rclean panel keep >/dev/null 2>&1 && echo "  panel: clean, except the record of temporary test users ($left): the next pass needs it to take them out" || echo "  panel: COULD NOT CLEAN $REMOTE_DIR (look by hand)"
+        continue
+      fi
+    fi
+    if rclean "$r" >/dev/null 2>&1; then echo "  $(role_label "$r"): clean"; else echo "  $(role_label "$r"): COULD NOT CLEAN $REMOTE_DIR (unreachable now? look by hand)"; fi
+  done <"$RUN_DIR/hosts-used"
+  : >"$RUN_DIR/hosts-used"
 }
 
 # ---------------------------------------------------------------- database
@@ -173,8 +216,8 @@ sql_block() {
 
 # q <query name> [key=value ...]: one named query from sql/fleet.sql,
 # with psql variables. Read queries run in a read-only transaction.
-# Write queries are refused unless this run dumped the database in the
-# last half hour.
+# Write queries are refused unless this run has its database dump
+# (run_dump): one per run, taken before its first database write.
 q() {
   local name="$1" block mode body v vargs="" tmp
   shift
@@ -192,10 +235,7 @@ q() {
     return 0
   fi
   if [[ "$mode" == "write" ]]; then
-    local at now
-    at="$(state_get last_dump 0)"
-    now="$(date +%s)"
-    ((now - at < 1800)) || die "query $name writes, and this run has no database dump from the last 30 minutes"
+    state_has run_dump_file || die "query $name writes, and this run has no database dump yet (run_dump)"
   fi
   tmp="$RUN_DIR/q-$$.sql"
   if [[ "$mode" == "write" ]]; then
@@ -208,7 +248,91 @@ q() {
   rsh panel "$PSQL_REMOTE$vargs < $REMOTE_DIR/q-$$.sql | grep -vx -e BEGIN -e COMMIT; rc=\${PIPESTATUS[0]}; rm -f $REMOTE_DIR/q-$$.sql; exit \$rc"
 }
 
+# run_dump <label>: the run's ONE database dump. The first step of a run
+# that writes to the database takes it; every later step of the same run
+# reuses it and says so (the owner's rule: one dump per job, 2026-11-13;
+# the same day a step that dumped unconditionally left a second 62 MB dump
+# that the daily prune would have kept in place of the real one).
+# --fresh-dump takes a new one, once, at the next step that asks.
+run_dump() {
+  local label="$1" f
+  if dry; then
+    say "database dump: the run's one dump (taken here if this run has none yet, else reused)"
+    panel_dump "$label"
+    return 0
+  fi
+  f="$(st run_dump_file "")"
+  if [[ -n "$f" && "${OPT_FRESH_DUMP:-0}" == 1 && ! -e "$RUN_DIR/fresh-dump-$$" ]]; then
+    touch "$RUN_DIR/fresh-dump-$$"
+    say "--fresh-dump: a new dump in place of $f"
+    f=""
+  fi
+  if [[ -n "$f" ]]; then
+    # A run can be continued days later, and the daily prune keeps only the
+    # newest dump of each day: the recorded file may be gone, or old.
+    # Look at it on the panel host before trusting it.
+    local why
+    if why="$(dump_fresh_enough "$f")"; then
+      say "database dump: reusing this run's dump $f (taken $(st run_dump_at "?"), $why); --fresh-dump takes a new one"
+      undo "restore the rows this step changes from $f"
+      return 0
+    fi
+    say "database dump: this run's dump $f cannot be reused ($why); taking a new one"
+    log_line "DUMP-STALE $f ($why): a new dump taken"
+  fi
+  panel_dump "$label" || return 1
+  state_set run_dump_file "$(st last_dump_file)"
+  state_set run_dump_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "$(st last_dump_file)" >"$RUN_DIR/dump.txt"
+}
+
+# How old a dump a step may lean on (seconds). A run continued the next
+# day takes a new one.
+DUMP_MAX_AGE_S="${DUMP_MAX_AGE_S:-14400}"
+
+# dump_stat <file>: "<size> <mtime>" of a dump on the panel host, or a
+# failure when it is missing or not a whole gzip file.
+dump_stat() {
+  local out
+  out="$(rsh panel "gzip -t '$1' && stat -c '%s %Y' '$1'")" || return 1
+  [[ "$out" =~ ^[0-9]+[[:space:]][0-9]+$ ]] || return 1
+  echo "$out"
+}
+
+# dump_fresh_enough <file>: succeeds, printing its age, when the dump is
+# on the panel host, whole, the size of a dump and younger than
+# DUMP_MAX_AGE_S; otherwise fails, printing why.
+dump_fresh_enough() {
+  local out age
+  out="$(dump_stat "$1")" || { echo "not on the panel host, or not a whole gzip file"; return 1; }
+  ((${out%% *} > 1000000)) || { echo "too small to be a dump"; return 1; }
+  age=$(($(date +%s) - ${out#* }))
+  ((age <= DUMP_MAX_AGE_S)) || { echo "$((age / 60)) minutes old, more than $((DUMP_MAX_AGE_S / 3600)) hours"; return 1; }
+  echo "$((age / 60)) minutes old, gzip -t ok"
+}
+
+# use_dump_given: --use-dump <file>, a dump this job already took (say,
+# at the start of a session). Checked on the panel host and recorded as
+# this run's one dump.
+use_dump_given() {
+  local f="${OPT_USE_DUMP:-}" out
+  [[ -n "$f" ]] || return 0
+  [[ "$f" =~ ^/root/db-backups/[A-Za-z0-9._-]+\.sql\.gz$ ]] || { echo "fleet: --use-dump must name a file in /root/db-backups/ ending .sql.gz" >&2; return 1; }
+  out="$(dump_stat "$f")" || { echo "fleet: --use-dump: $f is not a good gzip file on the panel host" >&2; return 1; }
+  ((${out%% *} > 1000000)) || { echo "fleet: --use-dump: $f is too small to be a dump" >&2; return 1; }
+  local age=$(($(date +%s) - ${out#* }))
+  ((age <= DUMP_MAX_AGE_S)) || { echo "fleet: --use-dump: $f is $((age / 60)) minutes old (more than $((DUMP_MAX_AGE_S / 3600)) hours); leave --use-dump off and the run takes a new one" >&2; return 1; }
+  state_set run_dump_file "$f"
+  state_set last_dump_file "$f"
+  state_set last_dump "${out#* }"
+  state_set run_dump_at "$(date -u -d "@${out#* }" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo given)"
+  echo "$f" >"$RUN_DIR/dump.txt"
+  log_line "DUMP $f (--use-dump: this job's dump, no new one taken)"
+  echo "This run's database dump: $f (--use-dump, gzip -t ok)"
+}
+
 # panel_dump <label>: a dump before a write phase, checked with gzip -t.
+# Steps call run_dump, never this.
 panel_dump() {
   local label="$1" out
   out="$(rsh panel "set -o pipefail; mkdir -p /root/db-backups; TS=\$(date -u +%Y%m%dT%H%M%SZ); F=/root/db-backups/$label-\$TS.sql.gz; docker exec ${PG_CONTAINER:-neoxify-postgres-1} sh -c 'pg_dump -U \"\$POSTGRES_USER\" --exclude-table-data=site_visits \"\$POSTGRES_DB\"' | gzip > \$F && gzip -t \$F && stat -c '%s %n' \$F")" || return 1

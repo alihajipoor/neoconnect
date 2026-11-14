@@ -10,11 +10,6 @@
 
 old_ip() { node_field "$OLD" publicIp; }
 
-# A fresh dump when the last one is more than 20 minutes old.
-dump_if_stale() {
-  dry && { panel_dump "$1"; return 0; }
-  (($(date +%s) - $(st last_dump 0) < 1200)) || panel_dump "$1"
-}
 
 do_retire_params() {
   local row
@@ -86,7 +81,11 @@ ok_retire_guard_hop() {
 do_retire_guard_plans() {
   local out line steps
   out="$(q plan-input "incoming=" "outgoing=$OLD" "fallback=$OPT_DEFAULT_TO" "only=")" || return 1
-  dry && { echo "local \$ tool.mjs plan-steps (would any plan be left empty, or keep a default on a route that is going?)" >&2; return 0; }
+  if dry; then
+    echo "local \$ tool.mjs plan-steps (would any plan be left empty, or keep a default on a route that is going?)" >&2
+    say "a dry run asks the database nothing, so it cannot show this verdict; read-only, any time: fleet plan-check $OLD"
+    return 0
+  fi
   for line in plans incoming outgoing fallback; do sed -n "s/^$line //p" <<<"$out" >"$RUN_DIR/$line.json"; done
   if steps="$(tool plan-steps "$RUN_DIR/plans.json" "$RUN_DIR/incoming.json" "$RUN_DIR/outgoing.json" "$RUN_DIR/fallback.json")"; then
     say "plans that will change: $(cut -d'|' -f2 <<<"$steps" | tr '\n' ',' | sed 's/,$//; s/^$/none/')"
@@ -176,18 +175,48 @@ dns_sweep() { # deletes every record in our zones that points at the old address
   dry && return 0
   cat "$RUN_DIR/swept.txt" >>"$RUN_DIR/dns-names.txt"
   sort -u "$RUN_DIR/dns-names.txt" -o "$RUN_DIR/dns-names.txt"
-  undo "the names are gone for good on purpose; to put one back: fleet dns create-a <zone> <name> <address> (names in $RUN_DIR/dns-names.txt)"
+  dns_undo_file
+  undo "the names are gone for good on purpose; to put them back, exactly: bash $RUN_DIR/undo-dns.sh (one 'fleet dns create-a' per deleted name; it holds names and the address, so it stays in the run directory)"
 }
 
-dns_gone() { # every swept name answers NXDOMAIN from a public resolver
-  local n bad=0
+# undo-dns.sh: one exact command per deleted name, never shown (names
+# and the address are ours), kept in the run directory.
+dns_undo_file() {
+  local ip n z
+  dry && return 0
+  ip="$(old_ip)" || return 1
+  {
+    echo "#!/usr/bin/env bash"
+    echo "# Puts back the DNS names retire.dns deleted for $OLD. Run from the repository root."
+    while read -r n; do
+      [[ -n "$n" ]] || continue
+      for z in $CF_ZONES; do
+        case "$n" in *."$z") printf 'scripts/fleet/fleet dns create-a %q %q %q\n' "$z" "$n" "$ip"; break ;; esac
+      done
+    done <"$RUN_DIR/dns-names.txt"
+  } >"$RUN_DIR/undo-dns.sh"
+  chmod 600 "$RUN_DIR/undo-dns.sh"
+}
+
+# Every swept name answers NXDOMAIN from a public resolver. Asked again
+# for up to four minutes: right after the delete a resolver still has the
+# record cached (on 2026-11-13 the first check came eight seconds after
+# the delete, failed, and the run stopped over a cache).
+dns_gone() {
+  local n bad try
   dry && { cf doh "<each deleted name>" gone; return 0; }
   [[ -s "$RUN_DIR/dns-names.txt" ]] || return 0
-  while read -r n; do
-    [[ -n "$n" ]] || continue
-    cf doh "$n" gone >/dev/null || { say "a deleted name still resolves (resolver caches clear within minutes; run the step again)"; bad=1; }
-  done <"$RUN_DIR/dns-names.txt"
-  return $bad
+  for try in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    bad=0
+    while read -r n; do
+      [[ -n "$n" ]] || continue
+      cf doh "$n" gone >/dev/null || bad=$((bad + 1))
+    done <"$RUN_DIR/dns-names.txt"
+    [[ $bad -eq 0 ]] && return 0
+    [[ $try -lt 12 ]] && sleep 20
+  done
+  say "$bad deleted name(s) still resolve after four minutes: a resolver holds them longer than their TTL, or a record is still there"
+  return 1
 }
 
 do_retire_dns_now() {
@@ -207,19 +236,20 @@ ok_retire_dns_now() {
   dns_gone
 }
 
-do_retire_dump() { panel_dump "pre-retire-$OLD"; }
+do_retire_dump() { run_dump "pre-retire-$OLD"; }
 ok_retire_dump() {
   expect "a database dump from the last few minutes, checked with gzip -t"
-  dry || (($(date +%s) - $(st last_dump 0) < 1800))
+  dry || state_has run_dump_file
 }
 
 do_retire_plans() {
   heartbeats_baseline || return 1
-  plan_pass "" "$OLD" "retire-$OLD"
+  # The canary plan holds a server's relay routes too: they leave it here as well.
+  plan_pass "" "$OLD" "retire-$OLD" "$OPT_PLANS" "$(canary_plan)"
 }
 ok_retire_plans() {
   expect "no plan holds a route of this server, and every other server that was online still reports"
-  plan_pass_done "" "$OLD" || return 1
+  plan_pass_done "" "$OLD" "$OPT_PLANS" "$(canary_plan)" || return 1
   heartbeats_fresh "$OLD"
 }
 
@@ -227,7 +257,7 @@ do_retire_revoked() { say "read-only: the check is the step. Removing the routes
 ok_retire_revoked() {
   local out
   out="$(q revoked "name=$OLD")" || return 1
-  expect "no ACTIVE shared credential is left on this server's routes, and no plan with subscribers is left without an enabled route"
+  expect "no ACTIVE credential is left on this server's routes (shared or per-device), and no plan with subscribers is left without an enabled route"
   dry && return 0
   say "$(tr '\n' ' ' <<<"$out")"
   [[ "$(sed -n 's/^active-creds|//p' <<<"$out")" == 0 && "$(sed -n 's/^empty-plans|//p' <<<"$out")" == 0 ]]
@@ -249,7 +279,7 @@ do_retire_relay_routes() {
   panel_mint >/dev/null || return 1
   # shellcheck disable=SC2086
   pscript nx-api.sh route-delete ${ids//,/ } | sed 's/^/  /' || return 1
-  undo "the rows cannot be put back; make them again on the freed set with nx-relay-add.sh (pointless once the exit is gone)"
+  undo "the rows ($ids) cannot be put back; make them again on the freed set with nx-relay-add.sh (pointless once the exit is gone)"
   say "queued DELETE_USER commands for a dead exit stay queued for good: that is expected and left alone"
 }
 ok_retire_relay_routes() {
@@ -275,7 +305,7 @@ do_retire_incident() {
   fi
   panel_mint >/dev/null || return 1
   pscript nx-api.sh incident-retire "$(head -1 <<<"$id")" "server retired $(date -u +%Y-%m-%d)" | sed 's/^/  /' || return 1
-  undo "SQL on the panel host: UPDATE block_incidents SET status = 'OPEN', \"closedAt\" = NULL, \"actedBy\" = NULL, \"actionNote\" = NULL WHERE id = '<the incident id>';"
+  undo "SQL on the panel host: UPDATE block_incidents SET status = 'OPEN', \"closedAt\" = NULL, \"actedBy\" = NULL, \"actionNote\" = NULL WHERE id = '$(head -1 <<<"$id")';"
 }
 ok_retire_incident() {
   local id
@@ -342,7 +372,7 @@ ok_retire_offline() {
 }
 
 do_retire_disable() {
-  panel_dump "pre-$OLD-disable" || return 1
+  run_dump "pre-retire-$OLD" || return 1
   q retire-disable "name=$OLD" | sed 's/^/  status | routes still enabled: /' || return 1
   undo "SQL on the panel host, from the dump above: UPDATE nodes SET status = 'OFFLINE' WHERE name = '$OLD'; and \"isEnabled\" = true on its routes"
 }
@@ -354,7 +384,7 @@ ok_retire_disable() {
 }
 
 do_retire_keys() {
-  dump_if_stale "pre-$OLD-keys" || return 1
+  run_dump "pre-retire-$OLD" || return 1
   q retire-keys "name=$OLD" | sed 's/^/  status | key cleared | mirror cleared: /' || return 1
   undo "from the dump: the old agent public key and mirror host of $OLD (only if the server is ever brought back)"
 }
@@ -409,7 +439,7 @@ ok_retire_dns_other() {
 # finished by running the step again. (It used to read "no live rule" as
 # "no hop entry" and return, leaving the port open on the hop server.)
 do_retire_hop() {
-  local ip handle hopnames h hopip port n changed=0
+  local ip handle hopnames h hopip port n changed=0 bk="" fbak="" lbak="" hb
   ip="$(old_ip)" || return 1
   rscript relay relay/relay.sh hop-list || return 1
   rget relay "$REMOTE_DIR/hop-live.txt" "$RUN_DIR/hop-live.txt" || return 1
@@ -429,11 +459,15 @@ do_retire_hop() {
   fi
   # 1. the relay box: the live rule, by its handle
   if dry || [[ "$handle" != none || "$n" != 0 ]]; then
-    rsh relay "$REMOTE_DIR/relay.sh hop-backup retire-$OLD" || return 1
+    # The backups' own names go into the undo lines below.
+    bk="$(rsh relay "$REMOTE_DIR/relay.sh hop-backup retire-$OLD")" || return 1
+    [[ -n "$bk" ]] && echo "$bk" | sed 's/^/  /'
+    fbak="$(awk '/^backups: / {print $2}' <<<"$bk")"
+    lbak="$(awk '/^backups: / {print $4}' <<<"$bk")"
   fi
   if dry || [[ "$handle" != none ]]; then
     rsh relay "$REMOTE_DIR/relay.sh hop-del $handle $ip" || return 1
-    undo "on the relay box: nft add rule ip neoxify_relay_chain output <the rule, from /root/nft-live.bak-pre-retire-$OLD-*>"
+    undo "on the relay box: nft add rule ip neoxify_relay_chain output <the rule for $OLD, as it stands in ${lbak:-/root/nft-live.bak-pre-retire-$OLD-*}>"
     changed=1
   else
     say "the relay box has no live hop rule for $OLD"
@@ -443,7 +477,7 @@ do_retire_hop() {
     dry || tool hop-file-remove "$RUN_DIR/nft.old" "$RUN_DIR/nft.new" "$ip" || return 1
     rput relay "$RUN_DIR/nft.new" "$REMOTE_DIR/nftables.conf.new" 600 || return 1
     rsh relay "$REMOTE_DIR/relay.sh hop-file-swap" || return 1
-    undo "on the relay box: cp -a /etc/nftables.conf.bak-pre-retire-$OLD-<time> /etc/nftables.conf (never load that file)"
+    undo "on the relay box: cp -a ${fbak:-/etc/nftables.conf.bak-pre-retire-$OLD-*} /etc/nftables.conf (never load that file)"
     changed=1
   else
     say "the relay's nftables file has no line for $OLD"
@@ -463,8 +497,10 @@ do_retire_hop() {
       tool chain-remove "$RUN_DIR/chain.old" "$RUN_DIR/chain.new" "$ip" || return 1
     fi
     rput "ip:$hopip" "$RUN_DIR/chain.new" "$REMOTE_DIR/chain-fw.nft.new" 600 || return 1
-    rscript "ip:$hopip" node/hop-server.sh apply || return 1
-    undo "on the hop server $h: cp -a /etc/neoxify/chain-fw.nft.bak-<time> /etc/neoxify/chain-fw.nft && nft -f /etc/neoxify/chain-fw.nft (its own table only)"
+    hb="$(rscript "ip:$hopip" node/hop-server.sh apply)" || { echo "$hb"; return 1; }
+    echo "$hb"
+    hb="$(sed -n 's/^backup //p' <<<"$hb" | head -1)"
+    undo "on the hop server $h: cp -a ${hb:-/etc/neoxify/chain-fw.nft.bak-<time>} /etc/neoxify/chain-fw.nft && nft -f /etc/neoxify/chain-fw.nft (its own table only)"
     dry || state_set retire_hop_changed 1
   done
   dry || rm -f "$RUN_DIR"/chain.* "$RUN_DIR"/nft.* "$RUN_DIR"/hop-*
@@ -505,7 +541,7 @@ ok_retire_hop() {
 }
 
 do_retire_alerts() {
-  dump_if_stale "pre-$OLD-alerts" || return 1
+  run_dump "pre-retire-$OLD" || return 1
   q alerts-resolve "name=$OLD" | sed 's/^/  open reachability alerts now: /'
 }
 ok_retire_alerts() {
@@ -534,7 +570,13 @@ ok_retire_leftovers() {
   return $bad
 }
 
+# Listed, written to owner-todo.txt, not waited for: nothing in it comes
+# before the retirement is done.
 do_retire_owner_after() {
+  if dry; then retire_owner_list; else retire_owner_list | tee -a "$RUN_DIR/owner-todo.txt"; fi
+  dry || state_set nowait_retire_owner_after 1
+}
+retire_owner_list() {
   cat <<EOF
   OWNER, after $OLD is retired (none of this can be done by the tool):
     1. Signed endpoint lists: re-sign without this server's mirrors on the machine that holds the signing
@@ -544,15 +586,16 @@ do_retire_owner_after() {
        DELETE_USER commands queued for it (they stay queued).
 EOF
 }
-ok_retire_owner_after() { expect "the owner has the list"; return 0; }
+ok_retire_owner_after() { expect "the owner has the list (printed, and in owner-todo.txt); nothing is waited for"; return 0; }
 
 do_retire_delete_vps() {
   say "OWNER: the VPS of $OLD can be deleted at the provider now."
   say "Nothing of ours points at its address any more, no customer holds a credential on it, and the relay"
-  say "does not route to it. Type 'done' when it is deleted (or when it already was)."
+  say "does not route to it. (On the owner's list; not waited for: nothing of the tool's comes after it.)"
+  dry || { echo "  OWNER: delete the VPS of $OLD at the provider (the tool has finished with it)." >>"$RUN_DIR/owner-todo.txt"; state_set nowait_retire_delete_vps 1; }
 }
 ok_retire_delete_vps() {
-  expect "the owner confirmed"
+  expect "nothing to check: the owner has it on the list"
   dry || rclean panel >/dev/null
   dry || rclean relay >/dev/null
   return 0
@@ -571,6 +614,7 @@ register_retire_reach() {
 register_retire_guards() {
   step retire.guard-hop gate "Refuse while other exits reach the relay through this server's hop (live rules and the relay's file)"
   step retire.guard-plans gate "Refuse if a plan would be left empty or its default would have nowhere to go"
+  gate_flag retire.guard-plans "--default-to <server>   (read-only verdict any time: fleet plan-check <name>)"
 }
 
 register_retire_steps() {
@@ -588,8 +632,8 @@ register_retire_steps() {
   step retire.hop ask "Relay hop entry for this exit removed (relay rule by handle, file by line, never loaded; hop server's port), the other exits behind the hop dialled again"
   step retire.alerts auto "Reachability alerts resolved"
   step retire.leftovers auto "Leftovers: nothing still points at the server"
-  step retire.owner-after owner "What only the owner can do afterwards"
-  step retire.delete-vps owner "The VPS can be deleted at the provider now"
+  step retire.owner-after owner "What only the owner can do afterwards (listed, not waited for)"
+  step retire.delete-vps owner "The VPS can be deleted at the provider now (listed, not waited for)"
 }
 
 checklist_retire() {

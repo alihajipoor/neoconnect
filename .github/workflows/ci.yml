@@ -223,6 +223,13 @@ jobs:
       - name: Xray config gate passes a good config on a running relay
         run: bash scripts/test-xray-config-gate.sh
 
+      # The 2026-11-13 build came up with Xray dead: its config test, run
+      # as root, created the access log root-owned, and Xray runs as
+      # nobody. Its IKEv2 loader was enabled and never started. Stand-ins
+      # for install, chown, systemctl and journalctl; jq is the runner's.
+      - name: Xray's log files are nobody's before it starts; the IKEv2 loader is started
+        run: bash scripts/test-xray-logs.sh
+
       # The IPv4-only pieces live in two places: the templates (new nodes)
       # and installer/maintenance/xray-ipv4-only.sh (live ones). A comment
       # that drifts between them makes install_xray report a node's rule

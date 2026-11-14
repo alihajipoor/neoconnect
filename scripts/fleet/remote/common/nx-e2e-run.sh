@@ -34,7 +34,9 @@ cleanup() {
 trap cleanup EXIT
 cat >"$D/in.json"
 EXPECT=$(jq -r '.nxExpectIp // empty' "$D/in.json" 2>/dev/null)
-exec 8>/dev/shm/nx-e2e-port.lock
+# In the scratch directory, so cleaning up after a run takes it too (it
+# used to sit in /dev/shm itself, an empty file left on every host).
+mkdir -p /dev/shm/nxf && exec 8>/dev/shm/nxf/e2e-port.lock
 flock -w 60 8 # held until the client listens: two runs never pick one port
 SP=0
 DP=0

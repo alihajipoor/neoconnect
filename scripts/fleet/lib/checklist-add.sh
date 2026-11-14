@@ -337,21 +337,40 @@ ok_add_zone_inside() {
 
 # ---------------------------------------------------------------- part B: build
 
+# The second operator machine (the Mac) must reach every server. Unset,
+# this step used to say "nothing to add" and pass, and on 2026-11-13 the
+# key went on by hand. Now an unset key is a stop, unless fleet.env says
+# EXTRA_AUTHORIZED_KEY_FILE=none on purpose.
+second_key_file() {
+  local f="${EXTRA_AUTHORIZED_KEY_FILE:-}"
+  [[ "$f" == none ]] && { echo none; return 0; }
+  [[ -n "$f" ]] || { say "EXTRA_AUTHORIZED_KEY_FILE is not set in fleet.env: the second operator machine would have no key on this server."; say "Set it to that machine's PUBLIC key file (or to 'none', on purpose), then continue."; return 1; }
+  dry && { echo "$f"; return 0; }
+  [[ -s "$f" ]] || { say "EXTRA_AUTHORIZED_KEY_FILE names a file that is not there or is empty"; return 1; }
+  head -1 "$f" | grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9-]+) [A-Za-z0-9+/=]+( |$)' || { say "EXTRA_AUTHORIZED_KEY_FILE does not hold one public key line (never point it at a private key)"; return 1; }
+  echo "$f"
+}
 do_add_second_key() {
-  if [[ -z "${EXTRA_AUTHORIZED_KEY_FILE:-}" ]]; then
-    say "no second operator key configured (EXTRA_AUTHORIZED_KEY_FILE): nothing to add"
+  local f
+  f="$(second_key_file)" || return 1
+  if [[ "$f" == none ]]; then
+    say "EXTRA_AUTHORIZED_KEY_FILE=none: no second operator key, on purpose"
     dry || state_set second_key none
     return 0
   fi
-  rput new "$EXTRA_AUTHORIZED_KEY_FILE" "$REMOTE_DIR/extra.pub" 600 || return 1
-  rsh new "K=\$(head -1 $REMOTE_DIR/extra.pub); rm -f $REMOTE_DIR/extra.pub; [ -n \"\$K\" ] || exit 1; cp -a /root/.ssh/authorized_keys /root/.ssh/authorized_keys.bak-pre-fleet; grep -qF \"\$K\" /root/.ssh/authorized_keys || echo \"\$K\" >> /root/.ssh/authorized_keys; echo \"keys now: \$(grep -c . /root/.ssh/authorized_keys)\"" || return 1
+  rput new "$f" "$REMOTE_DIR/extra.pub" 600 || return 1
+  rsh new "K=\$(head -1 $REMOTE_DIR/extra.pub); rm -f $REMOTE_DIR/extra.pub; [ -n \"\$K\" ] || exit 1; [ -e /root/.ssh/authorized_keys.bak-pre-fleet ] || cp -a /root/.ssh/authorized_keys /root/.ssh/authorized_keys.bak-pre-fleet; grep -qxF \"\$K\" /root/.ssh/authorized_keys || echo \"\$K\" >> /root/.ssh/authorized_keys; echo \"keys now: \$(grep -c . /root/.ssh/authorized_keys)\"" || return 1
   undo "on the new box: cp -a /root/.ssh/authorized_keys.bak-pre-fleet /root/.ssh/authorized_keys"
   dry || state_set second_key added
 }
 ok_add_second_key() {
-  expect "the second machine's public key is in authorized_keys; sshd's own settings are untouched"
-  dry && return 0
-  state_has second_key && rsh new "true"
+  local f out
+  expect "the second machine's public key line is in authorized_keys (or fleet.env says none, on purpose); sshd's own settings are untouched"
+  f="$(second_key_file)" || return 1
+  [[ "$f" == none ]] && return 0
+  rput new "$f" "$REMOTE_DIR/extra.pub" 600 || return 1
+  out="$(rsh new "K=\$(head -1 $REMOTE_DIR/extra.pub); rm -f $REMOTE_DIR/extra.pub; grep -qxF \"\$K\" /root/.ssh/authorized_keys && echo key-present")" || true
+  dry || [[ "$out" == key-present ]] || { say "the second key is NOT in the new box's authorized_keys"; return 1; }
 }
 
 do_add_inventory() {
@@ -431,6 +450,14 @@ do_add_firewall() {
   say "  open UDP $(st ss_port "{ss_port}"), $(st wg_port "{wg_port}"), $(st ovpn_port "{ovpn_port}"), 500 and 4500"
   say "80 stays open for good: certificates renew through it. Never move 443, 2053, 8443, 500 or 4500."
   say "The installer cannot do this and prints no reminder for the UDP ports."
+  # Most providers put no firewall in front, and a closed port is caught
+  # anyway: TCP 443 by add.dest, every TCP port by add.verify, the UDP
+  # ports by add.udp-reach. So this waits only when the owner said there
+  # is one (--provider-firewall); otherwise the run goes straight on.
+  if [[ "${OPT_PROVIDER_FW:-0}" != 1 ]]; then
+    say "no --provider-firewall: not waiting. A closed port stops the run at add.dest, add.verify or add.udp-reach."
+    dry || state_set nowait_add_firewall 1
+  fi
 }
 ok_add_firewall() {
   expect "nothing to check yet: closed TCP ports show in add.verify, closed UDP ports in add.udp-reach"
@@ -634,10 +661,10 @@ ok_add_dest() {
   esac
 }
 
-do_add_dump_node() { panel_dump "pre-$(nn)-node"; }
+do_add_dump_node() { run_dump "pre-$(nn)"; }
 ok_add_dump_node() {
   expect "a database dump from the last few minutes, checked with gzip -t"
-  dry || (($(date +%s) - $(st last_dump 0) < 1800))
+  dry || state_has run_dump_file
 }
 
 do_add_token() {
@@ -791,7 +818,7 @@ do_add_postfix() {
   undo "on the new box: the unit and rules it replaced are saved beside it (/root/xray.service.before-fleet-*, /etc/iptables/rules.v4.bak-pre-selfloop-*)"
 }
 ok_add_postfix() {
-  expect "seven times ok: Xray as nobody at the pinned version, readable certificate copy, strongSwan loader bound to the unit that exists, WireGuard public key readable, self-connect guard, conntrack limit"
+  expect "every line ok, one per check and one per engine: Xray as nobody at the pinned version, readable certificate copy, strongSwan loader bound to the unit that exists, WireGuard public key readable, self-connect guard, conntrack limit"
   rsh new "$REMOTE_DIR/postinstall.sh check $XRAY_VERSION $NEW_IP"
 }
 
@@ -905,7 +932,7 @@ ok_add_leftovers() {
 }
 
 do_add_mirror_host() {
-  panel_dump "pre-$(nn)-mirrorhost" || return 1
+  run_dump "pre-$(nn)" || return 1
   q mirror-set "name=$(nn)" "host=$(need l1)" | sed 's/^/  mirror host set: /' || return 1
   undo "SQL on the panel host: UPDATE nodes SET \"mirrorHost\" = NULL WHERE name = '$(nn)';"
 }
@@ -1122,7 +1149,7 @@ do_add_udp_reach() {
 }
 ok_add_udp_reach() {
   local p n bad=0
-  expect "datagrams sent from outside to the WireGuard, OpenVPN and IKEv2 ports show up on the server's interface: no provider firewall in the way. This is NOT a handshake: those three tunnels are proven only by a real app (add.owner-after)."
+  expect "datagrams sent from outside to the WireGuard, OpenVPN and IKEv2 ports show up on the server's interface: no provider firewall in the way. This is NOT a handshake: the tool dials those three tunnels itself at add.canary-other."
   dry && { rsh new "grep -c '\\.<port>: ' $REMOTE_DIR/udp.cap   (once per port)"; return 0; }
   for p in $(st udp_ports); do
     n="$(rsh new "grep -c '\\.$p: ' $REMOTE_DIR/udp.cap || true")" || n=0
@@ -1295,7 +1322,7 @@ do_add_relay_routes() {
   # Before any row is made: the relay's agent has to be there to put the
   # routes into the relay's running Xray.
   relay_agent_online || return 1
-  panel_dump "pre-$(nn)-relay" || return 1
+  run_dump "pre-$(nn)" || return 1
   panel_mint >/dev/null || return 1
   RENV="${PANEL_ENV}NX_APPLY=0 " rscript panel panel/nx-relay-add.sh "$RELAY_NODE_NAME" "$set" "$xcfg" "$(exit_label "$(nn)")" || return 1
   out="$(RENV="${PANEL_ENV}NX_APPLY=1 " rscript panel panel/nx-relay-add.sh "$RELAY_NODE_NAME" "$set" "$xcfg" "$(exit_label "$(nn)")")" || { echo "$out"; return 1; }
@@ -1378,9 +1405,9 @@ ok_add_e2e_relay() {
 # One pass over the plans: incoming routes join, outgoing routes leave,
 # one plan at a time, smallest first. Used by add (incoming only), by
 # replace (both, in one PATCH per plan) and by retire (outgoing only).
-plan_pass() { # <incoming server or ''> <outgoing server or ''> <label>
-  local incoming="$1" outgoing="$2" label="$3" out steps pid pname add del def next rc tx line
-  out="$(q plan-input "incoming=$incoming" "outgoing=$outgoing" "fallback=$OPT_DEFAULT_TO" "only=$OPT_PLANS")" || return 1
+plan_pass() { # <incoming server or ''> <outgoing server or ''> <label> [only these plans] [plan taking both kinds]
+  local incoming="$1" outgoing="$2" label="$3" only="${4-$OPT_PLANS}" both="${5:-}" out steps pid pname add del def next rc tx line
+  out="$(q plan-input "incoming=$incoming" "outgoing=$outgoing" "fallback=$OPT_DEFAULT_TO" "only=$only")" || return 1
   if dry; then
     say "for each plan, smallest first (the new list is computed here and again on the panel host; they must agree):"
     RENV="${PANEL_ENV}NX_EXPECT_NEW=$REMOTE_DIR/expect-<plan>.json " rscript panel panel/nx-plan-run.sh "$label-<plan>" 900 "<planId>" "<ids to add>" "<ids to remove>" "<default, if it moves>"
@@ -1392,7 +1419,7 @@ plan_pass() { # <incoming server or ''> <outgoing server or ''> <label>
     sed -n "s/^$line //p" <<<"$out" >"$RUN_DIR/$line.json"
     [[ -s "$RUN_DIR/$line.json" ]] || { say "the panel gave no '$line' document"; return 1; }
   done
-  steps="$(tool plan-steps "$RUN_DIR/plans.json" "$RUN_DIR/incoming.json" "$RUN_DIR/outgoing.json" "$RUN_DIR/fallback.json")" || {
+  steps="$(tool plan-steps "$RUN_DIR/plans.json" "$RUN_DIR/incoming.json" "$RUN_DIR/outgoing.json" "$RUN_DIR/fallback.json" "$both")" || {
     say "If a plan's default route is on the server that is leaving, name where it should go: --default-to <server>."
     return 1
   }
@@ -1418,14 +1445,394 @@ plan_pass() { # <incoming server or ''> <outgoing server or ''> <label>
 }
 
 # Converged: asking again finds nothing left to change.
-plan_pass_done() { # <incoming> <outgoing>
-  local out steps line
-  out="$(q plan-input "incoming=$1" "outgoing=$2" "fallback=$OPT_DEFAULT_TO" "only=$OPT_PLANS")" || return 1
+plan_pass_done() { # <incoming> <outgoing> [only these plans] [plan taking both kinds]
+  local out steps line only="${3-$OPT_PLANS}" both="${4:-}"
+  out="$(q plan-input "incoming=$1" "outgoing=$2" "fallback=$OPT_DEFAULT_TO" "only=$only")" || return 1
   dry && return 0
   for line in plans incoming outgoing fallback; do sed -n "s/^$line //p" <<<"$out" >"$RUN_DIR/$line.json"; done
-  steps="$(tool plan-steps "$RUN_DIR/plans.json" "$RUN_DIR/incoming.json" "$RUN_DIR/outgoing.json" "$RUN_DIR/fallback.json")" || return 1
+  steps="$(tool plan-steps "$RUN_DIR/plans.json" "$RUN_DIR/incoming.json" "$RUN_DIR/outgoing.json" "$RUN_DIR/fallback.json" "$both")" || return 1
   rm -f "$RUN_DIR"/*.json
   [[ -z "$steps" ]] || { say "plans still to change: $(cut -d'|' -f2 <<<"$steps" | tr '\n' ' ')"; return 1; }
+}
+
+# ---------------------------------------------------------------- the canary
+
+# The owner's rule: no customer gets a server before every protocol on it
+# is proven. So the server's routes go into ONE plan first, the canary
+# ("Internal test", --canary-plan), which no customer can buy; the panel
+# issues the test account credentials through it, exactly as it will for
+# customers; those are dialled; and only then do the customer plans get
+# it. Of that plan only isActive is ever changed, only when it was off,
+# and it is put back exactly as it was before the customer plans.
+
+canary_plan() { echo "${OPT_CANARY_PLAN:-Internal test}"; }
+canary_email() { echo "${TEST_CANARY_EMAIL:-${TEST_DIRECT_EMAIL:-}}"; }
+test_emails() { printf '%s' "${TEST_DIRECT_EMAIL:-}${TEST_RELAY_EMAIL:+,$TEST_RELAY_EMAIL}${TEST_CANARY_EMAIL:+,$TEST_CANARY_EMAIL}"; }
+
+# WireGuard, OpenVPN and IKEv2 are dialled with their real clients
+# (wireguard-go, openvpn, strongSwan's charon) in a throwaway container on
+# the panel host, with the test account's credential issued through the
+# canary plan (dial_set, below; `fleet prove` uses it on its own).
+# add.canary-other dials each one the server has, all at once. --proven-elsewhere still records a
+# proof made another way (the real app on the canary): it counts only for
+# a protocol whose scripted dial did not pass, and the run log says both.
+CANARY_OTHER_PROTOS="WIREGUARD OPENVPN IKEV2"
+
+# prove_server [plan]: `fleet prove <name>`. Dials each of WireGuard,
+# OpenVPN and IKEv2 the server has, at once, with the test account's
+# credentials (through that plan, or any plan). Changes no server, plan
+# or row; 1 unless every one was proven.
+prove_server() {
+  local plan="${1:-}" ports p have="" bad=0 t0
+  ports="$(q node-ports "name=$(nn)")" || return 1
+  dry && ports=$'WIREGUARD/UDP|1\nOPENVPN/UDP|2\nIKEV2/UDP|500'
+  for p in $CANARY_OTHER_PROTOS; do
+    grep -q "^$p/" <<<"$ports" && have+="$p "
+  done
+  [[ -n "$have" ]] || { say "$(nn) has no WireGuard, OpenVPN or IKEv2"; return 0; }
+  t0=$(date +%s)
+  panel_mint >/dev/null || return 1
+  # shellcheck disable=SC2086
+  dial_set "$(canary_email)" "$plan" $have
+  panel_token_shred >/dev/null
+  if dry; then
+    say "(dry run: nothing dialled)"
+    return 0
+  fi
+  for p in $have; do
+    if [[ "$(cat "$RUN_DIR/dial-${p,,}.rc" 2>/dev/null)" == 0 ]]; then say "$p: PROVEN"; else say "$p: NOT PROVEN"; bad=1; fi
+    rm -f "$RUN_DIR/dial-${p,,}.rc"
+  done
+  say "took $(($(date +%s) - t0))s"
+  return $bad
+}
+
+# dial_image: the panel host has the dial image (built once, kept; see
+# remote/panel/nx-dial-image.sh for what stays there).
+dial_image() {
+  local out rc
+  [[ "${DIAL_IMAGE_OK:-}" == 1 ]] && return 0
+  out="$(pscript nx-dial-image.sh)"
+  rc=$?
+  [[ -n "$out" ]] && say "$out"
+  [[ $rc -eq 0 ]] || return 1
+  DIAL_IMAGE_OK=1
+}
+
+dial_hold() { case "$1" in openvpn) echo 80 ;; *) echo 25 ;; esac; }
+
+# session_numbers <SESSION line> -> "rx tx age", or nothing when absent.
+session_numbers() {
+  sed -nE 's/^SESSION [a-z0-9]+ found rx=([0-9]+) tx=([0-9]+) age=(-?[0-9]+).*/\1 \2 \3/p' <<<"$1" | head -1
+}
+
+# session_ok <kind> <rx before> <tx before> <rx> <tx> <age> <seconds since the dial started>
+# The server's own view agrees: at least 256 KB more each way than before
+# the dial, and fresh: a WireGuard handshake in the last 3 minutes; an
+# OpenVPN status file written after the dial started (OpenVPN keeps one
+# session per certificate name, so that line is this session's); an IKEv2
+# SA established after the dial started.
+session_ok() {
+  local k="$1" rx0="$2" tx0="$3" rx="$4" tx="$5" age="$6" since="$7"
+  ((rx - rx0 >= 262144 && tx - tx0 >= 262144)) || return 1
+  case "$k" in
+    wireguard) ((age >= 0 && age <= 180)) ;;
+    openvpn | ikev2) ((age >= 0 && age <= since)) ;;
+    *) return 1 ;;
+  esac
+}
+
+# dial_set <email> <plan or ''> <WIREGUARD|OPENVPN|IKEV2>...: dials each,
+# all at once, with the credential the panel issued to <email> (through
+# <plan>, or any plan when empty). The result of each is in
+# $RUN_DIR/dial-<protocol>.rc, 0 only on proof; what each printed comes
+# out in order once all are done.
+dial_set() {
+  local email="$1" plan="$2" rows P lp pu xid
+  shift 2
+  rows="$(q dial-creds "name=$(nn)" "email=$email" "plan=$plan")" || return 1
+  if dry; then
+    pscript nx-dial-image.sh
+    for P in "$@"; do
+      lp="${P,,}"
+      rsh new "$REMOTE_DIR/session.sh $lp '{its id on the server}'"
+      rsh panel "$PANEL_ENV$REMOTE_DIR/nx-dial.sh {credential} '$(nn) $lp issued' $(dial_hold "$lp")"
+    done
+    return 0
+  fi
+  for P in "$@"; do echo 1 >"$RUN_DIR/dial-${P,,}.rc"; done
+  dial_image || { say "NOT DIALLED: the dial image is not on the panel host"; return 1; }
+  # Once, before the dials run side by side.
+  rpushdir new node || { say "NOT DIALLED: the server's own view cannot be read (no copy to the server)"; return 1; }
+  for P in "$@"; do
+    lp="${P,,}"
+    pu="" xid=""
+    IFS='|' read -r _ pu xid <<<"$(grep "^$P|" <<<"$rows" | head -1)"
+    if [[ -z "$pu" || -z "$xid" ]]; then
+      say "$P: NOT DIALLED, the test account holds no panel-issued $P credential on this server${plan:+ through '$plan'}" >"$RUN_DIR/dial-$lp.log"
+      continue
+    fi
+    (
+      dial_one "$P" "$pu" "$xid" >"$RUN_DIR/dial-$lp.log" 2>&1
+      echo $? >"$RUN_DIR/dial-$lp.rc"
+    ) &
+  done
+  wait
+  for P in "$@"; do
+    cat "$RUN_DIR/dial-${P,,}.log" 2>/dev/null
+    rm -f "$RUN_DIR/dial-${P,,}.log"
+  done
+}
+
+# dial_one <PROTOCOL> <credential id> <its id on the server>: 0 only on
+# proof. The panel host dials the credential with the real client in a
+# throwaway container (remote/panel/nx-dial.sh): the exit address must be
+# the server's own and 256 KB must go each way. While the tunnel is held,
+# the server's own view is read (remote/node/session.sh: WireGuard's peer
+# handshake and byte counters, OpenVPN's status file, IKEv2's SA list),
+# and it must show this session moving those bytes. Then the hold ends.
+dial_one() {
+  local P="$1" pu="$2" xid="$3" lp="${1,,}" out sv nums bg i t_start since cname
+  local rx0=0 tx0=0 rx=0 tx=0 age="" ok=0
+  out="$RUN_DIR/dial-$lp.out"
+  # A WireGuard peer's counters live as long as the peer: take them
+  # before. An OpenVPN or IKEv2 session starts from zero.
+  if [[ "$lp" == wireguard ]]; then
+    sv="$(rsh new "$REMOTE_DIR/session.sh $lp '$xid'" 2>/dev/null)"
+    nums="$(session_numbers "$sv")"
+    [[ -n "$nums" ]] && read -r rx0 tx0 _ <<<"$nums"
+  fi
+  : >"$out"
+  t_start=$(date +%s)
+  rsh panel "$PANEL_ENV$REMOTE_DIR/nx-dial.sh $pu '$(nn) $lp issued' $(dial_hold "$lp")" >"$out" 2>&1 &
+  bg=$!
+  for ((i = 0; i < 90; i++)); do
+    grep -q '^E2E-' "$out" && break
+    kill -0 "$bg" 2>/dev/null || break
+    sleep 2
+  done
+  if ! grep -q '^E2E-PASS' "$out"; then
+    wait "$bg" 2>/dev/null
+    grep -v '^DIAL ' "$out" | head -12 | sed 's/^/  /'
+    [[ -s "$out" ]] || say "$P: the panel host gave no answer"
+    say "$P: the scripted dial did NOT pass"
+    rm -f "$out"
+    return 1
+  fi
+  grep -E ' \| EXIT-' "$out" | sed 's/^/  /'
+  # The server's own view, while the tunnel is still held.
+  for ((i = 0; i < 18; i++)); do
+    sv="$(rsh new "$REMOTE_DIR/session.sh $lp '$xid'" 2>/dev/null)"
+    nums="$(session_numbers "$sv")"
+    if [[ -n "$nums" ]]; then
+      read -r rx tx age <<<"$nums"
+      since=$(($(date +%s) - t_start))
+      if session_ok "$lp" "$rx0" "$tx0" "$rx" "$tx" "$age" "$since"; then ok=1; break; fi
+    fi
+    kill -0 "$bg" 2>/dev/null || break
+    sleep 5
+  done
+  # Proven or not, the hold can end now.
+  cname="$(sed -n 's/^DIAL \(nxf-dial-[A-Za-z0-9]*\)$/\1/p' "$out" | head -1)"
+  [[ -n "$cname" ]] && kill -0 "$bg" 2>/dev/null && rsh panel "docker exec $cname touch /tmp/release 2>/dev/null; true" >/dev/null
+  wait "$bg" 2>/dev/null
+  rm -f "$out"
+  if [[ $ok -eq 1 ]]; then
+    say "$P: the server's own view: this session received $(((rx - rx0) / 1024)) KB and sent $(((tx - tx0) / 1024)) KB${age:+ (age ${age}s)}"
+    return 0
+  fi
+  say "$P: the tunnel passed from the client's side, but the server's own view did not confirm it: ${sv:-nothing read}"
+  return 1
+}
+
+# canary_row -> id|isActive|isPurchasable|routes|subs|customers' subs
+canary_row() { q canary-plan "plan=$(canary_plan)" "emails=$(test_emails)"; }
+
+canary_refuse_customers() { # <row>
+  local id purch others
+  IFS='|' read -r id _ purch _ _ others <<<"$1"
+  [[ -n "$id" ]] || { say "there is no plan named '$(canary_plan)' (--canary-plan)"; return 1; }
+  [[ "$purch" == f ]] || { say "REFUSED: '$(canary_plan)' is purchasable. A customer could buy it and get the server unproven. Nothing was changed."; return 1; }
+  [[ "${others:-0}" == 0 ]] || { say "REFUSED: $others subscription(s) of people other than the test accounts are ACTIVE on '$(canary_plan)'. They would get the server unproven. Nothing was changed."; return 1; }
+}
+
+do_add_canary_routes() {
+  local row
+  if [[ "$OPT_NO_PLANS" == 1 ]]; then say "--no-plans: no plan gets this server, the canary neither (nothing below is proven with issued credentials)"; return 0; fi
+  row="$(canary_row)" || return 1
+  if ! dry; then
+    canary_refuse_customers "$row" || return 1
+    state_set canary_plan_id "${row%%|*}"
+    # Recorded once, on the first pass: what "exactly as it was" means.
+    state_has canary_before || state_set canary_before "$(cut -d'|' -f2,3 <<<"$row")"
+    say "'$(canary_plan)' before: isActive=$(cut -d'|' -f2 <<<"$row") isPurchasable=$(cut -d'|' -f3 <<<"$row"), $(cut -d'|' -f4 <<<"$row") routes, $(cut -d'|' -f5 <<<"$row") active subscription(s), none a customer's"
+  fi
+  run_dump "pre-$(nn)" || return 1
+  heartbeats_baseline || return 1
+  plan_pass "$(nn)" "" "$(nn)-canary" "$(canary_plan)" "$(canary_plan)"
+}
+ok_add_canary_routes() {
+  local holds
+  expect "the canary plan holds every enabled route of the new server, direct AND relay, and no other plan holds any of them (no customer has it); every server that was online still reports"
+  [[ "$OPT_NO_PLANS" == 1 ]] && return 0
+  plan_pass_done "$(nn)" "" "$(canary_plan)" "$(canary_plan)" || return 1
+  holds="$(q plan-holds "name=$(nn)")" || return 1
+  if ! dry; then
+    awk -F'|' -v c="$(canary_plan)" '$2 != 0 && $1 != c {print "  NOT the canary: plan " $1 " holds " $2 " of its routes"; bad = 1} END {exit bad}' <<<"$holds" || return 1
+  fi
+  heartbeats_fresh
+}
+
+do_add_canary_open() {
+  local id email acct cid status subs out made
+  [[ "$OPT_NO_PLANS" == 1 ]] && { say "--no-plans: no canary"; return 0; }
+  id="$(st canary_plan_id "{canary-plan-id}")"
+  email="$(canary_email)"
+  [[ -n "$email" ]] || { say "no test account: set TEST_DIRECT_EMAIL (or TEST_CANARY_EMAIL) in fleet.env"; return 1; }
+  if ! dry; then canary_refuse_customers "$(canary_row)" || return 1; fi
+  panel_mint >/dev/null || return 1
+  out="$(pscript nx-canary.sh activate "$id")" || { echo "$out" | sed 's/^/  /'; panel_token_shred >/dev/null; return 1; }
+  echo "$out" | sed 's/^/  /'
+  dry || { grep -q '^activated' <<<"$out" && state_set canary_activated 1; }
+  undo "'$(canary_plan)' back as it was: on the panel host, nx-canary.sh restore $id false, only if this run activated it   (add.canary-close does this)"
+  acct="$(q canary-account "email=$email" "plan=$(canary_plan)")" || return 1
+  if dry; then
+    pscript nx-canary.sh assign "{test-account-id}" "$id"
+    panel_token_shred >/dev/null
+    return 0
+  fi
+  IFS='|' read -r cid status subs <<<"$acct"
+  [[ -n "$cid" && "$status" == ACTIVE ]] || { say "the test account is not there or not ACTIVE (status '${status:-none}')"; panel_token_shred >/dev/null; return 1; }
+  if [[ -n "$subs" ]]; then
+    say "the test account already has a subscription on '$(canary_plan)': used as it is, and left there"
+  else
+    out="$(pscript nx-canary.sh assign "$cid" "$id")" || { echo "$out" | sed 's/^/  /'; panel_token_shred >/dev/null; return 1; }
+    made="$(sed -n 's/^sub \([0-9a-f-]*\) .*/\1/p' <<<"$out")"
+    say "test subscription $made on '$(canary_plan)' ($(awk '{print $3}' <<<"$out"))"
+    state_set canary_subs "$(st canary_subs "")${made},"
+    undo "the test subscription: on the panel host, nx-canary.sh unassign $made   (add.canary-close does this)"
+  fi
+  panel_token_shred >/dev/null
+}
+ok_add_canary_open() {
+  local row acct
+  expect "the canary plan is active and NOT purchasable, no customer's subscription is on it, and the test account holds an ACTIVE subscription on it"
+  [[ "$OPT_NO_PLANS" == 1 ]] && return 0
+  row="$(canary_row)" || return 1
+  acct="$(q canary-account "email=$(canary_email)" "plan=$(canary_plan)")" || return 1
+  dry && return 0
+  canary_refuse_customers "$row" || return 1
+  [[ "$(cut -d'|' -f2 <<<"$row")" == t ]] || { say "'$(canary_plan)' is not active"; return 1; }
+  [[ -n "$(cut -d'|' -f3 <<<"$acct")" ]] || { say "the test account holds no ACTIVE subscription on '$(canary_plan)'"; return 1; }
+}
+
+do_add_canary_provision() { say "read-only: the check is the step"; }
+ok_add_canary_provision() {
+  local out routes creds nack try
+  expect "the test account holds one ACTIVE credential, issued through the canary plan, on every route of the new server the plan holds, and every command to the server is acknowledged"
+  [[ "$OPT_NO_PLANS" == 1 ]] && return 0
+  for try in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    out="$(q canary-provision "name=$(nn)" "email=$(canary_email)" "plan=$(canary_plan)")" || return 1
+    dry && return 0
+    routes="$(sed -n 's/^routes|//p' <<<"$out")" creds="$(sed -n 's/^creds|//p' <<<"$out")" nack="$(sed -n 's/^not-acked|//p' <<<"$out")"
+    [[ "${routes:-0}" -gt 0 && "$creds" == "$routes" && "$nack" == 0 ]] && break
+    sleep 10
+  done
+  say "routes of this server in '$(canary_plan)': $routes; the test account's credentials on them: $creds; commands not acknowledged: $nack (try $try)"
+  [[ "${routes:-0}" -gt 0 && "$creds" == "$routes" && "$nack" == 0 ]]
+}
+
+do_add_canary_e2e() { E2E_EMAILS="$(canary_email)" do_add_e2e_issued; }
+ok_add_canary_e2e() { ok_add_e2e_issued; }
+
+do_add_canary_other() {
+  local ports p lp have=""
+  [[ "$OPT_NO_PLANS" == 1 ]] && { say "--no-plans: nothing to prove through the canary"; return 0; }
+  ports="$(q node-ports "name=$(nn)")" || return 1
+  dry && ports=$'WIREGUARD/UDP|1\nOPENVPN/UDP|2\nIKEV2/UDP|500'
+  for p in $CANARY_OTHER_PROTOS; do
+    grep -q "^$p/" <<<"$ports" && have+="$p "
+  done
+  dry || state_set canary_other_have "$have"
+  [[ -n "$have" ]] || return 0
+  # Already proven on an earlier pass of this run: not dialled again.
+  local todo=""
+  for p in $have; do
+    if ! dry && [[ "$(st "canary_${p,,}" "")" == pass ]]; then
+      say "$p: proven by the scripted dial on an earlier pass"
+    else
+      todo+="$p "
+    fi
+  done
+  [[ -n "$todo" ]] || return 0
+  panel_mint >/dev/null || return 1
+  # shellcheck disable=SC2086
+  dial_set "$(canary_email)" "$(canary_plan)" $todo
+  for p in $todo; do
+    lp="${p,,}"
+    if dry; then
+      :
+    elif [[ "$(cat "$RUN_DIR/dial-$lp.rc" 2>/dev/null)" == 0 ]]; then
+      say "$p: PROVEN by the scripted dial"
+      state_set "canary_$lp" pass
+      log_line "PROVEN $p on $(nn) (scripted dial: exit matched, 256 KB each way, the server's own view agrees)"
+    elif [[ ",${OPT_PROVEN,,}," == *",$lp,"* ]]; then
+      say "$p: the scripted dial did not prove it; proven another way (--proven-elsewhere $lp), on the owner's record"
+      state_set "canary_$lp" elsewhere
+      log_line "PROVEN-ELSEWHERE $p on $(nn) (--proven-elsewhere; the scripted dial did not pass)"
+    else
+      state_set "canary_$lp" fail
+    fi
+    rm -f "$RUN_DIR/dial-$lp.rc"
+  done
+  panel_token_shred >/dev/null
+}
+ok_add_canary_other() {
+  local p lp r miss=""
+  expect "WireGuard, OpenVPN and IKEv2 (each that the server has) are proven through the canary plan: by a scripted dial, or by --proven-elsewhere on the owner's record. Until all are, no customer plan gets the server"
+  dry && return 0
+  [[ "$OPT_NO_PLANS" == 1 ]] && return 0
+  for p in $(st canary_other_have ""); do
+    lp="${p,,}"
+    r="$(st "canary_$lp" unproven)"
+    case "$r" in pass | elsewhere) ;; *) miss+="$lp " ;; esac
+  done
+  [[ -z "$miss" ]] && return 0
+  say "NOT PROVEN on this server: ${miss% }. The customer plans are NOT touched until they are."
+  say "The canary is open: '$(canary_plan)' is active, not purchasable, and the test account holds credentials on this"
+  say "server through it. The scripted dial's lines above say what failed: fix that and continue, and it is dialled"
+  say "again. Only if one was proven in the real app on the canary instead (exit address and the server's own view):"
+  say "    $(continue_cmd --proven-elsewhere "$(tr ' ' ',' <<<"${miss% }")")"
+  return 1
+}
+
+do_add_canary_close() {
+  local id sub out
+  [[ "$OPT_NO_PLANS" == 1 ]] && { say "--no-plans: no canary to close"; return 0; }
+  id="$(st canary_plan_id "{canary-plan-id}")"
+  panel_mint >/dev/null || return 1
+  for sub in $(st canary_subs "{test-subscription}" | tr ',' ' '); do
+    out="$(pscript nx-canary.sh unassign "$sub")" || { echo "$out" | sed 's/^/  /'; panel_token_shred >/dev/null; return 1; }
+    say "test subscription $sub: $out"
+  done
+  if dry || [[ "$(st canary_activated 0)" == 1 ]]; then
+    out="$(pscript nx-canary.sh restore "$id" false)" || { echo "$out" | sed 's/^/  /'; panel_token_shred >/dev/null; return 1; }
+    echo "$out" | sed 's/^/  /'
+  else
+    say "'$(canary_plan)' was already active before this run: its flags are left as they were"
+  fi
+  panel_token_shred >/dev/null
+  dry || state_set canary_subs ""
+}
+ok_add_canary_close() {
+  local row before
+  expect "the canary plan has exactly the isActive and isPurchasable it had before this run, and the test subscription this run made is gone (a subscription the account already had is left)"
+  [[ "$OPT_NO_PLANS" == 1 ]] && return 0
+  row="$(canary_row)" || return 1
+  dry && return 0
+  before="$(st canary_before "")"
+  [[ "$(cut -d'|' -f2,3 <<<"$row")" == "$before" ]] || { say "'$(canary_plan)' flags are $(cut -d'|' -f2,3 <<<"$row"), and were $before before this run"; return 1; }
+  [[ -z "$(st canary_subs "")" ]] || { say "a test subscription this run made is still recorded: run the step again"; return 1; }
 }
 
 # The engine refuses to start this step while any step before it has
@@ -1437,14 +1844,15 @@ do_add_plans() {
     return 0
   fi
   say "OWNER: the plan edits start now. From here customers get this server."
-  panel_dump "pre-$(nn)-plans" || return 1
+  run_dump "pre-$(nn)" || return 1
   heartbeats_baseline || return 1
-  plan_pass "$(nn)" "${OLD:-}" "$(nn)"
+  # The canary plan holds relay routes too: in a replace the old ones leave it here.
+  plan_pass "$(nn)" "${OLD:-}" "$(nn)" "$OPT_PLANS" "$(canary_plan)"
 }
 ok_add_plans() {
   expect "every plan holds the new server's routes (relay-only plans its relay routes) and, in a replace, none of the old server's; every server that was online still reports"
   [[ "$OPT_NO_PLANS" == 1 ]] && return 0
-  plan_pass_done "$(nn)" "${OLD:-}" || return 1
+  plan_pass_done "$(nn)" "${OLD:-}" "$OPT_PLANS" "$(canary_plan)" || return 1
   heartbeats_fresh "${OLD:-}"
 }
 
@@ -1478,7 +1886,9 @@ do_add_e2e_issued() {
     for p in $NODE_PROTOS; do state_set "e2e_issued_direct_$p" none; done
     for p in $RELAY_PROTOS; do state_set "e2e_issued_relay_$p" none; done
   fi
-  for email in "${TEST_DIRECT_EMAIL:-}" "${TEST_RELAY_EMAIL:-}"; do
+  # E2E_EMAILS: the canary dials the canary account's credentials only.
+  local emails="${E2E_EMAILS:-${TEST_DIRECT_EMAIL:-},${TEST_RELAY_EMAIL:-}}"
+  for email in ${emails//,/ }; do
     [[ -n "$email" ]] || continue
     rows="$(q test-creds "name=$(nn)" "email=$email")" || return 1
     dry && rows="{shape}|{route}|{credential-id}|{direct or relay}"
@@ -1503,7 +1913,7 @@ do_add_e2e_issued() {
 }
 ok_add_e2e_issued() {
   local p r bad=0 relay=1
-  expect "with credentials the panel itself issued to the test accounts after the plan edit, ALL of: REALITY, VLESS-TLS, WebSocket, Trojan and Shadowsocks straight to the new server, and (unless it has no relay routes) REALITY, VLESS-TLS, Trojan and Shadowsocks through the relay box; each exits on the new server's address. A protocol the test accounts hold no credential for is a failure here, not a pass"
+  expect "with credentials the panel itself issued to the test account through the canary plan, ALL of: REALITY, VLESS-TLS, WebSocket, Trojan and Shadowsocks straight to the new server, and (unless it has no relay routes) REALITY, VLESS-TLS, Trojan and Shadowsocks through the relay box; each exits on the new server's address. A protocol the test accounts hold no credential for is a failure here, not a pass"
   dry && return 0
   [[ "$OPT_NO_PLANS" == 1 ]] && return 0
   if [[ "$OPT_NO_RELAY" == 1 || "$(st relay_set none)" == none ]]; then relay=0; fi
@@ -1534,36 +1944,54 @@ ok_add_e2e_issued() {
 do_add_monitoring() { say "read-only. Nothing is configured per server: the inside probe reads its list from the database every half hour, and the backend finds each server's API door by itself within 15 minutes of it coming online."; }
 ok_add_monitoring() {
   local door rows
-  expect "the server's API door has been found and checked by the backend, and the scheduled inside probe has a reading for it from the relay box"
-  for _ in $(seq 1 34); do
+  expect "the server's API door found by the backend and an inside-probe reading for it, or PENDING (said, logged, on the owner's list): not waited for"
+  # Read, not waited for: the backend finds the door within 15 minutes of
+  # the server coming online and the probe runs at :07 and :37, so
+  # waiting here once held the run up to 17 minutes after the server was
+  # already in service. What is not there yet is said, logged, and goes
+  # on the owner's list.
+  for _ in 1 2 3; do
     door="$(q door "name=$(nn)")" || return 1
     rows="$(q inside-latest "name=$(nn)")" || return 1
     dry && return 0
     [[ "${door%%|*}" == t ]] && grep -q . <<<"$rows" && break
-    sleep 30
+    sleep 20
   done
-  echo "$rows" | awk -F'|' '{printf "  inside probe: %s port %s %s (%s min ago)\n", $1, $2, $3, $6}'
+  echo "$rows" | awk -F'|' 'NF > 1 {printf "  inside probe: %s port %s %s (%s min ago)\n", $1, $2, $3, $6}'
   say "API door: checked=${door%%|*}"
-  [[ "${door%%|*}" == t ]] || { say "no door after 17 minutes: look at the backend log for this server (module node-doors), then --only add.monitoring"; return 1; }
-  grep -q . <<<"$rows" || { say "no scheduled inside-probe reading yet (rounds run at :07 and :37): run --only add.monitoring after the next one"; return 1; }
+  if [[ "${door%%|*}" == t ]] && grep -q . <<<"$rows"; then
+    state_set monitoring seen
+  else
+    state_set monitoring pending
+    say "PENDING: monitoring has not read this server yet (door within 15 minutes of coming online; probe rounds at :07 and :37)."
+    say "Not waited for. Look with: fleet status $(nn) after the next round (it is on the owner's list)."
+    log_line "PENDING add.monitoring (no door or probe reading yet)"
+  fi
 }
 
+# The owner's list is printed and written to owner-todo.txt in the run
+# directory. It is not waited for: nothing in it comes before the server
+# is in service, and a run with nobody at the keyboard must end complete.
 do_add_owner_after() {
+  if dry; then owner_list; else owner_list | tee -a "$RUN_DIR/owner-todo.txt"; fi
+  dry || state_set nowait_add_owner_after 1
+}
+owner_list() {
   cat <<EOF
-  OWNER, after this server is in the plans (none of this can be done by the tool):
+  OWNER, after this server is in the plans (none of this can be done by the tool; also in owner-todo.txt):
     1. Signed endpoint lists: re-sign on the machine that holds the signing keys, adding this server's two
        mirrors, then publish. Client releases come after that, never before.
     2. Root password of the new box: change it if it was ever pasted anywhere. Key access is unaffected.
     3. Reverse DNS: generic or empty at the provider (see pre.ptr above).
-    4. WireGuard, OpenVPN and IKEv2: connect once to this server with the real app (the test VM) and check
-       the exit address and the server-side handshake. Until then those three are UNVERIFIED on this server:
-       only the arrival of datagrams was shown.
-    5. In 24 and 48 hours: fleet status $(nn). Customers must move bytes UP, not only down, and the mobile
+    4. In 24 and 48 hours: fleet status $(nn). Customers must move bytes UP, not only down, and the mobile
        and home networks stay unverified until their own attempts show success.
-    6. Website and promo material, if this is a new country.
+    5. Website and promo material, if this is a new country.
 EOF
+  if ! dry && [[ "$(st monitoring "")" == pending ]]; then
+    echo "    6. Monitoring had no reading for it yet when the run ended: fleet status $(nn) after the next inside-probe round."
+  fi
 }
-ok_add_owner_after() { expect "the owner has the list"; return 0; }
+ok_add_owner_after() { expect "the owner has the list (printed, and in owner-todo.txt in the run directory); nothing is waited for"; return 0; }
 
 do_add_cleanup() {
   local r
@@ -1583,6 +2011,7 @@ ok_add_cleanup() {
 
 register_add_steps() {
   step add.zone-inside gate "Names under the node zone are not rewritten from inside"
+  gate_flag add.zone-inside --accept-blocked-zone
   step add.second-key auto "Second operator key on the box (authorized_keys backed up, sshd untouched)"
   # The installer goes over first: the image checks and the audit of the
   # disguise site are its own, and both run before anything is built.
@@ -1591,10 +2020,11 @@ register_add_steps() {
   step add.mask-upgrades auto "Automatic upgrades masked, dpkg lock free"
   step add.image auto "Provider image: ufw, brand hostname, swap file, firmware timer. Checked, repaired only if found"
   step add.packages auto "Base packages, sshd jail that sees sshd-session"
-  step add.firewall owner "Provider firewall opened for the server's ports (only where there is one)"
+  step add.firewall owner "Provider firewall opened for the server's ports (waits only with --provider-firewall)"
   step add.dns auto "Two fresh random names in the node zone, DNS-only"
   step add.certs auto "One certificate per name, by webroot, the first RSA"
   step add.dest gate "Disguise site audited on the box and REALITY completed through it from outside, before anything is built on it"
+  gate_flag add.dest "--dest <another site>:443   (or, for a WEAK rating only: --accept-weak-dest)"
   step add.dump-node auto "Database dump before the server is created"
   step add.token auto "15-minute admin token handed to the box, never shown"
   step add.install auto "Installer run, one prompt at a time, same protocol set as its peers"
@@ -1610,6 +2040,7 @@ register_add_steps() {
   step add.verify auto "Server verified from the box, from the panel and from outside"
   step add.reboot auto "Reboot test while nobody is on it, every check repeated"
   step add.inside-probe gate "Inside probe through the server from both inside boxes"
+  gate_flag add.inside-probe --accept-held
   step add.e2e-direct auto "Test tunnels from outside: five Xray protocols, exit address must match"
   step add.e2e-inside ask "The same tunnels from the relay box, straight to the server"
   step add.temp-off auto "Temporary test users removed from the server's Xray"
@@ -1619,15 +2050,28 @@ register_add_steps() {
   step add.e2e-relay ask "Relay tunnels through the relay box, exit address must match"
 }
 
+# The canary: the server proven through "Internal test" with credentials
+# the panel issued, before any customer plan holds it.
+register_canary_steps() {
+  step add.canary-routes auto "Routes into the canary plan ('Internal test') only, direct and relay; no customer plan touched"
+  step add.canary-open auto "Canary opened for the test account: isActive on if it was off (never isPurchasable), one test subscription"
+  step add.canary-provision auto "Test account's credentials, issued through the canary plan, on every route of the server"
+  step add.canary-e2e auto "Tunnels with those credentials: five Xray protocols direct, four through the relay, exit address must match"
+  step add.canary-other gate "WireGuard, OpenVPN and IKEv2 proven through the canary (scripted proof, or --proven-elsewhere)"
+  gate_flag add.canary-other "--proven-elsewhere wireguard,openvpn,ikev2   (only once each was proven in the real app on the canary)"
+  step add.canary-close auto "Canary closed: test subscription removed, the plan's flags exactly as they were"
+}
+
 register_add_tail() {
-  step add.plans auto "Plans, one at a time, smallest first, heartbeats checked after each (database dump first)"
+  register_canary_steps
+  step add.plans auto "Customer plans, one at a time, smallest first, heartbeats checked after each"
   # Nothing reaches a customer until every proof before this has passed
-  # in this run. --from and --only do not get round that.
+  # in this run, the canary's included. --from and --only do not get
+  # round that.
   needs_prior add.plans
   step add.provision auto "Provisioning check: credentials created and acknowledged"
-  step add.e2e-issued auto "Tunnels again, with credentials the panel issued"
-  step add.monitoring auto "Monitoring picked it up: inside probe reading and the server's API door"
-  step add.owner-after owner "What only the owner can do afterwards"
+  step add.monitoring auto "Monitoring: the server's API door and an inside-probe reading (not waited for)"
+  step add.owner-after owner "What only the owner can do afterwards (listed, not waited for)"
   step add.cleanup auto "Scratch files shredded on every host"
 }
 
