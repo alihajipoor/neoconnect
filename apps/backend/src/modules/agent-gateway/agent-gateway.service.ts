@@ -3,7 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { existsSync, readFileSync } from "node:fs";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
-import { AgentCommandType, Prisma, Protocol } from "@prisma/client";
+import { AgentCommandStatus, AgentCommandType, Prisma, Protocol } from "@prisma/client";
 import { after, forEachBatch } from "../../common/batching";
 import { PrismaService } from "../../prisma/prisma.service";
 import { NodesService } from "../nodes/nodes.service";
@@ -221,7 +221,11 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     private readonly sourceAddresses: SourceAddressesService,
   ) {}
 
-  onModuleInit() {
+  async onModuleInit() {
+    // Before any stream can be accepted, so no replay reads a row this
+    // would correct. Never throws: see correctAckedButUnfinished.
+    await this.correctAckedButUnfinished();
+
     // Deliberately never throws out of here: this module starting is not
     // allowed to take down the rest of the app (panel/admin HTTP API) if
     // TLS certs aren't ready yet -- e.g. certbot failed on first install
@@ -1281,8 +1285,9 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     // key, an IKEv2 password -- while protocol_users holds it encrypted,
     // and agent_commands rows were only ever deleted with their node: any
     // database read or dump (the pre-deploy pg_dump among them) had every
-    // credential ever provisioned. Replay reads QUEUED and SENT rows only,
-    // so an acked or failed command never needs its credentials again.
+    // credential ever provisioned. Replay reads unacked QUEUED and SENT rows
+    // only, so an acked or failed command never needs its credentials
+    // again -- and markSent never moves one back to SENT.
     const stripped = withoutCredentials(command.payloadJson);
     await this.prisma.agentCommand.updateMany({
       where: { id: ack.commandId, nodeId },
@@ -1317,12 +1322,86 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * safe. */
   private async replayQueuedCommands(nodeId: string) {
     const pending = await this.prisma.agentCommand.findMany({
-      where: { nodeId, status: { in: ["QUEUED", "SENT"] } },
+      // ackedAt as well as status: a command the node has answered is
+      // never sent again, whatever its status says. Its credentials were
+      // stripped by that answer (handleCommandAck).
+      where: { nodeId, status: { in: UNFINISHED }, ackedAt: null },
       orderBy: { createdAt: "asc" },
     });
     for (const command of pending) {
-      this.writeCommand(nodeId, command.id, command.type, command.payloadJson as object);
-      await this.prisma.agentCommand.update({ where: { id: command.id }, data: { status: "SENT", sentAt: new Date() } });
+      if (lostItsCredentials(command.type, command.payloadJson)) {
+        // A user command that cannot be carried out as stored. Sending it
+        // would be a CREATE_USER for a credential the agent is not given:
+        // refused by the Xray, WireGuard and IKEv2 provisioners, but
+        // carried out by OpenVPN's, which needs only the name -- and would
+        // let back in a client revoked since. The live credential is
+        // re-asserted straight after this replay (syncAfterHello).
+        this.logger.warn(`Not replaying ${command.type} ${command.id} to node ${nodeId}: its payload no longer carries the credential`);
+        await this.prisma.agentCommand.updateMany({
+          where: { id: command.id, nodeId, ackedAt: null },
+          data: { status: "FAILED", ackedAt: new Date(), error: "not replayed: the stored payload no longer carries the credential" },
+        });
+        continue;
+      }
+      if (this.writeCommand(nodeId, command.id, command.type, command.payloadJson as object)) {
+        await this.markSent(command.id);
+      }
+    }
+  }
+
+  /** Records that a command went onto its node's stream.
+   *
+   * Conditional, and only ever forwards: the write comes first, so the
+   * node can carry the command out and its ack be stored before this
+   * runs -- an unconditional update then put the command back to SENT
+   * with its ack and its stripped payload, and the next reconnect sent it
+   * again without its credential. Found 2026-11-14: 3 of 7,115 commands
+   * after a deploy's reconnect burst. Never QUEUED -> SENT before the
+   * write either: a write that does not happen would then read as sent. */
+  private async markSent(commandId: string) {
+    await this.prisma.agentCommand.updateMany({
+      where: { id: commandId, status: { in: UNFINISHED }, ackedAt: null },
+      data: { status: "SENT", sentAt: new Date() },
+    });
+  }
+
+  /** Puts right, once at startup, commands their node acked that are
+   * still recorded as QUEUED or SENT -- what markSent's old unconditional
+   * update left behind. The ack's own outcome survived in `error`, which
+   * that update did not touch: null for success, the node's text for a
+   * failure.
+   *
+   * Only rows with ackedAt set, so never the commands still waiting for
+   * a retired node; and only on nodes that are not retired. Bounded and
+   * idempotent: a corrected row no longer matches. Never throws -- the
+   * gateway must start regardless, and replay skips acked rows anyway. */
+  private async correctAckedButUnfinished(): Promise<void> {
+    try {
+      const rows = await this.prisma.agentCommand.findMany({
+        where: { ackedAt: { not: null }, status: { in: UNFINISHED }, node: { status: { not: "DISABLED" } } },
+        select: { id: true, error: true },
+        orderBy: { ackedAt: "asc" },
+        take: ACKED_CORRECTION_LIMIT,
+      });
+      if (rows.length === 0) return;
+      const correct = async (ids: string[], status: "ACKED" | "FAILED") =>
+        ids.length === 0
+          ? 0
+          : (
+              await this.prisma.agentCommand.updateMany({
+                where: { id: { in: ids }, ackedAt: { not: null }, status: { in: UNFINISHED } },
+                data: { status },
+              })
+            ).count;
+      const acked = await correct(rows.filter((r) => r.error === null).map((r) => r.id), "ACKED");
+      const failed = await correct(rows.filter((r) => r.error !== null).map((r) => r.id), "FAILED");
+      this.logger.log(
+        `Corrected ${acked + failed} command(s) their node had acked but still recorded as unfinished ` +
+          `(${acked} to ACKED, ${failed} to FAILED)` +
+          (rows.length === ACKED_CORRECTION_LIMIT ? `; there may be more, corrected at the next start` : ""),
+      );
+    } catch (err) {
+      this.logger.error(`Could not correct acked commands recorded as unfinished: ${(err as Error).message}`);
     }
   }
 
@@ -1357,9 +1436,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     });
 
     const sent = this.writeCommand(nodeId, command.id, type, payload);
-    if (sent) {
-      await this.prisma.agentCommand.update({ where: { id: command.id }, data: { status: "SENT", sentAt: new Date() } });
-    }
+    if (sent) await this.markSent(command.id);
     return command;
   }
 
@@ -1511,6 +1588,24 @@ function reassertPayload(user: ReassertUser) {
       ? rateLimitFor(user.subscription?.plan, user.protocol as Protocol)
       : {}),
   };
+}
+
+/** Statuses a command can still be sent from. */
+const UNFINISHED: AgentCommandStatus[] = ["QUEUED", "SENT"];
+
+/** How many stuck rows one startup corrects (correctAckedButUnfinished). */
+const ACKED_CORRECTION_LIMIT = 1000;
+
+/** User commands the agent cannot carry out without the credential. */
+const NEEDS_CREDENTIALS: ReadonlySet<AgentCommandType> = new Set<AgentCommandType>(["CREATE_USER", "ENABLE_USER", "UPDATE_USER"]);
+
+/** Whether a stored command is one of those and its payload no longer
+ * carries a credential -- stripped by an ack (withoutCredentials). Every
+ * such command is built with one. */
+export function lostItsCredentials(type: AgentCommandType, payload: unknown): boolean {
+  if (!NEEDS_CREDENTIALS.has(type)) return false;
+  const credentials = (payload as { credentials?: unknown } | null)?.credentials;
+  return !credentials || typeof credentials !== "object" || Object.keys(credentials).length === 0;
 }
 
 /** A stored payload with its `credentials` removed, or null when it had

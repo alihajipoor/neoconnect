@@ -33,7 +33,7 @@ function build(status: string, opts: { connected?: boolean } = {}) {
         rows.push(row);
         return row;
       }),
-      update: jest.fn(async () => ({})),
+      updateMany: jest.fn(async () => ({ count: 1 })),
       findFirst: jest.fn(
         async (args: {
           where: { nodeId: string; status: { in: string[] }; AND: { payloadJson: { path: string[]; equals: string } }[] };
