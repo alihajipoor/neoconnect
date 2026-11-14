@@ -6,6 +6,7 @@ import type { Customer } from "@/lib/types";
 import { deleteCustomer } from "./actions";
 import { CustomerFormDialog } from "./customer-form-dialog";
 import { DeleteConfirm } from "@/components/dashboard/delete-confirm";
+import { PageHeader } from "@/components/dashboard/page-header";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -19,19 +20,19 @@ import {
 export function CustomersTable({ customers }: { customers: Customer[] }) {
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">Customers</h1>
-          <p className="text-sm text-muted-foreground">Manage the people buying subscriptions.</p>
-        </div>
-        <CustomerFormDialog
-          trigger={
-            <Button size="sm">
-              <Plus /> New Customer
-            </Button>
-          }
-        />
-      </div>
+      <PageHeader
+        title="Customers"
+        description="Manage the people buying subscriptions."
+        actions={
+          <CustomerFormDialog
+            trigger={
+              <Button size="sm">
+                <Plus /> New Customer
+              </Button>
+            }
+          />
+        }
+      />
       <div className="rounded-lg border border-white/8 bg-card/40">
         <Table>
           <TableHeader>

@@ -104,15 +104,15 @@ export function ResellerWorkspace({
   return (
     <div className="flex flex-col gap-6">
       {/* What is left, per plan. First thing a reseller wants to know. */}
-      <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
+      <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))] max-sm:grid-cols-2">
         {balances.map((b) => (
           <Card key={b.plan.id} className="p-4">
-            <p className="text-sm text-muted-foreground">{b.plan.name}</p>
+            <p className="text-sm text-muted-foreground break-words">{b.plan.name}</p>
             <p
               className={
                 b.balance > 0
-                  ? "mt-1 text-3xl font-bold tabular-nums"
-                  : "mt-1 text-3xl font-bold tabular-nums text-muted-foreground"
+                  ? "mt-1 text-3xl font-bold tabular-nums max-sm:text-2xl"
+                  : "mt-1 text-3xl font-bold tabular-nums text-muted-foreground max-sm:text-2xl"
               }
             >
               {b.balance}
@@ -139,7 +139,7 @@ export function ResellerWorkspace({
           </p>
         ) : null}
 
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="flex flex-col gap-1.5">
             <Label>Plan</Label>
             <Select value={planId} onValueChange={setPlanId}>
@@ -230,7 +230,7 @@ export function ResellerWorkspace({
                   <TableCell>
                     <button
                       onClick={() => copy(v.code)}
-                      className="flex items-center gap-1.5 font-mono text-sm hover:text-primary"
+                      className="flex items-center gap-1.5 font-mono text-sm hover:text-primary max-lg:min-h-10"
                       title="Copy"
                     >
                       {v.code}

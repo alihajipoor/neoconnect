@@ -125,7 +125,7 @@ export function RoutePicker({
                   type="button"
                   onClick={() => toggleOpen(group.key)}
                   aria-expanded={expanded}
-                  className="flex flex-1 items-center gap-1 text-left text-sm font-medium"
+                  className="flex flex-1 items-center gap-1 text-left text-sm font-medium max-lg:min-h-9"
                 >
                   {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
                   {group.label}

@@ -6,6 +6,7 @@ import type { SubscriptionPlan, VoucherListRow } from "@/lib/types";
 import { deleteVoucher } from "./actions";
 import { VoucherFormDialog } from "./voucher-form-dialog";
 import { DeleteConfirm } from "@/components/dashboard/delete-confirm";
+import { PageHeader } from "@/components/dashboard/page-header";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -32,22 +33,20 @@ export function VouchersTable({
 }) {
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">Vouchers</h1>
-          <p className="text-sm text-muted-foreground">
-            Codes that grant a plan without payment.
-          </p>
-        </div>
-        <VoucherFormDialog
-          plans={plans}
-          trigger={
-            <Button size="sm" disabled={plans.length === 0}>
-              <Plus /> New Voucher
-            </Button>
-          }
-        />
-      </div>
+      <PageHeader
+        title="Vouchers"
+        description="Codes that grant a plan without payment."
+        actions={
+          <VoucherFormDialog
+            plans={plans}
+            trigger={
+              <Button size="sm" disabled={plans.length === 0}>
+                <Plus /> New Voucher
+              </Button>
+            }
+          />
+        }
+      />
 
       {plans.length === 0 && (
         <p className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
@@ -84,7 +83,7 @@ export function VouchersTable({
                   <button
                     type="button"
                     onClick={() => copy(voucher.code)}
-                    className="group inline-flex items-center gap-1.5 font-mono text-sm"
+                    className="group inline-flex items-center gap-1.5 font-mono text-sm max-lg:min-h-10"
                     title="Copy code"
                   >
                     {voucher.code}

@@ -66,7 +66,7 @@ export function ResellersTable({
         return (
           <Card key={reseller.id} className="p-5">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <h2 className="font-semibold">{reseller.email}</h2>
+              <h2 className="min-w-0 font-semibold [overflow-wrap:anywhere]">{reseller.email}</h2>
               <span className="text-xs text-muted-foreground">
                 {reseller.vouchersIssued} {reseller.vouchersIssued === 1 ? "code" : "codes"} issued
               </span>

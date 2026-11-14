@@ -81,22 +81,22 @@ export default async function CustomerDetailPage({
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
+        <div className="flex min-w-0 items-start gap-3">
           <Link
             href="/customers"
-            className="mt-0.5 flex size-8 items-center justify-center rounded-lg border border-white/10 text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
+            className="mt-0.5 flex size-8 shrink-0 items-center max-lg:size-10 justify-center rounded-lg border border-white/10 text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
             aria-label="Back to customers"
           >
             <ArrowLeft className="size-4" />
           </Link>
-          <div>
-            <h1 className="text-xl font-semibold">{customer.email}</h1>
+          <div className="min-w-0">
+            <h1 className="text-xl font-semibold [overflow-wrap:anywhere]">{customer.email}</h1>
             <p className="text-sm text-muted-foreground">
               Joined {new Date(customer.createdAt).toLocaleDateString()}
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Badge variant={customer.status === "ACTIVE" ? "default" : "outline"}>
             {customer.status}
           </Badge>
