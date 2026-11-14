@@ -109,7 +109,8 @@ function fakePrisma() {
       findMany: async ({ where, select }: any) =>
         devices
           .filter((d) => matches(d, where))
-          .sort((a, b) => time(b.createdAt) - time(a.createdAt) || b.id.localeCompare(a.id))
+          // Numeric tie-break, so dev-10 sorts after dev-9 as it was made.
+          .sort((a, b) => time(b.createdAt) - time(a.createdAt) || b.id.localeCompare(a.id, undefined, { numeric: true }))
           .map((d) => pick(d, select)),
       updateMany: async ({ where, data }: any) => {
         const hit = devices.filter((d) => matches(d, where));
@@ -122,7 +123,18 @@ function fakePrisma() {
         return { count: before - devices.length };
       },
     },
-    $transaction: async (fn: (tx: any) => Promise<unknown>) => fn(prisma),
+    // Rolls back like Postgres: a throw restores every row as it was.
+    $transaction: async (fn: (tx: any) => Promise<unknown>) => {
+      const savedAdmins = admins.map((a) => ({ ...a }));
+      const savedDevices = devices.map((d) => ({ ...d }));
+      try {
+        return await fn(prisma);
+      } catch (err) {
+        admins.forEach((a, i) => Object.assign(a, savedAdmins[i]));
+        devices = savedDevices;
+        throw err;
+      }
+    },
   };
   return prisma;
 }
@@ -234,6 +246,35 @@ describe("trusted devices", () => {
     expect(prisma.devices[0].tokenHash).toBe(sha(token));
   });
 
+  it("trusts nothing when the box is ticked but the code is wrong", async () => {
+    const a = addAdmin("a");
+    const first = await auth.login(a.email, PASSWORD);
+    if (!("mfaRequired" in first)) throw new Error("expected the code step");
+    const right = authenticator.generate(a.mfaSecret!);
+    const wrong = String((Number(right) + 500_000) % 1_000_000).padStart(6, "0");
+    await expect(auth.verifyMfaAndLogin(first.mfaToken, wrong, { trust: true, userAgent: UA })).rejects.toThrow();
+    expect(prisma.devices).toHaveLength(0);
+    expect(prisma.audit.some((e: any) => String(e.path).startsWith("trusted-device/trusted"))).toBe(false);
+  });
+
+  it("lets only one of two concurrent uses of one token through", async () => {
+    const a = addAdmin("a");
+    const token = await trustedToken(a);
+    const results = await Promise.all([trusted.redeem(a, token), trusted.redeem(a, token)]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(prisma.devices).toHaveLength(1);
+    expect(prisma.devices[0].tokenHash).toBe(sha(results.find(Boolean)!.token));
+  });
+
+  it("asks for the code, not a failed sign-in, when the trusted lookup hits a database error", async () => {
+    const a = addAdmin("a");
+    const token = await trustedToken(a);
+    jest.spyOn(prisma.adminTrustedDevice, "findUnique").mockRejectedValueOnce(new Error("connection refused"));
+    const r = await auth.login(a.email, PASSWORD, token);
+    expect("mfaRequired" in r).toBe(true);
+    expect(logged.join("\n")).not.toContain(token);
+  });
+
   it("asks for the code for no, unknown, expired, removed and another account's token", async () => {
     const a = addAdmin("a");
     const b = addAdmin("b");
@@ -314,6 +355,13 @@ describe("trusted devices", () => {
       await admins.update(a.id, { password: "a-new-password" });
       expect(mine()).toBe(0);
       expect(prisma.devices).toHaveLength(1);
+    });
+    it("or the password does not change at all, if its devices cannot be removed", async () => {
+      jest.spyOn(prisma.adminTrustedDevice, "deleteMany").mockRejectedValueOnce(new Error("connection refused"));
+      await expect(admins.update(a.id, { password: "a-new-password" })).rejects.toThrow("connection refused");
+      expect(a.passwordHash).toBe(hash);
+      expect(a.tokenVersion).toBe(0);
+      expect(mine()).toBe(2);
     });
     it("when the role changes", async () => {
       await admins.update(a.id, { role: "BILLING" as any });

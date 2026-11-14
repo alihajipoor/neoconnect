@@ -56,11 +56,15 @@ export class AdminsService {
     if (dto.role) {
       data.role = dto.role;
     }
-    const updated = await this.prisma.adminUser.update({ where: { id }, data, select: SAFE_SELECT });
     // A browser trusted to skip the code was trusted for this password and
-    // this role. Either changing ends that trust everywhere.
+    // this role. Either changing ends that trust everywhere, in the same
+    // transaction: a password must never change while its devices survive.
     const reason = dto.password ? "password changed" : dto.role && dto.role !== before.role ? "role changed" : null;
-    if (reason) await this.trustedDevices.revokeAll(before, reason);
+    const { updated, revoked } = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.adminUser.update({ where: { id }, data, select: SAFE_SELECT });
+      return { updated: row, revoked: reason ? await this.trustedDevices.deleteAll(tx, id) : 0 };
+    });
+    if (reason) await this.trustedDevices.recordRevoked(before, reason, revoked);
     return updated;
   }
 

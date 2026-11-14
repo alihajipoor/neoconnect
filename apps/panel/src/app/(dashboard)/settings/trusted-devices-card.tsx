@@ -38,7 +38,9 @@ export function TrustedDevicesCard({ devices, currentId }: { devices: TrustedDev
         <CardTitle className="text-lg">Trusted devices</CardTitle>
         <CardDescription>
           Browsers that skip the two-factor code for 30 days after you ticked &quot;Trust this device&quot;. They
-          still need your password. Changing your password or two-factor removes them all.
+          still need your password. Changing your password or two-factor removes them all. Removing a device makes
+          it ask for the code again next time; it does not sign out a session already open there. To end those
+          too, sign out: that ends your sessions on every device.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">

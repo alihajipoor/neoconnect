@@ -1,5 +1,5 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
-import type { AdminRole } from "@prisma/client";
+import { Injectable, Logger, NotFoundException } from "@nestjs/common";
+import type { AdminRole, Prisma } from "@prisma/client";
 import { createHash, randomBytes } from "node:crypto";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AdminAuditService } from "../admin-audit/admin-audit.service";
@@ -92,6 +92,8 @@ export function deviceLabel(userAgent: string | undefined): string {
  */
 @Injectable()
 export class TrustedDevicesService {
+  private readonly logger = new Logger(TrustedDevicesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AdminAuditService,
@@ -134,8 +136,22 @@ export class TrustedDevicesService {
    * else. Null is all the caller learns -- missing, unknown, expired,
    * replaced, removed and another account's look the same, and each costs
    * the same one lookup (a missing token is looked up as a random one).
+   *
+   * A database failure here is null too. The password was already right,
+   * so it must not surface as a failed sign-in (LoginGuard would count it
+   * as a wrong password); it just asks for the code.
    */
   async redeem(admin: TrustSubject, token: string | undefined, ip?: string, now = new Date()): Promise<TrustedDeviceGrant | null> {
+    try {
+      return await this.spend(admin, token, ip, now);
+    } catch (err) {
+      // The error only, never the token.
+      this.logger.warn(`Trusted device lookup failed, asking for the code: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
+  private async spend(admin: TrustSubject, token: string | undefined, ip: string | undefined, now: Date): Promise<TrustedDeviceGrant | null> {
     const hash = sha256(token || newToken());
     const row = await this.prisma.adminTrustedDevice.findUnique({
       where: { tokenHash: hash },
@@ -170,9 +186,21 @@ export class TrustedDevicesService {
 
   /** Every trusted browser of the account. */
   async revokeAll(admin: TrustSubject, reason: RevokeReason, ip?: string): Promise<number> {
-    const { count } = await this.prisma.adminTrustedDevice.deleteMany({ where: { adminId: admin.id } });
-    if (count > 0) await this.event(admin, "removed", ip, `${reason} (${count})`);
+    const count = await this.deleteAll(this.prisma, admin.id);
+    await this.recordRevoked(admin, reason, count, ip);
     return count;
+  }
+
+  /** The delete alone, inside the caller's transaction, so it commits or
+   * rolls back with the change that ended the trust. Follow it with
+   * recordRevoked once that transaction has committed. */
+  async deleteAll(tx: Prisma.TransactionClient, adminId: string): Promise<number> {
+    const { count } = await tx.adminTrustedDevice.deleteMany({ where: { adminId } });
+    return count;
+  }
+
+  async recordRevoked(admin: TrustSubject, reason: RevokeReason, count: number, ip?: string): Promise<void> {
+    if (count > 0) await this.event(admin, "removed", ip, `${reason} (${count})`);
   }
 
   /** AdminAuditService.record never throws. */
