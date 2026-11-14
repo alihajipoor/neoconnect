@@ -259,6 +259,87 @@ describe("AgentGatewayService stream failures over real gRPC", () => {
     fresh.stream.cancel();
   });
 
+  it("never lets an old stream's slow Hello overwrite the node's newer, registered stream", async () => {
+    // The first Hello's status write is held: the old call sits on a slow
+    // database (or a half-open link) while the agent redials.
+    let releaseOld!: () => void;
+    nodesService.setStatus.mockImplementationOnce(() => new Promise<void>((r) => (releaseOld = r)));
+    const old = agent();
+    old.stream.write(hello());
+    await until(() => nodesService.setStatus.mock.calls.length === 1, 2000, "old Hello at its status write");
+    const fresh = agent();
+    fresh.stream.write(hello());
+    await until(() => registry.isConnected("node-1"), 2000, "fresh stream registered");
+    const freshCall = registry.get("node-1");
+
+    releaseOld();
+
+    expect((await within(old.status, 3000, "status on the old stream")).code).toBe(grpc.status.UNAVAILABLE);
+    expect(registry.get("node-1")).toBe(freshCall);
+    // The talking stream still gets the control plane's writes.
+    (service as unknown as { sendServerHeartbeats(): void }).sendServerHeartbeats();
+    await until(() => fresh.received.some((m) => m.serverHeartbeat), 2000, "server heartbeat on the fresh stream");
+    fresh.stream.cancel();
+  });
+
+  it("keeps the in-flight re-asserts of a node's newer stream when an old one closes", async () => {
+    const reasserts = (service as unknown as { unackedReasserts: Map<string, { nodeId: string; at: number }> }).unackedReasserts;
+    const old = agent();
+    old.stream.write(hello());
+    await until(() => registry.isConnected("node-1"), 2000, "registered");
+    const fresh = agent();
+    fresh.stream.write(hello());
+    await until(() => nodesService.setStatus.mock.calls.length === 2, 2000, "second Hello");
+    await until(() => (service as unknown as { liveCalls: Map<unknown, { nodeId: string | null }> }).liveCalls.size === 2, 2000, "two calls");
+    reasserts.set("cmd-on-fresh", { nodeId: "node-1", at: Date.now() });
+
+    old.stream.cancel();
+    await until(() => (service as unknown as { liveCalls: Map<unknown, unknown> }).liveCalls.size === 1, 2000, "old call gone");
+
+    expect(reasserts.has("cmd-on-fresh")).toBe(true);
+    // With no newer stream, a close still clears the node's entries.
+    fresh.stream.cancel();
+    await until(() => !registry.isConnected("node-1"), 2000, "unregistered");
+    expect(reasserts.has("cmd-on-fresh")).toBe(false);
+  });
+
+  it("does not end an anonymous call after 30 s while its Hello is still being checked", async () => {
+    const liveCalls = () =>
+      [...(service as unknown as { liveCalls: Map<unknown, { openedAt: number }> }).liveCalls.values()];
+    const endSilent = () => (service as unknown as { endSilentCalls(n: number): void }).endSilentCalls(Date.now());
+    let releaseCheck!: (v: unknown) => void;
+    prisma.node.findUnique.mockImplementationOnce(() => new Promise((r) => (releaseCheck = r)));
+    const checking = agent();
+    checking.stream.write(hello());
+    await until(() => prisma.node.findUnique.mock.calls.length === 1, 2000, "Hello being checked");
+    expect(liveCalls()).toHaveLength(1);
+
+    for (const live of liveCalls()) live.openedAt = Date.now() - 31_000;
+    endSilent();
+
+    let ended = false;
+    void checking.status.then(() => (ended = true));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(ended).toBe(false);
+    releaseCheck({ id: "node-1", name: "test-node", agentPubKey: rawPublic.toString("base64") });
+    await until(() => registry.isConnected("node-1"), 2000, "registered once checked");
+    checking.stream.cancel();
+  });
+
+  it("ends an anonymous call that has sent nothing for 30 s", async () => {
+    const a = agent();
+    // A call opens on the first write; an empty-payload message is the
+    // nearest thing to an agent that never says who it is.
+    a.stream.write({});
+    const liveCalls = (service as unknown as { liveCalls: Map<unknown, { openedAt: number }> }).liveCalls;
+    await until(() => liveCalls.size === 1, 2000, "call accepted");
+    for (const live of liveCalls.values()) live.openedAt = Date.now() - 31_000;
+
+    (service as unknown as { endSilentCalls(n: number): void }).endSilentCalls(Date.now());
+
+    expect((await within(a.status, 3000, "status on the anonymous stream")).code).toBe(grpc.status.UNAUTHENTICATED);
+  });
+
   it("takes a cancelled stream out of the registry", async () => {
     const a = agent();
     a.stream.write(hello());

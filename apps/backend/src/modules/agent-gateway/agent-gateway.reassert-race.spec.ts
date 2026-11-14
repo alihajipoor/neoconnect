@@ -67,14 +67,19 @@ function build(users: string[]) {
       update: jest.fn(async () => ({})),
     },
   };
+  const newCall = () => ({
+    write: (msg: { command: { type: string; payloadJson: Buffer } }) => {
+      const payload = JSON.parse(msg.command.payloadJson.toString("utf8")) as { externalUserId: string };
+      wire.push({ type: msg.command.type, externalUserId: payload.externalUserId });
+    },
+  });
+  // One registered call at a time, as AgentConnectionRegistry keeps it.
+  let current: ReturnType<typeof newCall> | undefined = newCall();
   const registry = {
-    delete: () => undefined,
-    get: () => ({
-      write: (msg: { command: { type: string; payloadJson: Buffer } }) => {
-        const payload = JSON.parse(msg.command.payloadJson.toString("utf8")) as { externalUserId: string };
-        wire.push({ type: msg.command.type, externalUserId: payload.externalUserId });
-      },
-    }),
+    delete: (_id: string, call: unknown) => {
+      if (call === current) current = undefined;
+    },
+    get: () => current,
   };
   const service = new AgentGatewayService(
     prisma as never,
@@ -103,6 +108,9 @@ function build(users: string[]) {
     wire,
     signOut,
     reassert,
+    /** The registered call, and a redial that replaces it. */
+    registered: () => current,
+    reconnect: () => (current = newCall()),
     whileStoring: (run: () => Promise<void>) => {
       duringNextStore = run;
     },
@@ -208,13 +216,27 @@ describe("AgentGatewayService re-assert against a concurrent switch-off", () => 
   });
 
   it("forgets what was in flight on a stream that closed", async () => {
-    const { service, wire, reassert } = build(["a"]);
+    const { service, wire, reassert, registered, reconnect } = build(["a"]);
 
     await reassert(false);
-    (service as unknown as { handleStreamClosed(n: string, c: unknown): void }).handleStreamClosed("node-1", {});
+    (service as unknown as { handleStreamClosed(n: string, c: unknown): void }).handleStreamClosed("node-1", registered());
+    reconnect();
     await reassert(false);
 
     expect(forUser(wire, "a")).toEqual(["CREATE_USER", "CREATE_USER"]);
+  });
+
+  // The branch ends a node's old silent stream while a newer one is live.
+  // The in-flight entries are per node, so that close must not count the
+  // newer stream's re-asserts as lost and send them a second time.
+  it("keeps what is in flight on a node's newer stream when an older stream closes", async () => {
+    const { service, wire, reassert } = build(["a"]);
+
+    await reassert(false);
+    (service as unknown as { handleStreamClosed(n: string, c: unknown): void }).handleStreamClosed("node-1", { old: true });
+    await reassert(false);
+
+    expect(forUser(wire, "a")).toEqual(["CREATE_USER"]);
   });
 
   // A hold lifted because its device was let in: the hold's own

@@ -33,8 +33,15 @@ class HelloRejected extends Error {}
 interface LiveCall {
   nodeId: string | null;
   openedAt: number;
+  /** Accept order, strictly increasing: which of two calls for the same
+   * node is the newer, where two openedAt values can be equal. */
+  seq: number;
   /** When anything last arrived from the agent on this call. */
   lastMessageAt: number;
+  /** A Hello has arrived and is still being checked. Such a call is not
+   * "anonymous" for the sweep: its agent has said who it is and the
+   * check is waiting on the database. */
+  helloInFlight: boolean;
 }
 
 /** How often the backend writes a ServerHeartbeat on every connected
@@ -194,6 +201,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
 
   /** Every open call, from accept until grpc-js reports it closed. */
   private readonly liveCalls = new Map<AgentDuplexCall, LiveCall>();
+  private nextCallSeq = 0;
   /** When each node's calls were last torn down by the sweep. */
   private readonly lastTeardown = new Map<string, number>();
   /** Per node and message kind: when a failure was last logged, and how
@@ -449,7 +457,10 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     const silentNodes = new Set<string>();
     for (const [call, live] of this.liveCalls) {
       if (live.nodeId === null) {
-        if (now - live.openedAt > UNAUTHENTICATED_LIMIT_MS) {
+        // A Hello still being checked is waiting on the database (up to
+        // the pool's wait), not missing; ending it would tell a valid
+        // agent "no valid Hello". The check itself ends in a status.
+        if (!live.helloInFlight && now - live.openedAt > UNAUTHENTICATED_LIMIT_MS) {
           endAgentCall(call, grpc.status.UNAUTHENTICATED, `no valid Hello within ${UNAUTHENTICATED_LIMIT_MS}ms`);
         }
       } else if (now - live.lastMessageAt > HEARTBEAT_STALE_MS) {
@@ -546,7 +557,13 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   private handleStreamClosed(nodeId: string, call: AgentDuplexCall) {
     this.registry.delete(nodeId, call);
     // What was in flight on that stream is gone with it; the reconnect's
-    // own re-assert sends everything again.
+    // own re-assert sends everything again. Unless a newer stream is
+    // already the node's: the entries are per node, not per call, so some
+    // may be that stream's in-flight writes, and clearing them would have
+    // the next cycle send them again. Any that were this call's expire
+    // through REASSERT_ACK_PATIENCE_MS instead.
+    const current = this.registry.get(nodeId);
+    if (current && current !== call) return;
     for (const [id, sent] of this.unackedReasserts) if (sent.nodeId === nodeId) this.unackedReasserts.delete(id);
   }
 
@@ -577,12 +594,18 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   private handleAgentSync(call: AgentDuplexCall) {
     let nodeId: string | null = null;
     // Set from the moment a Hello arrives until its signature has been
-    // checked. A message that lands in that short window comes from an
-    // agent that has said who it is and is waiting for the answer, so it
-    // is dropped rather than taken as a reason to close the stream.
-    let helloInFlight = false;
+    // checked (live.helloInFlight). A message that lands in that short
+    // window comes from an agent that has said who it is and is waiting
+    // for the answer, so it is dropped rather than taken as a reason to
+    // close the stream.
     let closed = false;
-    const live: LiveCall = { nodeId: null, openedAt: Date.now(), lastMessageAt: Date.now() };
+    const live: LiveCall = {
+      nodeId: null,
+      openedAt: Date.now(),
+      seq: this.nextCallSeq++,
+      lastMessageAt: Date.now(),
+      helloInFlight: false,
+    };
     this.liveCalls.set(call, live);
 
     /** Ends the stream with a status the agent sees (see endAgentCall --
@@ -596,7 +619,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     /** No node behind this stream (yet). Drops the message while a Hello
      * is being checked, and otherwise closes the stream. */
     const refuseUnauthenticated = (what: string) => {
-      if (!helloInFlight) giveUp(grpc.status.UNAUTHENTICATED, `${what} received before a valid Hello`);
+      if (!live.helloInFlight) giveUp(grpc.status.UNAUTHENTICATED, `${what} received before a valid Hello`);
     };
 
     call.on("data", (msg: AgentMessageEnvelope) => {
@@ -604,12 +627,12 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       void (async () => {
         try {
           if (msg.payload === "hello") {
-            helloInFlight = true;
+            live.helloInFlight = true;
             let node: { id: string; name: string };
             try {
               node = await this.authenticateHello(msg.hello!);
             } finally {
-              helloInFlight = false;
+              live.helloInFlight = false;
             }
             live.nodeId = node.id;
             // The node is known from here, before anything slow. It used to
@@ -625,6 +648,18 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
             // Closed while the status was being written: nothing to
             // register, and handleStreamClosed has already run.
             if (closed) return;
+            // A newer stream for this node registered while this Hello was
+            // slow: the agent has redialled and this call is the stale one,
+            // most likely on a half-open connection. Registering it would
+            // overwrite the talking stream, which then keeps heartbeating
+            // with no commands and no ServerHeartbeat -- and agents up to
+            // v0.2.12 never recover from that. Step aside instead.
+            const current = this.registry.get(node.id);
+            const currentLive = current && current !== call ? this.liveCalls.get(current) : undefined;
+            if (currentLive && currentLive.seq > live.seq) {
+              giveUp(grpc.status.UNAVAILABLE, "superseded by a newer control stream for this node");
+              return;
+            }
             this.registry.set(node.id, call);
             this.logger.log(`Node ${node.id} (${node.name}) authenticated and connected`);
             await this.syncAfterHello(node.id);
