@@ -11,6 +11,17 @@ const TAG_PREFIX = "desktop-v";
  * trees and there is no reason for a Windows fix to bump Android. */
 const ANDROID_TAG_PREFIX = "android-v";
 
+/** Linux too: a desktop-v release is a Windows build, and a Linux build
+ * must never be offered to Windows nor the reverse, so neither selector
+ * may look at the other's tags. */
+const LINUX_TAG_PREFIX = "linux-v";
+
+/** The two Linux packages, named by the release workflow. Anchored so a
+ * stray .deb attached to some other release, or a debug build with a
+ * suffix, can never be taken for one. */
+const LINUX_DEB_PATTERN = /^Neoxify_(\d+\.\d+\.\d+)_amd64\.deb$/;
+const LINUX_RPM_PATTERN = /^Neoxify-(\d+\.\d+\.\d+)-1\.x86_64\.rpm$/;
+
 /** Releases live in their own public repository, separate from the
  * source tree.
  *
@@ -119,12 +130,27 @@ interface AndroidBuild {
   version: string;
 }
 
+/** Linux has no in-app updater in its first version, so the answer is
+ * only the newer version, and the notice links to the package. */
+export type LinuxUpdateCheck = { status: "update"; version: string } | { status: "current" } | { status: "unknown" };
+
+export type LinuxPackage = "deb" | "rpm";
+
+interface LinuxBuild {
+  tag: string;
+  version: string;
+  deb: string;
+  rpm: string;
+  publishedAt: string;
+}
+
 @Injectable()
 export class UpdatesService {
   private readonly logger = new Logger(UpdatesService.name);
 
   private readonly windowsCache = new ReleaseCache<NewestBuild>("Windows", pickNewestWindowsBuild);
   private readonly androidCache = new ReleaseCache<AndroidBuild>("Android", pickNewestAndroidBuild);
+  private readonly linuxCache = new ReleaseCache<LinuxBuild>("Linux", pickNewestLinuxBuild);
 
   constructor(private readonly config: ConfigService) {}
 
@@ -179,6 +205,26 @@ export class UpdatesService {
     return { status: "update", version: newest.version };
   }
 
+  /** Whether a newer Linux build than `currentVersion` is published.
+   * Same three answers as Android, and for the same reason: a feed that
+   * could not be read is `unknown`, never `current`. */
+  async checkLinux(currentVersion: string): Promise<LinuxUpdateCheck> {
+    const newest = await this.newestLinuxBuild();
+    if (!newest) return { status: "unknown" };
+    if (compareVersions(newest.version, currentVersion) <= 0) return { status: "current" };
+    return { status: "update", version: newest.version };
+  }
+
+  /** The newest Linux package of the given kind: one stable link per
+   * package format, in the manner of androidApkUrl(). */
+  async linuxPackageUrl(kind: LinuxPackage): Promise<string> {
+    const newest = await this.newestLinuxBuild();
+    if (!newest) {
+      throw new NotFoundException("No Linux release is available to download yet");
+    }
+    return releaseAssetUrl(newest.tag, newest[kind]);
+  }
+
   /** The branded installer a human downloads, from the newest release.
    *
    * Exists so the website can link to one URL that never changes.
@@ -230,9 +276,10 @@ export class UpdatesService {
    * being shown. The caller decides what to say about a missing entry.
    */
   async releaseSummary(): Promise<PlatformRelease[]> {
-    const [windows, android] = await Promise.all([
+    const [windows, android, linux] = await Promise.all([
       this.newestBuild().catch(() => null),
       this.newestAndroidBuild().catch(() => null),
+      this.newestLinuxBuild().catch(() => null),
     ]);
 
     return [
@@ -253,6 +300,17 @@ export class UpdatesService {
         // The Android path reads its version from the APK filename rather
         // than the release, so there is no publish date to report here.
         publishedAt: null,
+      },
+      {
+        platform: "linux",
+        version: linux?.version ?? null,
+        // The .deb is the one link a single-link surface shows; the .rpm
+        // sits beside it for surfaces that can list both.
+        url: linux ? releaseAssetUrl(linux.tag, linux.deb) : null,
+        packages: linux
+          ? { deb: releaseAssetUrl(linux.tag, linux.deb), rpm: releaseAssetUrl(linux.tag, linux.rpm) }
+          : null,
+        publishedAt: linux?.publishedAt ?? null,
       },
     ];
   }
@@ -302,6 +360,10 @@ export class UpdatesService {
    */
   private async newestAndroidBuild(): Promise<AndroidBuild | null> {
     return this.androidCache.resolve(() => this.fetchReleases(), this.logger);
+  }
+
+  private async newestLinuxBuild(): Promise<LinuxBuild | null> {
+    return this.linuxCache.resolve(() => this.fetchReleases(), this.logger);
   }
 
   /** The release feed, or null if it could not be read.
@@ -472,10 +534,12 @@ class ReleaseCache<T> {
 }
 
 export interface PlatformRelease {
-  platform: "windows" | "android";
+  platform: "windows" | "android" | "linux";
   /** Null when no usable release exists yet, or the feed was unavailable. */
   version: string | null;
   url: string | null;
+  /** Linux only: both package formats. `url` is the .deb. */
+  packages?: { deb: string; rpm: string } | null;
   publishedAt: string | null;
 }
 
@@ -516,6 +580,38 @@ function pickNewestAndroidBuild(releases: GithubRelease[]): AndroidBuild | null 
     }
   }
   return build;
+}
+
+/** The newest Linux release that carries both packages.
+ *
+ * Both filenames must carry the tag's own version. The release workflow
+ * refuses a tag that disagrees with the app, so a mismatch here means the
+ * assets are not what the tag claims, and the release is skipped rather
+ * than guessed at. */
+function pickNewestLinuxBuild(releases: GithubRelease[]): LinuxBuild | null {
+  let build: LinuxBuild | null = null;
+  for (const release of releases) {
+    if (!release.tag_name.startsWith(LINUX_TAG_PREFIX)) continue;
+    if (release.draft || release.prerelease) continue;
+    const tagVersion = release.tag_name.slice(LINUX_TAG_PREFIX.length);
+    const deb = release.assets.find((a) => LINUX_DEB_PATTERN.exec(a.name)?.[1] === tagVersion);
+    const rpm = release.assets.find((a) => LINUX_RPM_PATTERN.exec(a.name)?.[1] === tagVersion);
+    if (!deb || !rpm) continue;
+    if (!build || compareVersions(tagVersion, build.version) > 0) {
+      build = {
+        tag: release.tag_name,
+        version: tagVersion,
+        deb: deb.name,
+        rpm: rpm.name,
+        publishedAt: release.published_at,
+      };
+    }
+  }
+  return build;
+}
+
+function releaseAssetUrl(tag: string, asset: string): string {
+  return `https://github.com/${GITHUB_REPO}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(asset)}`;
 }
 
 /** Worth trying again, rather than a settled answer.

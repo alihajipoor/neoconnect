@@ -11,7 +11,8 @@ import {
 import { collectDiagnostics, diagnosticsToText } from "../lib/repair";
 import { loadFlagSet } from "../lib/flag-art";
 import { reportedPlatform } from "../lib/attempts";
-import { chromiumFromUserAgent, engineLine, webviewVersion } from "../lib/webview-engine";
+import { chromiumFromUserAgent, engineLine, webkitGtkVersion, webkitLine, webviewVersion } from "../lib/webview-engine";
+import { supportsRepair } from "../lib/desktop-platform";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { swapView } from "../lib/view-transition";
@@ -137,7 +138,10 @@ function TicketList({
         )}
       </Card>
 
-      <DiagnosticsCard />
+      {/* The snapshot is the Windows service's (`vpn_diagnostics`); a
+          platform whose helper has no diagnostics yet (Linux) shows none
+          rather than a button that can only fail. */}
+      {supportsRepair() ? <DiagnosticsCard /> : null}
     </div>
   );
 }
@@ -189,7 +193,12 @@ function DiagnosticsCard() {
         getVersion().catch(() => "unknown"),
         loadFlagSet(),
         reportedPlatform().then(
-          async (platform) => (platform === "windows" ? engineLine(await webviewVersion(), chromiumFromUserAgent()) : undefined),
+          async (platform) =>
+            platform === "windows"
+              ? engineLine(await webviewVersion(), chromiumFromUserAgent())
+              : platform === "linux"
+                ? webkitLine(await webkitGtkVersion())
+                : undefined,
           () => undefined,
         ),
       ]);

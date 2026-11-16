@@ -28,7 +28,10 @@ export type UpdateState =
   /** Found and downloading. */
   | { status: "downloading"; version: string; percent: number | null }
   /** On disk and verified. Applied when the app next quits. */
-  | { status: "ready"; version: string };
+  | { status: "ready"; version: string }
+  /** Newer than this build, on a platform that cannot install it itself
+   * (lib/update-notice.ts): said, with a way to the download page. */
+  | { status: "available"; version: string };
 
 /** Held here rather than in React state so it survives navigation
  * between screens -- a download that restarted every time the customer

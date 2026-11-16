@@ -10,6 +10,8 @@ Options -Indexes
 <IfModule mod_mime.c>
     AddType application/vnd.android.package-archive .apk
     AddType application/octet-stream .exe
+    AddType application/vnd.debian.binary-package .deb
+    AddType application/x-rpm .rpm
 </IfModule>
 
 <IfModule mod_headers.c>

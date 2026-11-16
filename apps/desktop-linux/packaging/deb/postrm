@@ -1,0 +1,15 @@
+#!/bin/sh
+# After removal. The helper's state goes only on purge, the one case where
+# the person asked for everything to go; a plain remove keeps it, as
+# Debian packages do.
+set -e
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload || true
+fi
+if [ "$1" = "purge" ]; then
+  rm -rf /var/lib/neoxify
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications || true
+fi
+exit 0

@@ -27,6 +27,14 @@ import { CustomModeCard } from "./components/CustomModeCard";
 import { GamingModeCard } from "./components/GamingModeCard";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
+import { openDownloadPage, startUpdateNotices } from "./lib/update-notice";
+import {
+  desktopPlatform,
+  supportsCustomMode,
+  supportsGaming,
+  supportsReconnectHold,
+  supportsSelfUpdate,
+} from "./lib/desktop-platform";
 import { setRelayTunnelReader } from "./lib/last-resort";
 import { BackupRouteChip } from "./components/BackupRoute";
 import { windowsAutostart } from "./lib/autostart";
@@ -56,7 +64,12 @@ setRelayTunnelReader(async () => (await invoke<{ connected: boolean }>("vpn_stat
  * here, so Settings draws them (`DeviceSettings`). The phone app binds
  * its own once its main page honours them. "Block the internet while
  * reconnecting" only in a build that offers it: not until a capture has
- * proved it (`RECONNECT_HOLD_PROVEN` in lib/reconnect-hold.ts). */
+ * proved it (`RECONNECT_HOLD_PROVEN` in lib/reconnect-hold.ts).
+ *
+ * The Linux app binds the same: autostart and notifications go through the
+ * same commands, which its Rust side answers for its own system, and
+ * Settings drops the hold's row on a platform whose helper has none
+ * (`supportsReconnectHold`), as `holdWanted` drops the setting. */
 const WINDOWS_DEVICE: DeviceSettings = {
   autostart: windowsAutostart,
   autoConnect: true,
@@ -98,6 +111,9 @@ export default function App() {
   const [updateState, setUpdateState] = useState<UpdateState>({ status: "none" });
   const [restarting, setRestarting] = useState(false);
   const [updateBlocked, setUpdateBlocked] = useState(false);
+  // The download page asked for from the update notice and not opened
+  // (a build that cannot install its own updates).
+  const [downloadOpenFailed, setDownloadOpenFailed] = useState(false);
   // A sign-out pressed on one of the shell's pages, under way.
   const [pageSigningOut, setPageSigningOut] = useState(false);
   // Guards against processing the same deep-link URL twice -- the launch
@@ -109,7 +125,7 @@ export default function App() {
   // cosmetic double-render.
   const handledDeepLinkUrls = useRef(new Set<string>());
   const endingRef = useRef(false);
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   // Read through a ref by the deep-link handler, which is registered once
   // and would otherwise word its notice in the language of the first
   // render -- before the saved choice was read back from disk.
@@ -144,6 +160,8 @@ export default function App() {
   // read here so the setting is known before any screen asks.
   useEffect(() => {
     void appPrefs.load();
+    // A desktop with no hold (Linux) watches nothing and asks nothing.
+    if (!supportsReconnectHold()) return undefined;
     return watchEpisodesForHold({
       phase: autoReconnect.current,
       subscribe: autoReconnect.subscribe,
@@ -223,7 +241,10 @@ export default function App() {
 
   // Background update checking. Downloading is automatic; applying is
   // not -- see the note below on why there is no install-on-close.
-  useEffect(() => startUpdateChecks(setUpdateState), []);
+  // Where the app cannot install its own updates (Linux) the updater is
+  // never called: the API is asked whether a newer version exists, and the
+  // notice sends the customer to the download page (lib/update-notice.ts).
+  useEffect(() => (supportsSelfUpdate() ? startUpdateChecks(setUpdateState) : startUpdateNotices(setUpdateState)), []);
 
   // Anything the app could not report at the time -- which is every
   // "could not reach the control plane", since a client cannot tell us
@@ -274,6 +295,15 @@ export default function App() {
   function goToVerify(email: string, password: string) {
     setPendingAuth({ email, password });
     setScreen("verify");
+  }
+
+  async function openDownload() {
+    setDownloadOpenFailed(false);
+    try {
+      await openDownloadPage(language);
+    } catch {
+      setDownloadOpenFailed(true);
+    }
   }
 
   async function restartForUpdate() {
@@ -414,16 +444,19 @@ export default function App() {
           onOpenReferrals={() => go("referrals")}
           onOpenSupport={() => go("support")}
           onLoggedOut={() => void handleLoggedOut()}
-          customSection={<CustomModeCard />}
+          // Only where the platform has it: the Linux helper has no
+          // per-app routing yet, and passing nothing is what removes the
+          // row and its section.
+          customSection={supportsCustomMode() ? <CustomModeCard /> : null}
           // Supplied here rather than imported by the screen, the same way
           // Custom mode is: gaming mode drives the Windows helper service
           // and has no counterpart on the mobile build that shares this
           // screen. Passing it is what makes its row exist.
-          gamingSection={<GamingModeCard />}
+          gamingSection={supportsGaming() ? <GamingModeCard /> : undefined}
           onOpenPlans={() => go("plans")}
           onOpenActivity={() => go("activity")}
           onSignOut={() => void signOutFromPage()}
-          platform="windows"
+          platform={desktopPlatform()}
           device={WINDOWS_DEVICE}
         />,
       );
@@ -551,6 +584,8 @@ export default function App() {
           onRestart={() => void restartForUpdate()}
           busy={restarting}
           blocked={updateBlocked}
+          onOpenDownload={() => void openDownload()}
+          openFailed={downloadOpenFailed}
         />
       }
     />

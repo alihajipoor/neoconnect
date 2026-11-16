@@ -1,4 +1,5 @@
 import type { TranslationKey } from "./i18n";
+import { desktopPlatform } from "./desktop-platform";
 
 /** Turning engine failures into something a customer can act on.
  *
@@ -102,7 +103,13 @@ export function classifyConnectionError(raw: unknown): ClassifiedError {
   const haystack = detail.toLowerCase();
 
   for (const { kind, messageKey, match } of PATTERNS) {
-    if (match.test(haystack)) return { kind, messageKey, detail };
+    if (!match.test(haystack)) continue;
+    // On Linux the service is the system's to start, so the advice is to
+    // restart the computer, not the app.
+    if (kind === "serviceUnavailable" && desktopPlatform() === "linux") {
+      return { kind, messageKey: "err.serviceUnavailableLinux", detail };
+    }
+    return { kind, messageKey, detail };
   }
   return { kind: "unknown", messageKey: "err.unknown", detail };
 }

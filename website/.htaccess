@@ -97,7 +97,7 @@ ErrorDocument 404 /404.php
     RewriteRule ^r/([A-Za-z0-9-]{1,32})/?$ r/index.php?c=$1 [L]
 
     # Installer downloads from a copy on this site (get/index.php).
-    RewriteRule ^get/(windows|android)/?$ get/index.php?p=$1 [L]
+    RewriteRule ^get/(windows|android|linux-deb|linux-rpm)/?$ get/index.php?p=$1 [L]
 </IfModule>
 
 # ---------------------------------------------------------------------

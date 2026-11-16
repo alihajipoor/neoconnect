@@ -161,6 +161,8 @@ function nx_ads_loader_js()
     $links = array();
     foreach (array('windows' => nx_installer_button_url('windows'),
         'android' => nx_installer_button_url('android'),
+        'linux-deb' => nx_installer_button_url('linux-deb'),
+        'linux-rpm' => nx_installer_button_url('linux-rpm'),
         'play' => nx_android_play_url(),
         'ios' => nx_ios_store_url()) as $k => $u) {
         if ($u !== '') {

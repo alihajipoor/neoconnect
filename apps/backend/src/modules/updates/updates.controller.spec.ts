@@ -1,8 +1,8 @@
-import type { INestApplication } from "@nestjs/common";
+import { NotFoundException, type INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import type { AddressInfo, Server } from "node:net";
 import { UpdatesController } from "./updates.controller";
-import { UpdatesService, type AndroidUpdateCheck } from "./updates.service";
+import { UpdatesService, type AndroidUpdateCheck, type LinuxPackage, type LinuxUpdateCheck } from "./updates.service";
 
 /** The update check as the apps call it, over a real Nest server. The
  * release lookup underneath is a stand-in; updates.service.spec.ts covers
@@ -14,6 +14,8 @@ describe("GET /updates/:target/:arch/:currentVersion", () => {
   let base: string;
   const updates = {
     checkAndroid: jest.fn<Promise<AndroidUpdateCheck>, [string]>(),
+    checkLinux: jest.fn<Promise<LinuxUpdateCheck>, [string]>(),
+    linuxPackageUrl: jest.fn<Promise<string>, [LinuxPackage]>(),
     checkFor: jest.fn(),
   };
 
@@ -34,7 +36,61 @@ describe("GET /updates/:target/:arch/:currentVersion", () => {
 
   beforeEach(() => {
     updates.checkAndroid.mockReset();
+    updates.checkLinux.mockReset();
+    updates.linuxPackageUrl.mockReset();
     updates.checkFor.mockReset();
+  });
+
+  it("tells an older Linux app the newer version and both packages", async () => {
+    updates.checkLinux.mockResolvedValue({ status: "update", version: "0.1.1" });
+
+    const res = await fetch(`${base}/updates/linux/x86_64/0.1.0`);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      version: "0.1.1",
+      downloadPath: "/updates/installer/linux-deb",
+      packages: { deb: "/updates/installer/linux-deb", rpm: "/updates/installer/linux-rpm" },
+    });
+    expect(updates.checkLinux).toHaveBeenCalledWith("0.1.0");
+    expect(updates.checkFor).not.toHaveBeenCalled();
+    expect(updates.checkAndroid).not.toHaveBeenCalled();
+  });
+
+  it("answers 204 to a Linux app on the newest version", async () => {
+    updates.checkLinux.mockResolvedValue({ status: "current" });
+    const res = await fetch(`${base}/updates/linux/x86_64/0.1.1`);
+    expect(res.status).toBe(204);
+  });
+
+  it("answers 503, never 204, when the newest Linux version could not be found out", async () => {
+    updates.checkLinux.mockResolvedValue({ status: "unknown" });
+    const res = await fetch(`${base}/updates/linux/x86_64/0.1.0`);
+    expect(res.status).toBe(503);
+  });
+
+  it("refuses a Linux version that is not x.y.z without asking", async () => {
+    const res = await fetch(`${base}/updates/linux/x86_64/latest`);
+    expect(res.status).toBe(400);
+    expect(updates.checkLinux).not.toHaveBeenCalled();
+  });
+
+  it("redirects each Linux installer link to its own package", async () => {
+    updates.linuxPackageUrl.mockImplementation((kind) => Promise.resolve(`https://example.com/pkg.${kind}`));
+
+    const deb = await fetch(`${base}/updates/installer/linux-deb`, { redirect: "manual" });
+    expect(deb.status).toBe(302);
+    expect(deb.headers.get("location")).toBe("https://example.com/pkg.deb");
+
+    const rpm = await fetch(`${base}/updates/installer/linux-rpm`, { redirect: "manual" });
+    expect(rpm.status).toBe(302);
+    expect(rpm.headers.get("location")).toBe("https://example.com/pkg.rpm");
+  });
+
+  it("404s a Linux installer link when no release is known", async () => {
+    updates.linuxPackageUrl.mockRejectedValue(new NotFoundException("No Linux release is available to download yet"));
+    const res = await fetch(`${base}/updates/installer/linux-deb`, { redirect: "manual" });
+    expect(res.status).toBe(404);
   });
 
   it("tells an older Android app the newer version and where to download it", async () => {

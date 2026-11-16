@@ -176,6 +176,11 @@ const en = {
   "update.androidHint": "It downloads in your browser. Android asks before installing it. Your settings and sign-in are kept.",
   "update.androidDownload": "Download",
   "update.androidOpenFailed": "The download didn't open. Try again.",
+  // Where the app cannot install its own updates (Linux): the notice says a
+  // newer version exists and opens the website's download page.
+  "update.available": "Neoxify {version} is available.",
+  "update.getIt": "Download",
+  "update.openFailed": "The download page didn't open. Try again.",
   "dash.customModeDetached": "Connected, but Custom mode didn't start. The apps you chose are going out without protection.",
   "dash.unlimited": "Unlimited",
   "support.title": "Support",
@@ -720,6 +725,10 @@ const en = {
   "dash.slowOnly": "Connected over {protocol}, but it's slow. Nothing faster got through on this network.",
   "dash.yourIp": "Your IP:",
   "err.serviceUnavailable": "The Neoxify background service isn't running. Restarting the app usually fixes this. If it doesn't, reinstall Neoxify.",
+  // On Linux the service is started by the system, not by the app, so
+  // reopening the app does nothing for it; a restart or a fresh install is
+  // what brings it back.
+  "err.serviceUnavailableLinux": "Neoxify's background service isn't running. Restart your computer. If that doesn't help, install Neoxify again.",
   "err.engineMissing": "Part of the installation is missing. Reinstall Neoxify.",
   "err.serverUnreachable": "Couldn't reach this server. Your network may be blocking it. Try another location.",
   "err.notCarryingTraffic": "Connected, but no traffic got through.",
@@ -1369,6 +1378,8 @@ const en = {
   "set.osWin": "Windows",
   "set.osAndroid": "Android",
   "set.osIos": "iOS",
+  "set.osLinux": "Linux",
+  "set.osMac": "macOS",
   "set.motion": "Reduce motion",
   "set.motionHint": "Short fades instead of movement. Also follows your system setting.",
   "set.notifs": "Notifications",
@@ -1395,6 +1406,16 @@ const en = {
   "set.notifsOffApp": "Windows is set not to show Neoxify's notifications. Turn them on in Windows Settings › System › Notifications.",
   "set.notifsOffAll": "Notifications are off for every app in Windows Settings › System › Notifications.",
   "set.notifsOffPolicy": "This PC's administrator has turned notifications off.",
+  // The same rows on Linux, where there is no Windows to name: the sign-in
+  // is the desktop session's, startup apps live in the desktop's own
+  // settings, and notifications are switched off there too.
+  "set.autoStartLinux": "Open Neoxify when I sign in",
+  "set.autoStartHintLinux": "Opens Neoxify in a window when you sign in to this computer. It only connects if “Connect when Neoxify starts” is also on.",
+  "set.autoStartFailedLinux": "The change didn't take. Try again, or check the startup apps in your desktop's settings.",
+  "set.autoConnectHintNoGaming": "When Neoxify opens and isn't connected, it connects to the location on the main page, the same as pressing Connect. It never takes your plan's device slot from another device.",
+  "set.notifsOffAppLinux": "Your desktop is set not to show Neoxify's notifications. Turn them on in its notification settings.",
+  "set.notifsOffAllLinux": "Notifications are off for every app in your desktop's settings.",
+  "set.notifsOffPolicyLinux": "This computer's administrator has turned notifications off.",
   "set.notificationsHintAndroid": "Tells you when Android or another VPN app turns off Neoxify's VPN while Neoxify isn't open.",
   "set.notificationsHintIos": "Tells you when Neoxify's VPN stops, or another VPN or Settings turns it off, while Neoxify isn't open.",
   "set.notifsCanAsk": "Neoxify hasn't asked {os} for permission to show notifications yet, so they don't appear.",
@@ -1405,6 +1426,9 @@ const en = {
   "leak.lede": "What Neoxify keeps inside the VPN. You can't change it here.",
   "leak.heldLead": "While you're connected",
   "leak.held": "on any protocol except Built-in, other connections on this computer are kept inside the VPN and IPv6 is blocked. If that can't be set up, the main page says so.",
+  // Linux keeps every connection it offers inside the VPN, so there is no
+  // exception to name.
+  "leak.heldAll": "other connections on this computer are kept inside the VPN and IPv6 is blocked. If that can't be set up, the main page says so.",
   "leak.notHeldLead": "Built-in (IKEv2) and Custom mode",
   "leak.notHeld": "don't keep other connections inside the VPN. The main page says so while they're in use.",
   "leak.reconLead": "While reconnecting,",
@@ -1658,6 +1682,9 @@ const fa: Record<TranslationKey, string> = {
   "update.androidHint": "در مرورگر دانلود می‌شود. اندروید پیش از نصب از شما اجازه می‌گیرد. تنظیمات و ورود شما حفظ می‌شود.",
   "update.androidDownload": "دانلود",
   "update.androidOpenFailed": "دانلود شروع نشد. دوباره امتحان کنید.",
+  "update.available": "نسخهٔ {version} نئوکسیفای منتشر شده است.",
+  "update.getIt": "دانلود",
+  "update.openFailed": "صفحهٔ دانلود باز نشد. دوباره امتحان کنید.",
   "update.restarting": "در حال راه‌اندازی دوباره...",
   "update.connectedFirst": "برای به‌روزرسانی، اول اتصال را قطع کنید.",
   "dash.customModeDetached": "وصل شد، ولی حالت سفارشی فعال نشد. برنامه‌هایی که انتخاب کرده‌اید بدون محافظت به اینترنت وصل می‌شوند.",
@@ -1922,6 +1949,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.slowOnly": "با {protocol} وصل شدید، اما سرعت کم است. روی این شبکه اتصال سریع‌تری پیدا نشد.",
   "dash.yourIp": "آی‌پی شما:",
   "err.serviceUnavailable": "سرویس پس‌زمینهٔ نئوکسیفای اجرا نمی‌شود. معمولاً بستن و باز کردن دوبارهٔ برنامه مشکل را حل می‌کند. اگر نشد، نئوکسیفای را دوباره نصب کنید.",
+  "err.serviceUnavailableLinux": "سرویس پس‌زمینهٔ نئوکسیفای اجرا نمی‌شود. کامپیوتر را دوباره راه‌اندازی کنید. اگر درست نشد، نئوکسیفای را دوباره نصب کنید.",
   "err.engineMissing": "بخشی از برنامه نصب نشده است. نئوکسیفای را دوباره نصب کنید.",
   "err.teardownStuck":
     "اتصال وی‌پی‌ان هنوز در حال بسته شدن است. اگر اینترنت شما وصل نشد، برنامه را ببندید و دوباره باز کنید.",
@@ -2391,6 +2419,8 @@ const fa: Record<TranslationKey, string> = {
   "set.osWin": "ویندوز",
   "set.osAndroid": "اندروید",
   "set.osIos": "iOS",
+  "set.osLinux": "لینوکس",
+  "set.osMac": "macOS",
   "set.motion": "کاهش حرکت",
   "set.motionHint": "به‌جای حرکت، محو شدن کوتاه. از تنظیم سیستم هم پیروی می‌کند.",
   "set.notifs": "اعلان‌ها",
@@ -2417,6 +2447,13 @@ const fa: Record<TranslationKey, string> = {
   "set.notifsOffApp": "ویندوز طوری تنظیم شده که اعلان‌های نئوکسیفای را نشان ندهد. آن‌ها را در Windows Settings › System › Notifications روشن کنید.",
   "set.notifsOffAll": "اعلان‌ها برای همهٔ برنامه‌ها در Windows Settings › System › Notifications خاموش است.",
   "set.notifsOffPolicy": "مدیر این کامپیوتر اعلان‌ها را خاموش کرده است.",
+  "set.autoStartLinux": "باز شدن نئوکسیفای وقتی وارد حسابم می‌شوم",
+  "set.autoStartHintLinux": "وقتی وارد حساب کاربری‌تان روی این کامپیوتر می‌شوید، نئوکسیفای در یک پنجره باز می‌شود. فقط اگر «اتصال هنگام باز شدن نئوکسیفای» هم روشن باشد، وصل هم می‌شود.",
+  "set.autoStartFailedLinux": "این تغییر انجام نشد. دوباره امتحان کنید یا فهرست برنامه‌هایی را که خودکار باز می‌شوند در تنظیمات دسکتاپ ببینید.",
+  "set.autoConnectHintNoGaming": "وقتی نئوکسیفای باز می‌شود و وصل نیست، به کشوری که در صفحهٔ اصلی است وصل می‌شود، درست مثل زدن دکمهٔ «اتصال». هیچ‌وقت جای دستگاه دیگری را در پلن شما نمی‌گیرد.",
+  "set.notifsOffAppLinux": "دسکتاپ شما طوری تنظیم شده که اعلان‌های نئوکسیفای را نشان ندهد. آن‌ها را در تنظیمات اعلان‌های دسکتاپ روشن کنید.",
+  "set.notifsOffAllLinux": "اعلان‌ها برای همهٔ برنامه‌ها در تنظیمات دسکتاپ خاموش است.",
+  "set.notifsOffPolicyLinux": "مدیر این کامپیوتر اعلان‌ها را خاموش کرده است.",
   "set.notificationsHintAndroid": "وقتی نئوکسیفای باز نیست و اندروید یا یک برنامهٔ وی‌پی‌ان دیگر وی‌پی‌ان نئوکسیفای را خاموش کند، به شما خبر می‌دهد.",
   "set.notificationsHintIos": "وقتی نئوکسیفای باز نیست و وی‌پی‌ان آن متوقف شود، یا یک وی‌پی‌ان دیگر یا تنظیمات آن را خاموش کند، به شما خبر می‌دهد.",
   "set.notifsCanAsk": "نئوکسیفای هنوز از {os} اجازهٔ نمایش اعلان نگرفته، برای همین اعلان‌ها نمایش داده نمی‌شوند.",
@@ -2427,6 +2464,7 @@ const fa: Record<TranslationKey, string> = {
   "leak.lede": "آنچه نئوکسیفای داخل وی‌پی‌ان نگه می‌دارد. این بخش فقط توضیح است و تنظیمی ندارد.",
   "leak.heldLead": "تا وقتی وصل هستید،",
   "leak.held": "با هر پروتکلی به‌جز Built-in، اتصال‌های دیگر این کامپیوتر داخل وی‌پی‌ان نگه داشته می‌شوند و IPv6 مسدود است. اگر این کار انجام نشود، صفحهٔ اصلی خبر می‌دهد.",
+  "leak.heldAll": "اتصال‌های دیگر این کامپیوتر داخل وی‌پی‌ان نگه داشته می‌شوند و IPv6 مسدود است. اگر این کار انجام نشود، صفحهٔ اصلی خبر می‌دهد.",
   "leak.notHeldLead": "Built-in (IKEv2) و حالت سفارشی",
   "leak.notHeld": "اتصال‌های دیگر را داخل وی‌پی‌ان نگه نمی‌دارند. تا وقتی از آن‌ها استفاده می‌کنید، صفحهٔ اصلی این را می‌گوید.",
   "leak.reconLead": "هنگام اتصال دوباره،",

@@ -42,6 +42,19 @@ export class UpdatesController {
     res.redirect(302, await this.updates.androidApkUrl());
   }
 
+  /** The Linux packages, one stable link per format. Linux has no in-app
+   * updater in its first version, so these are what both the website and
+   * the app's "a new version is available" notice open. */
+  @Get("/installer/linux-deb")
+  async linuxDebInstaller(@Res() res: Response) {
+    res.redirect(302, await this.updates.linuxPackageUrl("deb"));
+  }
+
+  @Get("/installer/linux-rpm")
+  async linuxRpmInstaller(@Res() res: Response) {
+    res.redirect(302, await this.updates.linuxPackageUrl("rpm"));
+  }
+
   @Get("download/:tag/:asset")
   async download(
     @Param("tag") tag: string,
@@ -69,7 +82,12 @@ export class UpdatesController {
       return;
     }
 
-    // Anything but Windows and Android (the macOS build's updater asks
+    if (target === "linux") {
+      await this.checkLinux(currentVersion, res);
+      return;
+    }
+
+    // Anything but Windows, Android and Linux (the macOS build's updater asks
     // as "darwin") is told it is current rather than handed a Windows
     // installer: nothing publishes an update for it.
     if (target !== "windows") {
@@ -126,5 +144,30 @@ export class UpdatesController {
       return;
     }
     res.json({ version: check.version, downloadPath: "/updates/installer/android" });
+  }
+
+  /** The Linux app's update check, shaped like Android's: there is no
+   * updater to hand a manifest to, only the newer version and where to
+   * get it, in both package formats so the notice can offer the right
+   * one. Only x86_64 is built, so the arch is not consulted. */
+  private async checkLinux(currentVersion: string, res: Response) {
+    if (!/^\d+\.\d+\.\d+$/.test(currentVersion)) {
+      res.status(400).json({ message: "currentVersion must be x.y.z" });
+      return;
+    }
+    const check = await this.updates.checkLinux(currentVersion);
+    if (check.status === "current") {
+      res.status(204).send();
+      return;
+    }
+    if (check.status === "unknown") {
+      res.status(503).json({ message: "Could not determine the newest release" });
+      return;
+    }
+    res.json({
+      version: check.version,
+      downloadPath: "/updates/installer/linux-deb",
+      packages: { deb: "/updates/installer/linux-deb", rpm: "/updates/installer/linux-rpm" },
+    });
   }
 }

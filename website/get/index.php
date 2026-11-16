@@ -1,6 +1,7 @@
 <?php
 /**
- * Installer downloads served from this site: /get/windows and /get/android.
+ * Installer downloads served from this site: /get/windows, /get/android,
+ * /get/linux-deb and /get/linux-rpm.
  *
  * WHY. The installer URLs in config.php are on the control plane's domain,
  * and networks that block VPNs often block that domain as well. Measured
@@ -55,7 +56,7 @@
  * The copies are served by the web server as static files, which is what
  * keeps a slow download from tying up a PHP worker on a shared host.
  *
- * From the command line, `php get/index.php warm [windows|android]` does
+ * From the command line, `php get/index.php warm [platform]` does
  * the same fetch with no visitor waiting -- for a deploy check or a cron job.
  *
  * PHP 7.4 compatible, like the rest of the site. Needs the curl extension;
@@ -73,12 +74,20 @@ function nxg_cfg($key, $default)
     return array_key_exists($key, $NX_GET_CFG) ? $NX_GET_CFG[$key] : $default;
 }
 
-/** The platforms, and what their file must look like. Nothing else is accepted. */
+/**
+ * The platforms, and what their file must look like. Nothing else is accepted.
+ *
+ * Linux has two keys because it ships two package formats, and each is
+ * checked against its own first bytes: a .deb is an ar archive, which starts
+ * with "!<arch>" and a newline, and an .rpm starts with the RPM lead magic.
+ */
 function nxg_platforms()
 {
     return array(
         'windows' => array('cfg' => 'windows_installer_url', 'ext' => 'exe', 'magic' => 'MZ'),
         'android' => array('cfg' => 'android_installer_url', 'ext' => 'apk', 'magic' => "PK\x03\x04"),
+        'linux-deb' => array('cfg' => 'linux_deb_installer_url', 'ext' => 'deb', 'magic' => "!<arch>\n"),
+        'linux-rpm' => array('cfg' => 'linux_rpm_installer_url', 'ext' => 'rpm', 'magic' => "\xED\xAB\xEE\xDB"),
     );
 }
 
@@ -495,19 +504,31 @@ function nxg_ensure($platform, $upstream, $budget, $verbose)
 }
 
 // ---------------------------------------------------------------------
-// Command line: php get/index.php warm [windows|android]
+// Command line: php get/index.php warm [windows|android|linux-deb|linux-rpm]
 // ---------------------------------------------------------------------
 
 if (PHP_SAPI === 'cli' && !isset($_SERVER['REQUEST_URI'])) {
     $args = isset($argv) ? array_slice($argv, 1) : array();
+    $all = nxg_platforms();
     if (!isset($args[0]) || $args[0] !== 'warm') {
-        fwrite(STDERR, "usage: php get/index.php warm [windows|android]\n");
+        fwrite(STDERR, 'usage: php get/index.php warm [' . implode('|', array_keys($all)) . "]\n");
         exit(2);
     }
-    $which = isset($args[1]) ? array($args[1]) : array_keys(nxg_platforms());
+    if (isset($args[1])) {
+        $which = array($args[1]);
+    } else {
+        // With no platform named, warm the released ones only. A platform
+        // whose installer URL is still empty (Linux before its first
+        // release) is not a failure and must not turn a deploy check red.
+        $which = array();
+        foreach ($all as $p => $meta) {
+            if (trim((string) nxg_cfg($meta['cfg'], '')) !== '') {
+                $which[] = $p;
+            }
+        }
+    }
     $status = 0;
     foreach ($which as $p) {
-        $all = nxg_platforms();
         if (!isset($all[$p])) {
             fwrite(STDERR, "unknown platform: $p\n");
             exit(2);

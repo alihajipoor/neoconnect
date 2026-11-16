@@ -1,0 +1,195 @@
+name: Release Desktop (Linux)
+
+# Builds the Linux client into a .deb and an .rpm and publishes both as
+# release assets whenever a linux-v* tag is pushed. The prefix is its own,
+# like desktop-v* and android-v*, because the API resolves "newest release"
+# per prefix: a shared prefix would let a Windows release be offered to
+# Linux, which is how the agent installer's download URL was once hijacked.
+#
+# A manual run builds the same two packages and keeps them as a workflow
+# artifact without publishing anything, so a build can be tried on real
+# machines before a tag commits to it.
+#
+# There is no signing key here: Linux has no in-app updater in this
+# version. The app only says a new version exists and links to
+# /updates/installer/linux-deb or linux-rpm, which the API resolves from
+# the newest linux-v release by the exact filenames checked below.
+on:
+  push:
+    tags:
+      - "linux-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # The oldest supported runner rather than the newest, because a binary
+    # links against the glibc and WebKitGTK it was built on and refuses to
+    # start on anything older. Built on 22.04 it runs on 22.04 and later,
+    # and on the other distributions of that age.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tag names the version the API will offer; tauri.conf.json names
+      # the version the app reports about itself and writes into the package
+      # filenames. The API also refuses a release whose filenames disagree
+      # with its tag, so a mismatch here would publish a release nothing can
+      # download. desktop-v0.9.0 once shipped a 0.8.0 build under a 0.9.0
+      # tag; the pipeline refuses it instead of trusting whoever tagged.
+      - name: Check the tag matches the app version
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          tagged="${GITHUB_REF_NAME#linux-v}"
+          built=$(node -p "require('./apps/desktop-linux/src-tauri/tauri.conf.json').version")
+          if [ "$tagged" != "$built" ]; then
+            echo "Tag $GITHUB_REF_NAME says $tagged but the app is built as $built." >&2
+            echo "Bump apps/desktop-linux/package.json, src-tauri/Cargo.toml and src-tauri/tauri.conf.json, commit, then tag." >&2
+            exit 1
+          fi
+          echo "tag and app agree on $built"
+
+      # What Tauri v2 needs on Ubuntu 22.04 to build and bundle: WebKitGTK
+      # 4.1 and GTK for the window, rpm so the bundler can write the .rpm at
+      # all, and patchelf and file for the bundler's own steps. unzip and
+      # curl are for fetch-binaries, which downloads the pinned Xray build.
+      - name: Install build packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev \
+            pkg-config build-essential file rpm patchelf unzip curl
+
+      - uses: pnpm/action-setup@v4
+        # No `version:`: pnpm/action-setup reads it from package.json's
+        # "packageManager" field, as in ci.yml.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Both cargo workspaces: the helper's (apps/desktop-linux) and the
+      # Tauri app's, which has its own lock file and target directory.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop-linux/target
+            apps/desktop-linux/src-tauri/target
+          key: linux-release-cargo-${{ hashFiles('apps/desktop-linux/Cargo.lock', 'apps/desktop-linux/src-tauri/Cargo.lock') }}
+
+      - run: pnpm install --frozen-lockfile
+
+      # The published endpoint list, baked into the binary, exactly as the
+      # Windows release does it. A fresh install has no cached bundle and
+      # every compiled-in base is on a censored domain, so without it the
+      # app cannot reach the service on the networks it is built for.
+      # Required, not best-effort: a silent fallback would ship that
+      # failure looking healthy.
+      - name: Fetch endpoint seed bundle
+        run: pnpm --filter @neoxify/desktop-linux run seed
+        env:
+          NEOXIFY_REQUIRE_SEED: "1"
+
+      # Fetches the pinned Xray build, builds the root helper into the
+      # app's resources, then has Tauri build the app and both packages.
+      - name: Build the packages
+        run: pnpm --filter @neoxify/desktop-linux run package
+
+      # The API finds the packages by exact, anchored names, so a package
+      # under any other name is a release that downloads nothing. The
+      # bundler's own naming is accepted when it differs only in case or in
+      # '-' versus '_', and renamed; anything else fails here. The version
+      # inside each package is read back too, rather than trusted from the
+      # filename.
+      - name: Collect and check the packages
+        id: collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver=$(node -p "require('./apps/desktop-linux/src-tauri/tauri.conf.json').version")
+          bundle=apps/desktop-linux/src-tauri/target/release/bundle
+          out=apps/desktop-linux/release-out
+          rm -rf "$out"
+          mkdir -p "$out"
+
+          form() { echo "$1" | tr 'A-Z_' 'a-z-'; }
+
+          pick() {
+            local dir="$1" ext="$2" want="$3"
+            local found=()
+            while IFS= read -r -d '' f; do found+=("$f"); done < <(find "$dir" -maxdepth 1 -type f -name "*.$ext" -print0 2>/dev/null)
+            if [ "${#found[@]}" -ne 1 ]; then
+              echo "Expected exactly one .$ext in $dir, found ${#found[@]}: ${found[*]:-none}" >&2
+              exit 1
+            fi
+            local name
+            name=$(basename "${found[0]}")
+            if [ "$(form "$name")" != "$(form "$want")" ]; then
+              echo "The bundler wrote $name, which is not $want in any form the API accepts." >&2
+              exit 1
+            fi
+            cp "${found[0]}" "$out/$want"
+            echo "$name -> $want"
+          }
+
+          deb="Neoxify_${ver}_amd64.deb"
+          rpm="Neoxify-${ver}-1.x86_64.rpm"
+          pick "$bundle/deb" deb "$deb"
+          pick "$bundle/rpm" rpm "$rpm"
+
+          debver=$(dpkg-deb -f "$out/$deb" Version)
+          rpmver=$(rpm -qp --queryformat '%{VERSION}' "$out/$rpm")
+          if [ "$debver" != "$ver" ] || [ "$rpmver" != "$ver" ]; then
+            echo "Package versions disagree with the app: deb $debver, rpm $rpmver, app $ver." >&2
+            exit 1
+          fi
+
+          (cd "$out" && sha256sum "$deb" "$rpm" > sha256sums.txt && cat sha256sums.txt)
+          echo "dir=$out" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the packages as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: neoxify-linux-packages
+          path: ${{ steps.collect.outputs.dir }}
+          if-no-files-found: error
+
+      # The tag's own annotation is the human-written changelog, as for
+      # Windows: generated notes would diff against the newest tag of any
+      # prefix, which means nothing to a customer.
+      - name: Read the tag's message
+        if: github.event_name == 'push'
+        id: tagmsg
+        shell: bash
+        run: |
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          {
+            echo "body<<TAGMSG_EOF"
+            git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME"
+            echo "TAGMSG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Published to the public releases repository, not to this private
+      # one, because the API hands the download URLs to browsers that carry
+      # no credentials. GITHUB_TOKEN cannot write to another repository, so
+      # this uses the same token the Windows release does. No generated
+      # notes: the releases repository holds binaries only, and GitHub
+      # refuses to generate notes there.
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: alihajipoor/neoxify-releases
+          token: ${{ secrets.RELEASES_TOKEN }}
+          files: |
+            ${{ steps.collect.outputs.dir }}/*.deb
+            ${{ steps.collect.outputs.dir }}/*.rpm
+            ${{ steps.collect.outputs.dir }}/sha256sums.txt
+          body: ${{ steps.tagmsg.outputs.body }}
+          generate_release_notes: false

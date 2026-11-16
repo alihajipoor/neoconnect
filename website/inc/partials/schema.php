@@ -284,7 +284,8 @@ function nx_schema_graph()
     if ($page === 'download' || $page === 'home') {
         $apps = array();
         // The platforms that genuinely ship, and nothing else: macOS does
-        // not exist and gets no node, however much it would pad the graph.
+        // not exist and gets no node, however much it would pad the graph,
+        // and Linux gets one only once a package is configured.
 
         if (nx_windows_available()) {
             $apps[] = array(
@@ -312,6 +313,20 @@ function nx_schema_graph()
                 'applicationCategory' => 'SecurityApplication',
                 'downloadUrl' => nx_abs_url('download'),
                 'softwareRequirements' => nx_t('download.android.requirements'),
+                'publisher' => array('@id' => $orgId),
+                'offers' => nx_schema_app_offers(),
+            );
+        }
+
+        if (nx_linux_available()) {
+            $apps[] = array(
+                '@type' => 'SoftwareApplication',
+                '@id' => $localeHome . '#app-linux',
+                'name' => nx_t('schema.app.linux.name'),
+                'operatingSystem' => 'Ubuntu 22.04+, Debian 12+, Fedora 40+',
+                'applicationCategory' => 'SecurityApplication',
+                'downloadUrl' => nx_abs_url('download'),
+                'softwareRequirements' => nx_t('download.linux.requirements'),
                 'publisher' => array('@id' => $orgId),
                 'offers' => nx_schema_app_offers(),
             );

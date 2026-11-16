@@ -266,8 +266,9 @@ export async function repairCommandLine(): Promise<string> {
  *
  * `engine` is the Windows web component's line (`engineLine` in
  * lib/webview-engine.ts): an engine older than Chromium 105 draws the app
- * from fallbacks, and only this says which one a customer has. Left out
- * when the caller did not give one (the phone).
+ * from fallbacks, and only this says which one a customer has. On Linux it
+ * is WebKitGTK's line (`webkitLine`) instead. Left out when the caller did
+ * not give one (the phone).
  */
 export function diagnosticsToText(d: Diagnostics, appVersion: string, flagSet?: number | null, engine?: string): string {
   const yesNo = (value: boolean) => (value ? "yes" : "no");

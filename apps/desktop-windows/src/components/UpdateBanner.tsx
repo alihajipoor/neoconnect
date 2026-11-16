@@ -17,15 +17,38 @@ export function UpdateBanner({
   onRestart,
   busy,
   blocked,
+  onOpenDownload,
+  openFailed = false,
 }: {
   state: UpdateState;
   onRestart: () => void;
   busy: boolean;
   /** Restart was asked for while a tunnel was up, and refused. */
   blocked: boolean;
+  /** Opens the website's download page, for "available": a build that
+   * cannot install its own updates (Linux) only says one exists. */
+  onOpenDownload?: () => void;
+  /** The download page was asked for and did not open. */
+  openFailed?: boolean;
 }) {
   const { t } = useI18n();
   if (state.status === "none") return null;
+
+  if (state.status === "available") {
+    return (
+      <div className="nx-upd" role="status">
+        <p className="flex items-center gap-2">
+          <Download className="size-4 shrink-0 text-cobalt-ink" aria-hidden />
+          <span>{openFailed ? t("update.openFailed") : t("update.available", { version: state.version })}</span>
+        </p>
+        {onOpenDownload ? (
+          <PillButton variant="ghost" size="sm" onClick={onOpenDownload} disabled={busy}>
+            {t("update.getIt")}
+          </PillButton>
+        ) : null}
+      </div>
+    );
+  }
 
   const downloading = state.status === "downloading";
 

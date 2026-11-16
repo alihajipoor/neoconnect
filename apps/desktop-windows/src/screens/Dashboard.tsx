@@ -53,7 +53,7 @@ import {
   type UplinkWatch,
 } from "../lib/uplink-watch";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
-import { installSeed, orderCandidates, ispHintsOf, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
+import { installSeed, offeredUsers, orderCandidates, ispHintsOf, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import {
   movedLately,
   recordAttempt,
@@ -155,6 +155,7 @@ import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } f
 import { setConfinedAround } from "../lib/connected-mirrors";
 import { egressWorthAnotherLook } from "../lib/confinement-recheck";
 import { repairUnderWay } from "../lib/repair";
+import { desktopPlatform, supportsCustomMode, supportsGaming, supportsRepair } from "../lib/desktop-platform";
 import { appPrefs } from "../lib/app-prefs";
 import { autoConnectDecision, autoConnectLatch } from "../lib/auto-connect";
 import {
@@ -889,6 +890,22 @@ export function Dashboard({
    * across one lands nothing: its reading is about the way out that was. */
   const uplinkEpochRef = useRef(0);
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
+  // Linux only: the helper is the system's service and comes back by
+  // itself (a restart, an upgrade), and with no tunnel on screen no poll
+  // runs to notice. So "the background service isn't running" is checked
+  // every few seconds and taken down once it answers, rather than standing
+  // over a service that is back. Windows is untouched.
+  useEffect(() => {
+    if (desktopPlatform() !== "linux" || connectionError?.messageKey !== "err.serviceUnavailableLinux") return;
+    const timer = setInterval(() => {
+      void serviceStatus().then(
+        () =>
+          setConnectionError((current) => (current?.messageKey === "err.serviceUnavailableLinux" ? null : current)),
+        () => undefined,
+      );
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [connectionError]);
   /** What the plan's device limit has to say, when it is why this device
    * is not connected: refused before dialling, taken over by another
    * device, or a check that could not be made. See `deviceSlot`.
@@ -1023,6 +1040,8 @@ export function Dashboard({
   // screen stays mounted under it.
   useEffect(() => {
     if (!onMainPage) return;
+    // Nothing to read where there is no Custom mode (Linux).
+    if (!supportsCustomMode()) return;
     loadSplitTunnel()
       .then((settings) => {
         setCustomConfigured(isEffective(settings));
@@ -1296,7 +1315,7 @@ export function Dashboard({
     const fromStatus = stateFromStatus(status);
     if (fromStatus === "disconnected") return "disconnected";
     let measured: Promise<ConnectionState>;
-    if (status.splitTunnelActive) {
+    if (status.splitTunnelActive && supportsCustomMode()) {
       // The probe holds the service's owning thread, as the health poll's
       // does: marked, so a liveness answer it causes is not read as a drop.
       const probed = statusDisturbances.begin(PROBE_CAP_MS);
@@ -1512,6 +1531,8 @@ export function Dashboard({
   // starting in VPN mode somebody who chose gaming mode would quietly
   // offer to tunnel a machine whose owner had asked for the opposite.
   useEffect(() => {
+    // No gaming mode on this platform (Linux): it is always VPN mode.
+    if (!supportsGaming()) return undefined;
     let cancelled = false;
     void loadGaming().then((loaded) => {
       if (!cancelled) setAppMode(loaded.mode);
@@ -1542,7 +1563,7 @@ export function Dashboard({
     setAppMode(next);
     const current = await loadGaming();
     await saveGaming({ ...current, mode: next });
-    if (next === "vpn") {
+    if (next === "vpn" && supportsGaming()) {
       try {
         await gamingDisarm();
       } catch {
@@ -1853,7 +1874,12 @@ export function Dashboard({
       setProtocolUser((current) => users.find((u) => u.id === current?.id) ?? current);
       return;
     }
-    setProtocolUser(users.find((u) => u.routeId === routeId) ?? users[0] ?? null);
+    // Only from what this platform can dial (`offeredUsers`): an IKEv2
+    // credential held on Linux is a route never dialled, and naming it
+    // made every landing read as a move away from it. On Windows this is
+    // the same list.
+    const offered = offeredUsers(users.slice());
+    setProtocolUser(offered.find((u) => u.routeId === routeId) ?? offered[0] ?? null);
     setTunnelRouteUnknown(true);
   }
 
@@ -2501,7 +2527,8 @@ export function Dashboard({
       // was carrying the selected apps. Measured on a Windows 11 guest:
       // curl.exe selected and exiting through the node, the screen
       // yellow for one poll.
-      const customMode = Boolean(status.splitTunnelActive);
+      // Never on a platform without Custom mode, whatever a status says.
+      const customMode = supportsCustomMode() && Boolean(status.splitTunnelActive);
       setSplitTunnelActive(customMode);
       setSplitTunnelProblem(readCustomModeProblem(status));
       setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
@@ -3756,21 +3783,25 @@ export function Dashboard({
       // their selection mid-connect and the second push overwrites the
       // first with something they no longer have on screen.
       let splitTunnelSettings: SplitTunnelSettings | null = null;
-      try {
-        const settings = await loadSplitTunnel();
-        // No egress named, and that is not a placeholder. Nothing is
-        // established yet, and the ladder below may well settle
-        // somewhere other than its first pick -- so any exit named here
-        // would be a guess. The service reports a preference it cannot
-        // compare as `unknown`, which is the truthful answer for the
-        // seconds this covers.
-        await pushSplitTunnel(settings);
-        splitTunnelSettings = settings;
-        customMode = isEffective(settings);
-      } catch {
-        // A failure here means Custom mode does not apply to this
-        // attempt, which the status poll will report honestly rather
-        // than the connection being blocked over a preference.
+      // Only where Custom mode exists: a Linux session sends nothing for a
+      // feature its helper does not have.
+      if (supportsCustomMode()) {
+        try {
+          const settings = await loadSplitTunnel();
+          // No egress named, and that is not a placeholder. Nothing is
+          // established yet, and the ladder below may well settle
+          // somewhere other than its first pick -- so any exit named here
+          // would be a guess. The service reports a preference it cannot
+          // compare as `unknown`, which is the truthful answer for the
+          // seconds this covers.
+          await pushSplitTunnel(settings);
+          splitTunnelSettings = settings;
+          customMode = isEffective(settings);
+        } catch {
+          // A failure here means Custom mode does not apply to this
+          // attempt, which the status poll will report honestly rather
+          // than the connection being blocked over a preference.
+        }
       }
 
       // The ladder, not a single credential. Everything the subscription
@@ -4737,6 +4768,9 @@ export function Dashboard({
           failedRungs.push({ routeId: candidate.routeId, fate: rungFate(classified.kind) });
           lastError = { ...classified, detail: describeAttempts(attempts, candidates.length) };
           if (classified.kind === "noNetwork") break;
+          // On Linux a helper that cannot be reached cannot dial any rung:
+          // walking all of them took 26 s to say so. Said at once instead.
+          if (classified.kind === "serviceUnavailable" && desktopPlatform() === "linux") break;
         }
 
         noNetworkSince = null;
@@ -5359,9 +5393,11 @@ export function Dashboard({
           : // Beside the warning that some connections go around a
             // tunnel not confined, not contradicting it.
             t(isTunnelUp(connectionState) && ipv4NotConfined ? "dash.modeVpnHintNotConfined" : "dash.modeVpnHint");
+  // Without gaming mode (Linux) there is nothing to switch between: only
+  // the line under it is drawn.
   const modeBar = subscription ? (
     <div className="nx-modebar">
-      <Segmented
+      {supportsGaming() ? <Segmented
         label={t("mode.label")}
         value={appMode}
         onChange={(value) => void changeMode(value)}
@@ -5371,7 +5407,7 @@ export function Dashboard({
           { value: "vpn", label: t("dash.modeVpn"), icon: <Shield aria-hidden /> },
           { value: "gaming", label: t("dash.modeGaming"), icon: <Gamepad2 aria-hidden /> },
         ]}
-      />
+      /> : null}
       {/* Clamped to two lines beside the hero; the whole sentence is the title. */}
       <p className="nx-modehint" title={modeHint}>
         {modeHint}
@@ -5451,7 +5487,7 @@ export function Dashboard({
             <summary>{t("err.showDetail")}</summary>
             <p data-ltr>{connectionError.detail}</p>
           </details>
-          {NOT_THE_NETWORK.has(connectionError.kind) ? null : <RepairNetwork variant="inline" />}
+          {NOT_THE_NETWORK.has(connectionError.kind) || !supportsRepair() ? null : <RepairNetwork variant="inline" />}
         </div>
       ) : null}
     </>

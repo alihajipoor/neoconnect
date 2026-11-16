@@ -1,0 +1,94 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Neoxify",
+  "mainBinaryName": "neoxify",
+  "version": "0.1.0",
+  "identifier": "com.neoxify.neoconnect",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1424",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Neoxify",
+        "width": 940,
+        "height": 700,
+        "resizable": true,
+        "minWidth": 720,
+        "minHeight": 600,
+        "center": true,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "neoconnect"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "deb",
+      "rpm"
+    ],
+    "category": "Utility",
+    "shortDescription": "Neoxify VPN",
+    "longDescription": "The Neoxify VPN client for Linux, with its root helper service.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "nftables",
+          "iproute2",
+          "wireguard-tools",
+          "openvpn",
+          "xdg-utils"
+        ],
+        "files": {
+          "/usr/lib/neoxify/neoxify-helper": "resources/neoxify-helper",
+          "/usr/lib/neoxify/xray": "resources/xray",
+          "/usr/lib/systemd/system/neoxify-helper.service": "../packaging/neoxify-helper.service"
+        },
+        "desktopTemplate": "../packaging/neoxify.desktop",
+        "postInstallScript": "../packaging/deb/postinst",
+        "preRemoveScript": "../packaging/deb/prerm",
+        "postRemoveScript": "../packaging/deb/postrm"
+      },
+      "rpm": {
+        "release": "1",
+        "depends": [
+          "nftables",
+          "iproute",
+          "wireguard-tools",
+          "openvpn",
+          "xdg-utils"
+        ],
+        "files": {
+          "/usr/lib/neoxify/neoxify-helper": "resources/neoxify-helper",
+          "/usr/lib/neoxify/xray": "resources/xray",
+          "/usr/lib/systemd/system/neoxify-helper.service": "../packaging/neoxify-helper.service"
+        },
+        "desktopTemplate": "../packaging/neoxify.desktop",
+        "postInstallScript": "../packaging/rpm/postinst",
+        "preRemoveScript": "../packaging/rpm/preremove",
+        "postRemoveScript": "../packaging/rpm/postremove"
+      }
+    }
+  }
+}

@@ -17,6 +17,7 @@ import { traceRequests } from "../lib/unanswered-report";
 import { routesToAdopt } from "../lib/picker-routes";
 import { groupByPlace, placeKey, placeLabel, routePlace } from "../lib/route-place";
 import { LocationList, type ListEvidence } from "./LocationList";
+import { offeredUsers } from "../lib/failover";
 
 export type { ListEvidence } from "./LocationList";
 
@@ -154,7 +155,11 @@ export function LocationPicker({
   const { t, language } = useI18n();
   const panel = variant === "panel";
   const overlay = variant === "overlay";
-  const [routes, setRoutes] = useState<RouteOption[]>(initialRoutes ?? []);
+  const [heldRoutes, setRoutes] = useState<RouteOption[]>(initialRoutes ?? []);
+  // What the customer can choose from: every route, less IKEv2 where this
+  // platform cannot dial it (Linux). The list as it came is what is held
+  // and handed back (`routesRef`); only what is drawn is narrowed.
+  const routes = offeredUsers(heldRoutes);
   // Only a blocking load when there is genuinely nothing to show -- and
   // never in the panel, which loads only when asked.
   const [loading, setLoading] = useState(!panel && (initialRoutes ?? []).length === 0);
@@ -201,8 +206,8 @@ export function LocationPicker({
   stateRef.current = connectionState;
   // The rows as the latest render has them, for a request that settles
   // after the dashboard has offered a list (`routesToAdopt`).
-  const routesRef = useRef(routes);
-  routesRef.current = routes;
+  const routesRef = useRef(heldRoutes);
+  routesRef.current = heldRoutes;
   // Whether this picker's own request for the list has answered, and
   // whether one is out now.
   const ownAnswered = useRef(false);

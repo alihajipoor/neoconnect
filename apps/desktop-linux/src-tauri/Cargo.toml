@@ -1,0 +1,74 @@
+[package]
+name = "neoxify-desktop-linux"
+version = "0.1.0"
+description = "Neoxify VPN client for Linux"
+authors = ["Neoxify"]
+edition = "2021"
+
+# Its own workspace and its own lock file, as the macOS shell has, so a
+# half-finished app manifest can never stop the helper (the workspace one
+# directory up) from building. Cargo.lock started as a copy of the Windows
+# app's, so both desktops build against the same Tauri and the same
+# transitive crates; Tauri refuses to build when a crate and its JavaScript
+# package are on different minors, and the JavaScript side is shared.
+[workspace]
+
+[lib]
+name = "desktop_linux_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "neoxify"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# Versions as the Windows app names them, for the modules pulled in from it
+# by path (relay_http, door_http, control_plane_probe, bundle_scope,
+# health_ip, window_fit): see the Windows Cargo.toml for why each is there.
+# No updater plugin: Linux does not install its own updates; it says a new
+# version exists and links to it.
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-store = "2"
+tauri-plugin-http = "2"
+tauri-plugin-deep-link = "2"
+tauri-plugin-process = "2"
+tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
+neoconnect-ipc = { path = "../../desktop-windows/ipc" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "io-util", "time", "macros", "rt", "process"] }
+# getifaddrs, for the addresses `network_uplinks` reports. Already in the
+# tree under Tauri; bindings only, no C library.
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+hyper-util = { version = "0.1", default-features = false, features = ["client-proxy", "client-proxy-system"] }
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["alloc"] }
+ring = "0.17"
+base64 = "0.22"
+flate2 = "1"
+hyper = { version = "1", default-features = false }
+# Desktop notifications over D-Bus, through zbus (pure Rust, already in the
+# tree under Tauri) rather than libdbus, so the package needs no C library
+# beyond what WebKitGTK already brings.
+notify-rust = { version = "4", default-features = false, features = ["z"] }
+
+[dev-dependencies]
+h2 = "0.4"
+tokio-rustls = { version = "0.26", default-features = false }
+http = "1"
+bytes = "1"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

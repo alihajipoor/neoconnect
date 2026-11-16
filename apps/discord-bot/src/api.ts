@@ -8,7 +8,7 @@ export interface StatusSummary {
 }
 
 export interface PlatformRelease {
-  platform: "windows" | "android";
+  platform: "windows" | "android" | "linux";
   /** Null when nothing is released for that platform yet, or the feed failed. */
   version: string | null;
   url: string | null;

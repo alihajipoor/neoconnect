@@ -63,9 +63,14 @@ return array(
     // actually is and what it actually carries.
     'meta.home.title' => 'Neoxify VPN for networks that block VPNs',
     'meta.home.description' => 'A VPN app for Windows, Android and iPhone that finds a way to connect on networks that block VPNs. Servers in Europe and Türkiye. Free trial.',
+    'meta.home.description.with_linux' => 'A VPN app for Windows, Android, iPhone and Linux that finds a way to connect on networks that block VPNs. Servers in Europe and Türkiye. Free trial.',
 
     'meta.download.title' => 'Download Neoxify VPN for Windows, Android and iPhone',
     'meta.download.description' => 'Get the Neoxify VPN app for Windows, Android, iPhone and iPad. The links always get the latest version. There is no Mac app yet.',
+    // The .with_linux versions replace the line above them once a Linux
+    // package is configured (see nx_t() in inc/bootstrap.php).
+    'meta.download.title.with_linux' => 'Download Neoxify VPN for Windows, Android, iPhone and Linux',
+    'meta.download.description.with_linux' => 'Get the Neoxify VPN app for Windows, Android, iPhone, iPad and Linux. The links always get the latest version. There is no Mac app yet.',
 
     'meta.contact.title' => 'Contact Neoxify | Questions and support',
     'meta.contact.description' => 'Ask about plans, payment or anything else. A person reads every message. If you already have an account, support in the app is faster.',
@@ -131,6 +136,7 @@ return array(
     // gives no date, which would be a guess. The iPhone and iPad app has
     // been on the App Store since 2026-11-14 (1.0.2).
     'home.hero.note_available' => 'Available for Windows, Android and iPhone. No Mac app yet.',
+    'home.hero.note_available.with_linux' => 'Available for Windows, Android, iPhone and Linux. No Mac app yet.',
     'home.hero.note_soon' => 'The Windows app is coming soon. No Mac app yet.',
 
     'beta.badge' => 'Beta',
@@ -369,6 +375,19 @@ return array(
     'download.other.android' => 'Android',
     'download.other.status' => 'Not available yet',
 
+    'download.linux.name' => 'Linux',
+    'download.linux.requirements' => 'A 64-bit computer with Ubuntu 22.04 or newer, Debian 12 or newer, or Fedora 40 or newer',
+    'download.linux.button_deb' => 'Ubuntu, Debian, Mint (.deb)',
+    'download.linux.button_rpm' => 'Fedora (.rpm)',
+    'download.linux.beta' => 'This is our first Linux version, so it may still have rough edges. If something doesn\'t work, please tell us.',
+    'download.linux.soon' => 'The Linux app is being built. The download will appear here the day it\'s ready.',
+    'download.linux.steps.title' => 'Installing on Linux',
+    'download.linux.steps.intro' => 'Download the file for your system. Then open a terminal in the folder it was saved to, usually Downloads, and run one command.',
+    'download.linux.steps.deb' => 'On Ubuntu, Debian or Mint:',
+    'download.linux.steps.rpm' => 'On Fedora:',
+    'download.linux.steps.after' => 'It asks for your password because it also installs a small background service that sets up the VPN. Then open Neoxify from your apps menu, sign in and connect.',
+    'download.autoupdate.linux' => 'On Linux, the app tells you when a new version is out, but it doesn\'t install it by itself. Download the new file from this page and install it the same way. Your account and settings stay.',
+
     // -----------------------------------------------------------------
     // Contact
     // -----------------------------------------------------------------
@@ -511,6 +530,7 @@ return array(
 
     // Describes the card image itself, for someone who cannot see it.
     'meta.og.image_alt' => 'Neoxify. Your internet. Without limits. A VPN app for Windows, Android and iPhone.',
+    'meta.og.image_alt.with_linux' => 'Neoxify. Your internet. Without limits. A VPN app for Windows, Android, iPhone and Linux.',
 
     // -----------------------------------------------------------------
     // Structured data
@@ -525,6 +545,7 @@ return array(
     'schema.app.windows.name' => 'Neoxify for Windows',
     'schema.app.android.name' => 'Neoxify for Android',
     'schema.app.ios.name' => 'Neoxify for iPhone and iPad',
+    'schema.app.linux.name' => 'Neoxify for Linux',
     'schema.app.trial' => 'Free trial for new accounts. No payment details needed.',
 
     // -----------------------------------------------------------------
@@ -833,6 +854,7 @@ return array(
     'home.answers.5.say' => 'Apple allows that only on devices an organisation manages. Custom mode is on Windows and Android.',
     'home.close.eyebrow' => 'Get started',
     'home.close.point1.term' => 'Windows, Android and iPhone.',
+    'home.close.point1.term.with_linux' => 'Windows, Android, iPhone and Linux.',
     'home.close.point1.rest' => 'No Mac app yet.',
     'home.close.point2.term' => 'Unsigned installer.',
     'home.close.point2.rest' => 'Windows warns you the first time.',

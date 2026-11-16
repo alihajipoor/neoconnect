@@ -1,6 +1,7 @@
 import { failedLately, scoreFor, speedFor, type ConnectHistory } from "./connect-history";
 import { reachabilityKey, reachabilityOf, type ReachabilityMap } from "./reachability";
 import type { IspHint, IspTag, Protocol, ProtocolUser } from "./types";
+import { offersIkev2 } from "./desktop-platform";
 
 export type IspTagCode = IspTag["code"];
 
@@ -92,6 +93,13 @@ const PROTOCOL_ORDER: Protocol[] = [
   "IKEV2",
 ];
 
+/** The credentials this platform can dial: all of them, except IKEv2 where
+ * it is not offered (`offersIkev2`). The same array when nothing is
+ * left out. */
+export function offeredUsers<T extends { protocol: string }>(users: T[]): T[] {
+  return offersIkev2() ? users : users.filter((u) => u.protocol !== "IKEV2");
+}
+
 /** A protocol's place in the fixed order. */
 function fixedRank(protocol: Protocol): number {
   const i = PROTOCOL_ORDER.indexOf(protocol);
@@ -174,6 +182,9 @@ export function orderCandidates(
     seed?: string | null;
   } = {},
 ): ProtocolUser[] {
+  // A platform with no way to dial IKEv2 (Linux's first version) never
+  // puts it on the ladder: it would only cost a refusal per pass.
+  users = offeredUsers(users);
   const {
     subscriptionId,
     resumeRouteId,

@@ -1,0 +1,49 @@
+# The Neoxify root helper: brings tunnels up and down for the app, which
+# talks to it over /run/neoxify/helper.sock.
+#
+# The hardening below is limited on purpose. The helper has to create tun
+# devices, add routes and policy rules, set sysctls such as src_valid_mark
+# (as wg-quick does), load an nftables table, and change DNS through
+# systemd-resolved or by rewriting /etc/resolv.conf. So /etc, /proc/sys,
+# /dev/net/tun and netlink all stay reachable; what it never needs, home
+# directories, other users' /tmp, cgroups, realtime scheduling, is closed.
+# No ProtectClock or PrivateDevices: both close the device list, and
+# /dev/net/tun has to stay open.
+[Unit]
+Description=Neoxify VPN helper
+Documentation=https://neoxify.net
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/neoxify/neoxify-helper
+# Fail open: whatever the helper left (the leak-protection table, routes,
+# DNS), a stop or a crash takes it away, so a dead helper never leaves the
+# machine without a network.
+ExecStopPost=/usr/lib/neoxify/neoxify-helper sweep
+Restart=on-failure
+RestartSec=2
+# Room for every connection the helper serves at once (256) and for the
+# nft and ip it must still be able to run to take a tunnel down.
+LimitNOFILE=65536
+
+RuntimeDirectory=neoxify
+RuntimeDirectoryMode=0755
+StateDirectory=neoxify
+StateDirectoryMode=0700
+
+NoNewPrivileges=yes
+ProtectSystem=true
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+
+[Install]
+WantedBy=multi-user.target
