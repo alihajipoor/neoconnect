@@ -283,6 +283,29 @@ return array(
     'referrals_enabled' => false,
 
     // ---------------------------------------------------------------
+    // Google ads measurement (inc/ads.php, assets/js/ads.js)
+    // ---------------------------------------------------------------
+
+    // The Google tag, for visitors who arrive from one of our Google ads
+    // and NOBODY else: a request whose address carries a Google click id
+    // (gclid, gbraid, wbraid), or a later page of that same visit. Every
+    // other visitor gets the site exactly as before -- no Google source in
+    // the policy header, no tag in the page. A visitor in Europe is asked
+    // first; nothing from Google loads before "Allow".
+    //
+    // A public identifier, safe in the repo. Empty turns it all off.
+    'google_tag_id' => 'GTM-P95CLDXK',
+
+    // The Google Ads conversion target, "AW-123456789/AbCdEfGh...". In
+    // Google Ads: Goals > Summary > "+ Create conversion action", a
+    // website conversion from the Google tag, set up "Manually using
+    // code"; then "See event snippet" -- its 'send_to' value is this. Empty for now: each download tap then
+    // sends only the named event download_click (with the platform), which
+    // can be made into a conversion in Google's own screens. Set, each tap
+    // also sends the conversion event to this target.
+    'google_ads_send_to' => '',
+
+    // ---------------------------------------------------------------
     // Forms
     // ---------------------------------------------------------------
 

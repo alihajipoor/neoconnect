@@ -62,5 +62,8 @@ if __name__ == "__main__":
     # size iOS actually asks for), 512px for the Organization logo in the
     # structured data, which Google wants at least 112px square.
     make_icon(32, os.path.join(out, "favicon-32.png"))
+    # 192px: Google's search results want an icon whose side is a multiple
+    # of 48px. The file on disk was first made by scaling logo-512.png.
+    make_icon(192, os.path.join(out, "favicon-192.png"))
     make_icon(180, os.path.join(out, "apple-touch-icon.png"))
     make_icon(512, os.path.join(out, "logo-512.png"))

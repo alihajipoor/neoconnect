@@ -53,10 +53,17 @@ define('NX_CSP_NONE', "default-src 'none'; frame-ancestors 'none'; base-uri 'non
  *
  * @param array $scriptHashes base64 SHA-256 values of inline scripts
  * @param array $styleHashes  base64 SHA-256 values of inline <style> blocks
+ * @param array $extra        directive => extra sources. Empty for every
+ *                            visitor but one who came from a Google ad
+ *                            (inc/ads.php), and empty gives exactly the
+ *                            policy every other visitor has always had.
  * @return string
  */
-function nx_csp_for_page($scriptHashes, $styleHashes)
+function nx_csp_for_page($scriptHashes, $styleHashes, $extra = array())
 {
+    $more = function ($directive) use ($extra) {
+        return empty($extra[$directive]) ? '' : ' ' . implode(' ', $extra[$directive]);
+    };
     $script = array();
     foreach ($scriptHashes as $h) {
         $script[] = "'sha256-" . $h . "'";
@@ -66,20 +73,25 @@ function nx_csp_for_page($scriptHashes, $styleHashes)
         $style[] = "'sha256-" . $h . "'";
     }
 
-    return implode('; ', array(
+    $directives = array(
         "default-src 'self'",
-        'script-src ' . implode(' ', $script) . " 'strict-dynamic' 'self'",
+        'script-src ' . implode(' ', $script) . " 'strict-dynamic' 'self'" . $more('script-src'),
         'style-src ' . implode(' ', $style),
-        "img-src 'self'",
+        "img-src 'self'" . $more('img-src'),
         "font-src 'self'",
-        "connect-src 'self'",
+        "connect-src 'self'" . $more('connect-src'),
+    );
+    if (!empty($extra['frame-src'])) {
+        $directives[] = "frame-src 'self'" . $more('frame-src');
+    }
+    return implode('; ', array_merge($directives, array(
         "manifest-src 'self'",
         "media-src 'none'",
         "object-src 'none'",
         "base-uri 'none'",
         "form-action 'self'",
         "frame-ancestors 'none'",
-    ));
+    )));
 }
 
 /**
