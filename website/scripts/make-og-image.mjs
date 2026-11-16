@@ -4,7 +4,7 @@
  *
  *   node website/scripts/make-og-image.mjs [--chrome <path to chrome>]
  *
- * Writes assets/img/og-en-v6.jpg and og-fa-v6.jpg (1200x630, the size
+ * Writes assets/img/og-en-v7.jpg and og-fa-v7.jpg (1200x630, the size
  * Telegram, WhatsApp, Facebook, LinkedIn and X all crop from).
  *
  * JPEG at quality 85, not PNG. The truecolor PNGs (v2) were 260-300 KB,
@@ -32,6 +32,10 @@
  * first card without them.
  * v6 (2026-10-26) keeps v5's art and only rewrites the kicker and the
  * benefit line in plainer words.
+ * v7 (2026-11-14) adds iPhone to the platforms, now that the app is on the
+ * App Store, and matches the lights to today's countries (the same anchors
+ * as inc/partials/world.php): Singapore off, the UK, the Netherlands and
+ * Sweden on.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -61,7 +65,7 @@ const COPY = {
     kicker: 'A VPN for restricted networks',
     l1: 'Your internet.', l2: 'Without limits.',
     status: 'Connected',
-    platforms: 'Windows · Android',
+    platforms: 'Windows · Android · iPhone',
     benefit: 'Finds a way to connect on your network',
   },
   fa: {
@@ -69,7 +73,7 @@ const COPY = {
     kicker: 'وی‌پی‌ان برای اینترنت محدود',
     l1: 'اینترنت شما.', l2: 'بدون محدودیت.',
     status: 'متصل',
-    platforms: 'ویندوز · اندروید',
+    platforms: 'ویندوز · اندروید · آیفون',
     benefit: 'خودش روش اتصال مناسب شبکه شما را پیدا می‌کند',
   },
 };
@@ -104,7 +108,8 @@ h1 span{display:block}
 <div class="map">
   <span class="lamp" style="left:55.53%;top:11.42%"></span><span class="lamp" style="left:50.57%;top:19.63%"></span>
   <span class="lamp here" style="left:52.09%;top:18.69%"></span><span class="lamp" style="left:57.38%;top:25.54%"></span>
-  <span class="lamp" style="left:78.83%;top:55.93%"></span>
+  <span class="lamp" style="left:49.97%;top:17.66%"></span><span class="lamp" style="left:51.16%;top:17.03%"></span>
+  <span class="lamp" style="left:54.03%;top:12.01%"></span>
 </div>
 <div class="wrap">
   <div class="brand">
@@ -134,7 +139,7 @@ try {
     fs.writeFileSync(tmp, html(c));
     await page.goto(pathToFileURL(tmp).href, { waitUntil: 'networkidle0' });
     await page.evaluate(() => document.fonts.ready);
-    const out = path.join(site, 'assets', 'img', `og-${lang}-v6.jpg`);
+    const out = path.join(site, 'assets', 'img', `og-${lang}-v7.jpg`);
     await page.screenshot({ path: out, type: 'jpeg', quality: 85 });
     fs.unlinkSync(tmp);
     console.log(out, fs.statSync(out).size, 'bytes');

@@ -1,0 +1,5 @@
+# Installer copies written at runtime by get/index.php. Only this file and
+# .htaccess are tracked, so the folder exists after a fresh unzip.
+*
+!.gitignore
+!.htaccess

@@ -36,6 +36,9 @@ function excluded(rel) {
   if (rel.endsWith('.zip')) return true;
   if (rel === 'data/secret.php' || rel === 'data/ratelimit.php') return true;
   if (/^data\/submissions-.*\.php$/.test(rel)) return true;
+  // Installer copies and their bookkeeping, written at runtime by get/index.php.
+  if (rel.startsWith('data/installers/')) return true;
+  if (rel.startsWith('dl/') && rel !== 'dl/.htaccess') return true;
   return false;
 }
 

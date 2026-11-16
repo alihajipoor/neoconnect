@@ -8,8 +8,14 @@
  * state where a button appears that cannot work.
  *
  * Availability comes from config (windows_installer_url,
- * android_installer_url and platforms_planned), so a platform shipping is a
- * config change, not an edit in three places that can disagree.
+ * android_installer_url, ios_app_store_url and platforms_planned), so a
+ * platform shipping is a config change, not an edit in three places that
+ * can disagree.
+ *
+ * The Windows and Android buttons point at /get/<platform> on this site
+ * (get/index.php), which hands out a copy kept here, so they work where the
+ * control plane's domain is blocked. The App Store and Google Play buttons
+ * are plain links in the site's own style: no store badge artwork.
  *
  * The page holds no version numbers. The configured URLs always resolve to
  * the current release, and a number printed beside a rolling link can only
@@ -20,6 +26,8 @@ defined('NX') || exit;
 
 $nx_available = nx_windows_available();
 $nx_android = nx_android_available();
+$nx_play = nx_android_play_url();
+$nx_ios = nx_ios_available();
 $nx_planned = nx_cfg('platforms_planned', array());
 
 require NX_INC . '/partials/head.php';
@@ -61,7 +69,7 @@ require NX_INC . '/partials/head.php';
         <h3 class="platform__name"><?php echo nx_e('download.windows.name'); ?></h3>
         <?php if ($nx_available): ?>
           <p class="platform__meta"><?php echo nx_e('download.windows.requirements'); ?></p>
-          <a class="btn btn--primary btn--block" href="<?php echo nx_esc(nx_windows_download_url()); ?>">
+          <a class="btn btn--primary btn--block" href="<?php echo nx_esc(nx_installer_button_url('windows')); ?>">
             <?php echo nx_icon('download'); ?><span><?php echo nx_e('download.windows.button'); ?></span>
           </a>
           <p class="platform__note">
@@ -85,10 +93,28 @@ require NX_INC . '/partials/head.php';
           <span class="platform__glyph"><?php echo nx_platform_icon('android'); ?></span>
           <h3 class="platform__name"><?php echo nx_e('download.android.name'); ?></h3>
           <p class="platform__meta"><?php echo nx_e('download.android.requirements'); ?></p>
-          <a class="btn btn--primary btn--block" href="<?php echo nx_esc(nx_android_download_url()); ?>">
+          <a class="btn btn--primary btn--block" href="<?php echo nx_esc(nx_installer_button_url('android')); ?>">
             <?php echo nx_icon('download'); ?><span><?php echo nx_e('download.android.button'); ?></span>
           </a>
+          <?php if ($nx_play !== ''): ?>
+            <a class="btn btn--ghost btn--block" href="<?php echo nx_esc($nx_play); ?>" rel="noopener">
+              <span><?php echo nx_e('download.android.play'); ?></span>
+            </a>
+          <?php endif; ?>
           <p class="platform__note"><?php echo nx_e('download.windows.always_current'); ?></p>
+        </article>
+      <?php endif; ?>
+
+      <!-- iPhone and iPad -->
+      <?php if ($nx_ios): ?>
+        <article class="platform platform--ready">
+          <span class="platform__glyph"><?php echo nx_platform_icon('apple'); ?></span>
+          <h3 class="platform__name"><?php echo nx_e('download.ios.name'); ?></h3>
+          <p class="platform__meta"><?php echo nx_e('download.ios.requirements'); ?></p>
+          <a class="btn btn--primary btn--block" href="<?php echo nx_esc(nx_ios_store_url()); ?>" rel="noopener">
+            <span><?php echo nx_e('download.ios.button'); ?></span>
+          </a>
+          <p class="platform__note"><?php echo nx_e('download.ios.note'); ?></p>
         </article>
       <?php endif; ?>
 
@@ -140,7 +166,10 @@ require NX_INC . '/partials/head.php';
               <?php /* Android is the exception and the page says so: the
                        system will not let an app replace its own installer
                        without the customer confirming. */ ?>
-              <p class="u-mt-sm"><?php echo nx_e('download.autoupdate.android'); ?></p>
+              <p class="u-mt-sm"><?php echo nx_e($nx_play !== '' ? 'download.autoupdate.android_play' : 'download.autoupdate.android'); ?></p>
+            <?php endif; ?>
+            <?php if ($nx_ios): ?>
+              <p class="u-mt-sm"><?php echo nx_e('download.autoupdate.ios'); ?></p>
             <?php endif; ?>
           </div>
         <?php endif; ?>
@@ -152,6 +181,20 @@ require NX_INC . '/partials/head.php';
           <div class="notice notice--warn">
             <h2><?php echo nx_e('download.android.sideload.title'); ?></h2>
             <p><?php echo nx_e('download.android.sideload.body'); ?></p>
+            <?php if ($nx_play !== ''): ?>
+              <p class="u-mt-sm"><?php echo nx_e('download.android.sideload.play'); ?></p>
+            <?php endif; ?>
+          </div>
+        <?php endif; ?>
+
+        <?php if ($nx_ios): ?>
+          <?php /* What is different on iPhone, said where someone choosing
+                   the iPhone app will read it, not discovered after paying. */ ?>
+          <div class="notice">
+            <h2><?php echo nx_e('download.ios.differs.title'); ?></h2>
+            <?php for ($nx_i = 1; $nx_i <= 3; $nx_i++): ?>
+              <p<?php echo $nx_i > 1 ? ' class="u-mt-sm"' : ''; ?>><?php echo nx_e('download.ios.differs.' . $nx_i); ?></p>
+            <?php endfor; ?>
           </div>
         <?php endif; ?>
 

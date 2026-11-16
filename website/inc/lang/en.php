@@ -62,10 +62,10 @@ return array(
     // the product can least substantiate. This one leads with what it
     // actually is and what it actually carries.
     'meta.home.title' => 'Neoxify VPN for networks that block VPNs',
-    'meta.home.description' => 'A VPN app for Windows and Android that finds a way to connect on networks that block VPNs. Servers in Europe and Türkiye. Free trial, no config files.',
+    'meta.home.description' => 'A VPN app for Windows, Android and iPhone that finds a way to connect on networks that block VPNs. Servers in Europe and Türkiye. Free trial.',
 
-    'meta.download.title' => 'Download Neoxify VPN for Windows and Android',
-    'meta.download.description' => 'Download the Neoxify VPN app for Windows or Android. The link always gets the latest version. There is no macOS or iOS app yet.',
+    'meta.download.title' => 'Download Neoxify VPN for Windows, Android and iPhone',
+    'meta.download.description' => 'Get the Neoxify VPN app for Windows, Android, iPhone and iPad. The links always get the latest version. There is no Mac app yet.',
 
     'meta.contact.title' => 'Contact Neoxify | Questions and support',
     'meta.contact.description' => 'Ask about plans, payment or anything else. A person reads every message. If you already have an account, support in the app is faster.',
@@ -117,14 +117,11 @@ return array(
     'home.hero.cta_primary' => 'Download for Windows',
     'home.hero.cta_primary_soon' => 'See download options',
     'home.hero.cta_secondary' => 'See plans',
-    // "in development" was an overclaim on both counts. No macOS client
-    // exists in any form, and iOS has no VPN code at all -- it is blocked
-    // on an Apple *organization* enrolment that cannot begin until a legal
-    // entity exists. CI builds an iOS simulator target, which cannot run a
-    // tunnel and is not evidence of a client. "Not yet" is the true
-    // statement; a date would be a guess.
-    'home.hero.note_available' => 'Available for Windows and Android. No macOS or iOS app yet.',
-    'home.hero.note_soon' => 'The Windows app is coming soon. No macOS or iOS app yet.',
+    // No macOS client exists in any form, so the note says "not yet" and
+    // gives no date, which would be a guess. The iPhone and iPad app has
+    // been on the App Store since 2026-11-14 (1.0.2).
+    'home.hero.note_available' => 'Available for Windows, Android and iPhone. No Mac app yet.',
+    'home.hero.note_soon' => 'The Windows app is coming soon. No Mac app yet.',
 
     'beta.badge' => 'Beta',
     'beta.hero' => 'In beta and still changing',
@@ -163,7 +160,7 @@ return array(
     'home.features.support.body' => 'Support is a conversation inside the app, where we can already see your account instead of asking you to describe it. Ask, get on with your day, and pick up the reply when it lands.',
 
     'home.features.updates.title' => 'It updates itself',
-    'home.features.updates.body' => 'Install it once. The Windows app then downloads and installs new versions by itself. On Android, you install updates from the download page.',
+    'home.features.updates.body' => 'Install it once. The Windows app then downloads and installs new versions by itself. On iPhone, and on Android if you got it from Google Play, the store keeps it up to date. If you installed the Android file from this site, get updates from the download page.',
 
     'home.features.usage.title' => 'Your data, counted openly',
     'home.features.usage.body' => 'Usage is measured per account and shown in the app, so you always know exactly where you stand against your plan instead of guessing.',
@@ -244,7 +241,7 @@ return array(
 
     'home.pricing.eyebrow' => 'Plans',
     'home.pricing.title' => 'Pick a plan',
-    'home.pricing.subtitle' => 'You buy a plan in the app. Pay by international card or crypto.',
+    'home.pricing.subtitle' => 'You buy a plan in the app. Pay by international card or crypto, or through the App Store on iPhone.',
     'home.pricing.popular' => 'Most popular',
     'home.pricing.per_month' => '/month',
     'home.pricing.per_days' => 'per :days days',
@@ -318,6 +315,8 @@ return array(
 
     'download.autoupdate.title' => 'Updates',
     'download.autoupdate.android' => 'On Android it works differently. Android doesn\'t let an app replace itself, so when a new version comes out, download it from this page and install it over the old one. Your account and settings stay.',
+    'download.autoupdate.android_play' => 'On Android it depends on where you got the app. Google Play updates it by itself. If you installed the file from this page, Android doesn\'t let an app replace itself, so download each new version here and install it over the old one. Your account and settings stay.',
+    'download.autoupdate.ios' => 'On iPhone and iPad, the App Store updates the app.',
     'download.autoupdate.body' => 'After you install it, the Windows app checks for new versions and installs them by itself. You don\'t need to come back here for updates.',
 
     'download.unsigned.title' => 'Windows will show a warning',
@@ -332,23 +331,32 @@ return array(
 
     // --- Android ---------------------------------------------------
     'download.android.name' => 'Android',
-    'download.android.requirements' => 'Android 7 or newer, 64-bit',
+    'download.android.requirements' => 'Android 7 or newer',
     'download.android.button' => 'Download for Android',
+    'download.android.play' => 'Get it on Google Play',
 
     'download.android.sideload.title' => 'Your phone will ask before installing',
     'download.android.sideload.body' => 'Android only installs apps from outside Google Play if you allow it. When you open the downloaded file, your phone asks whether to allow installs from your browser. Allow it, then tap Install. The warning is about where the file came from. It doesn\'t mean something is wrong with it.',
+    'download.android.sideload.play' => 'If you\'d rather not allow this and Google Play works for you, you can install the app from there instead. The Google Play version can\'t take payments or voucher codes, so you buy a plan or enter a code in your account area on this website.',
 
     'download.android.steps.title' => 'Installing on Android',
     'download.android.steps.1' => 'Tap the download button, then open the file when it finishes.',
     'download.android.steps.2' => 'Allow your browser to install apps if your phone asks, then tap Install.',
     'download.android.steps.3' => 'Open Neoxify, sign up or sign in, and confirm your email with the code we send you.',
     'download.android.steps.4' => 'Pick a country and connect. Android asks once for permission to set up a VPN. Tap OK.',
+    'download.ios.name' => 'iPhone and iPad',
+    'download.ios.requirements' => 'iOS or iPadOS 15 or newer',
+    'download.ios.button' => 'Get it on the App Store',
+    'download.ios.note' => 'Updates come from the App Store',
+    'download.ios.differs.title' => 'On iPhone and iPad',
+    'download.ios.differs.1' => 'You can buy a plan in the app, through the App Store, or in your account area on this website by card or crypto. If you already have a plan, just sign in with the same account.',
+    'download.ios.differs.2' => 'The iPhone app has no field for voucher codes. Enter a code in your account area on this website, or in the Windows app.',
+    'download.ios.differs.3' => 'Custom mode isn\'t there. Apple allows choosing which apps use the VPN only on devices an organisation manages.',
 
     'download.other.title' => 'Other platforms',
     'download.other.body' => 'Not available yet. We won\'t announce a date until the app is ready.',
     'download.other.macos' => 'macOS',
     'download.other.android' => 'Android',
-    'download.other.ios' => 'iOS',
     'download.other.status' => 'Not available yet',
 
     // -----------------------------------------------------------------
@@ -492,7 +500,7 @@ return array(
     // -----------------------------------------------------------------
 
     // Describes the card image itself, for someone who cannot see it.
-    'meta.og.image_alt' => 'Neoxify. Your internet. Without limits. A VPN app for Windows and Android.',
+    'meta.og.image_alt' => 'Neoxify. Your internet. Without limits. A VPN app for Windows, Android and iPhone.',
 
     // -----------------------------------------------------------------
     // Structured data
@@ -503,9 +511,10 @@ return array(
     // -----------------------------------------------------------------
 
     'schema.org.description' => 'Neoxify is a paid VPN service for people on networks that block VPNs. Its apps have several ways to connect and pick one that works.',
-    'schema.product.description' => 'A VPN plan with several ways to connect, servers in Europe and Türkiye, and apps for Windows and Android.',
+    'schema.product.description' => 'A VPN plan with several ways to connect, servers in Europe and Türkiye, and apps for Windows, Android and iPhone.',
     'schema.app.windows.name' => 'Neoxify for Windows',
     'schema.app.android.name' => 'Neoxify for Android',
+    'schema.app.ios.name' => 'Neoxify for iPhone and iPad',
     'schema.app.trial' => 'Free trial for new accounts. No payment details needed.',
 
     // -----------------------------------------------------------------
@@ -649,7 +658,7 @@ return array(
 
     'features.split.title' => 'Choose which apps use the VPN',
     'features.split.body' => 'In Custom mode you choose which apps use the VPN, and everything else keeps your normal connection. You choose by app, not by website, so your browser and a game can take different paths.',
-    'features.split.platforms' => 'Available on Windows and Android. Not on iOS, because Apple only allows per-app VPN on devices managed by an organisation, so no consumer app can offer it.',
+    'features.split.platforms' => 'Available on Windows and Android. Not on iPhone or iPad, because Apple allows per-app VPN only on devices an organisation manages, so no App Store app can offer it.',
 
     'features.relay.title' => 'A plan for the most restricted networks',
     'features.relay.body' => 'On some networks, a direct connection abroad doesn\'t hold at all. The Ultimate plan has backup routes made for that.',
@@ -704,13 +713,13 @@ return array(
     'pricing.trial.body' => 'You don\'t need a payment method to start. Create an account in the app, confirm your email and connect. You can see whether it works on your network before you pay anything.',
 
     'pricing.payment.title' => 'How to pay',
-    'pricing.payment.body' => 'Pay by international card or crypto, in the app. Local bank cards aren\'t accepted, so if your card doesn\'t work abroad, pay with crypto. You get an invoice for every payment, which you can open and print.',
+    'pricing.payment.body' => 'Pay by international card or crypto in the Windows app, in the Android app downloaded from this website, or in your account area on this website. Local bank cards aren\'t accepted, so if your card doesn\'t work abroad, pay with crypto. On iPhone and iPad you pay through the App Store. The Google Play version of the Android app has no way to pay, so buy in your account area instead. You get an invoice for every card or crypto payment, which you can open and print.',
 
     'pricing.refund.title' => 'Before you buy',
     'pricing.refund.body' => 'Use the free trial to check that it works on your network before you pay. We don\'t have a written money-back guarantee, so we won\'t promise one. If something goes wrong, contact support and we\'ll talk it through.',
 
     'pricing.voucher.title' => 'Bought from a reseller?',
-    'pricing.voucher.body' => 'Enter your voucher code in the app or in your account area. A valid code activates the plan right away, with no payment step.',
+    'pricing.voucher.body' => 'Enter your voucher code in the Windows app, in the Android app downloaded from this website, or in your account area on this website. The iPhone app and the Google Play version have no field for codes. A valid code activates the plan right away, with no payment step.',
 
     // =================================================================
     // FAQ page
@@ -809,12 +818,12 @@ return array(
     'home.answers.4.claim' => 'Works everywhere',
     'home.answers.4.lead' => 'In restricted countries, some ways to connect are often blocked, and none works everywhere.',
     'home.answers.4.say' => 'We keep all of them, because what gets blocked changes from week to week.',
-    'home.answers.5.claim' => 'Available on iOS',
-    'home.answers.5.lead' => 'There\'s no iOS app.',
-    'home.answers.5.say' => 'There are apps for Windows and Android. We won\'t give a date for iOS until the app exists. When it does, it won\'t have Custom mode, because iOS doesn\'t let an app choose which other apps use the VPN.',
+    'home.answers.5.claim' => 'Custom mode on iPhone',
+    'home.answers.5.lead' => 'The iPhone app can\'t choose which apps use the VPN.',
+    'home.answers.5.say' => 'Apple allows that only on devices an organisation manages. Custom mode is on Windows and Android.',
     'home.close.eyebrow' => 'Get started',
-    'home.close.point1.term' => 'Windows and Android.',
-    'home.close.point1.rest' => 'No iOS app yet.',
+    'home.close.point1.term' => 'Windows, Android and iPhone.',
+    'home.close.point1.rest' => 'No Mac app yet.',
     'home.close.point2.term' => 'Unsigned installer.',
     'home.close.point2.rest' => 'Windows warns you the first time.',
     'home.close.point3.term' => 'Connection logs are kept.',

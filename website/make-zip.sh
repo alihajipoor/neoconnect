@@ -104,7 +104,10 @@ zip -r -q "$ARCHIVE" . \
     -x '*.zip' \
     -x 'data/secret.php' \
     -x 'data/ratelimit.php' \
-    -x 'data/submissions-*.php'
+    -x 'data/submissions-*.php' \
+    -x 'data/installers/*' \
+    -x 'dl/windows/*' \
+    -x 'dl/android/*'
 
 echo "Built: $ARCHIVE"
 echo

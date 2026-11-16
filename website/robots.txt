@@ -24,6 +24,8 @@ Disallow: /data/
 
 # Voucher short links resolve to a redirect and are handed out privately.
 Disallow: /r/
+Disallow: /get/
+Disallow: /dl/
 
 # ?setlang= exists only to record a language choice and then redirect. It
 # is not a distinct page and must not be indexed as one.

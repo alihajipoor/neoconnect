@@ -65,6 +65,11 @@ def excluded(rel):
         return True
     if rel.startswith('data/submissions-'):
         return True
+    # Installer copies and their bookkeeping, written at runtime by get/index.php.
+    if rel.startswith('data/installers/'):
+        return True
+    if rel.startswith('dl/') and rel != 'dl/.htaccess':
+        return True
     # Editor and OS litter that has no business on a webserver.
     if os.path.basename(rel) in ('.DS_Store', 'Thumbs.db', 'desktop.ini'):
         return True

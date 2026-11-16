@@ -166,6 +166,22 @@ server {
     location ^~ /scripts/ { deny all; return 404; }
     location ~ /\.        { deny all; return 404; }
 
+    # Installer copies written by get/index.php. Plain files, never PHP.
+    # `types` replaces the whole MIME map inside this block, so both types
+    # are listed; without it the .apk goes out as application/octet-stream.
+    # No add_header here, so the server block's headers still apply.
+    location ^~ /dl/ {
+        types {
+            application/vnd.android.package-archive apk;
+            application/octet-stream                exe;
+        }
+        default_type application/octet-stream;
+        try_files $uri =404;
+        # ^~ wins over the dot-file rule above, so repeat it here: no
+        # .htaccess, and no half-fetched .part- file.
+        location ~ /\. { deny all; return 404; }
+    }
+
     # ------------------------------------------------------------------
     # Static assets: cached for a year
     # ------------------------------------------------------------------
