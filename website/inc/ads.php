@@ -120,6 +120,13 @@ function nx_ads_mode()
     if (nx_ads_tag_id() === '') {
         return $mode;
     }
+    // Restricted countries never get the tag, whatever the address says: a
+    // link carrying ?gclid= can be posted anywhere, and these visitors must
+    // never load anything from Google. The country header is often missing
+    // on the shared host, so ads.js checks the time zone as well.
+    if (nx_client_country() === 'IR') {
+        return $mode;
+    }
     if (isset($_GET['ads']) && $_GET['ads'] === 'off') {
         $mode = 'off';
     } elseif (nx_ads_has_click_id()) {

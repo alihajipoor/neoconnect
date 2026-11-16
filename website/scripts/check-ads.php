@@ -61,11 +61,11 @@ for ($i = 0; $i < 50 && !@fsockopen('127.0.0.1', $port); $i++) {
 }
 
 /** @return array [status line, headers by lower-case name (list), body] */
-function nxa_get($url, $cookie = '')
+function nxa_get($url, $cookie = '', $extra = '')
 {
     $ctx = stream_context_create(array('http' => array(
         'method' => 'GET',
-        'header' => ($cookie !== '' ? 'Cookie: ' . $cookie . "\r\n" : '') . "Accept-Language: en\r\n",
+        'header' => ($cookie !== '' ? 'Cookie: ' . $cookie . "\r\n" : '') . "Accept-Language: en\r\n" . $extra,
         'ignore_errors' => true,
         'follow_location' => 0,
         'timeout' => 20,
@@ -138,6 +138,27 @@ foreach (array('', 'fa/') as $loc) {
                 $failures[] = $label . ' sets a cookie: ' . implode(' | ', $h['set-cookie']);
             }
         }
+    }
+}
+
+// 1b. A restricted country never gets the tag, even with a click id or the
+//     marker cookie: a ?gclid= link can be posted anywhere.
+foreach (array(array('download/?gclid=test', ''), array('fa/download/?gclid=test', ''),
+    array('pricing/', 'nx_ad=1')) as $case) {
+    list($q, $cookie) = $case;
+    $label = '[restricted /' . $q . ($cookie !== '' ? ' cookie ' . $cookie : '') . ']';
+    list($st, $h, $body) = nxa_get($base . '/' . $q, $cookie, "CF-IPCountry: IR\r\n");
+    $checked++;
+    if (strpos($st, ' 200') === false) {
+        $failures[] = $label . ' status ' . $st;
+        continue;
+    }
+    $csp = isset($h['content-security-policy'][0]) ? $h['content-security-policy'][0] : '';
+    if ($csp === '' || preg_match('/google|doubleclick|frame-src/i', $csp)) {
+        $failures[] = $label . ' policy header names Google';
+    }
+    if (preg_match('/ads\.js|data-nx-ads|googletagmanager|gtag|dataLayer|adsbar/i', $body)) {
+        $failures[] = $label . ' HTML carries the Google tag or its loader';
     }
 }
 

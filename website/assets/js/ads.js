@@ -79,6 +79,16 @@
     ].indexOf(tz) !== -1;
   }
 
+  /* Restricted countries, by time zone: never the tag, never the question,
+   * even with a click id in the address (a link can be posted anywhere).
+   * The server skips them by country header too, but that header is often
+   * missing, so this is the check that always runs. */
+  function restricted() {
+    var tz = "";
+    try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { tz = ""; }
+    return ["Asia/Tehran"].indexOf(tz) !== -1;
+  }
+
   function gtag() { window.dataLayer.push(arguments); }
 
   function load() {
@@ -197,6 +207,10 @@
     return;
   }
 
+  if (restricted()) {
+    if (hasMarker()) { forget(); }
+    return;
+  }
   listen();
   if (hasMarker()) {          /* a later page of a visit already allowed */
     load();
