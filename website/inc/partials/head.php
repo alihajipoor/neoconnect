@@ -174,6 +174,7 @@ foreach (array('en', 'fa') as $nx_alt): ?>
 <meta name="twitter:image:alt" content="<?php echo nx_e('meta.og.image_alt'); ?>">
 <link rel="icon" href="<?php echo nx_esc(nx_asset('img/favicon.svg')); ?>" type="image/svg+xml">
 <link rel="icon" href="<?php echo nx_esc(nx_asset('img/favicon-32.png')); ?>" sizes="32x32" type="image/png">
+<link rel="icon" href="<?php echo nx_esc(nx_asset('img/favicon-192.png')); ?>" sizes="192x192" type="image/png">
 <link rel="apple-touch-icon" href="<?php echo nx_esc(nx_asset('img/apple-touch-icon.png')); ?>">
 <?php
 // Structured data, last in the head so it can read anything set above it.
