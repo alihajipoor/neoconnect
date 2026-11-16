@@ -299,11 +299,12 @@ return array(
     // The Google Ads conversion target, "AW-123456789/AbCdEfGh...". In
     // Google Ads: Goals > Summary > "+ Create conversion action", a
     // website conversion from the Google tag, set up "Manually using
-    // code"; then "See event snippet" -- its 'send_to' value is this. Empty for now: each download tap then
-    // sends only the named event download_click (with the platform), which
-    // can be made into a conversion in Google's own screens. Set, each tap
-    // also sends the conversion event to this target.
-    'google_ads_send_to' => '',
+    // code"; then "See event snippet" -- its 'send_to' value is this. Empty: each
+    // download tap sends only the named event download_click (with the
+    // platform). Set, each tap also sends the conversion event to this target.
+    // Set 2026-11-16: the action "Download click" (counted once per ad click,
+    // enhanced conversions off). A public identifier, safe in the repo.
+    'google_ads_send_to' => 'AW-18577582929/pLglCIfVqLkdENHWvZpF',
 
     // ---------------------------------------------------------------
     // Forms
