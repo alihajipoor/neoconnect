@@ -1,0 +1,9 @@
+target/
+dist/
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/resources/xray
+src-tauri/resources/neoxify-helper
+src-tauri/resources/geoip.dat
+src-tauri/resources/geosite.dat

@@ -1,0 +1,11 @@
+[package]
+name = "neoxify-helper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+neoconnect-ipc = { workspace = true }
+neoxify-tunnel = { path = "../tunnel" }
+neoxify-netguard = { path = "../netguard" }
+serde = { workspace = true }
+serde_json = { workspace = true }

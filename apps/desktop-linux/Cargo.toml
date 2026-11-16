@@ -1,0 +1,25 @@
+# The Linux client's privileged side: three crates, one lock file.
+#
+# `helper` is the root daemon the app talks to over a Unix socket. It owns
+# the wire protocol and the session's lifecycle and nothing else. `tunnel`
+# is everything that makes a tunnel carry traffic (engines, routes, DNS).
+# `netguard` is leak protection, as one nftables table.
+#
+# The Tauri app (`src-tauri`) is deliberately NOT a member: it has its own
+# lock file, as the macOS shell does, so a half-finished app manifest can
+# never stop the daemon from building.
+[workspace]
+resolver = "2"
+members = ["helper", "tunnel", "netguard"]
+exclude = ["src-tauri"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+neoconnect-ipc = { path = "../desktop-windows/ipc" }
+
+[profile.release]
+panic = "abort"
+strip = true
+opt-level = "s"
+lto = true

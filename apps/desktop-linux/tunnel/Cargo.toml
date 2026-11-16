@@ -1,0 +1,9 @@
+[package]
+name = "neoxify-tunnel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+neoconnect-ipc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
