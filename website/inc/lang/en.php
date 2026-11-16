@@ -99,6 +99,16 @@ return array(
     'privacy.date_format' => 'j F Y',
     'privacy.contact.title' => 'Contact',
     'privacy.contact.body' => 'Send questions about this page, or requests about your own data, to :email. Write from your account\'s email address so we can act on it.',
+    'privacy.ads_off.link' => 'Turn off Google\'s ad measurement in this browser',
+    'privacy.ads_off.done' => 'Done. This browser won\'t load Google\'s tag from our ads again, and its cookies on this site are deleted.',
+
+    // The question shown to a visitor in Europe who came from one of our
+    // Google ads (assets/js/ads.js). Nobody else ever sees it.
+    'ads.bar.label' => 'Ad measurement',
+    'ads.bar.text' => 'Can Google set a cookie so we can see whether our ad led you to a download?',
+    'ads.bar.allow' => 'Allow',
+    'ads.bar.deny' => 'No thanks',
+    'ads.bar.more' => 'How it works',
 
     'meta.reseller.title' => 'Become a Neoxify reseller | Sell VPN accounts',
     'meta.reseller.description' => 'For Telegram channels, gaming groups, shops and network admins. We agree terms with each reseller directly. There is no public price list.',

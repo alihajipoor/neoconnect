@@ -5,7 +5,9 @@
  *
  * Nothing here loads from another origin. Styles, script, fonts and images
  * are all this host's own -- a third-party request is slow at best and
- * blocked at worst on the networks this product exists for.
+ * blocked at worst on the networks this product exists for. The one
+ * exception is a visitor who arrived from one of our Google ads, and only
+ * once measurement is allowed for them: see inc/ads.php.
  *
  * PERFORMANCE SHAPE OF EVERY PAGE
  *   - The page's CSS is INLINED (base + blocks + the page's own module), so
@@ -48,6 +50,14 @@ if ($nx_page === 'home' && empty($NX_TITLE)) {
 if (in_array($nx_page, array('contact', 'reseller', 'delete-account'), true)) {
     $nx_css_modules[] = 'forms';
 }
+// Google ads measurement: only on a request from one of our Google ads, or
+// a later page of that visit (inc/ads.php). For everyone else nx_ads_mode()
+// is '' and nothing below differs by a byte.
+require_once NX_INC . '/ads.php';
+$nx_ads_mode = nx_ads_mode();
+if ($nx_ads_mode !== '') {
+    $nx_css_modules[] = 'ads';
+}
 $nx_css = nx_css_bundle($nx_css_modules);
 
 // The loader. Static apart from two values PHP fills in, and hashed below
@@ -62,12 +72,14 @@ $nx_announce_key = 'nx-announce-' . nx_cfg('announcement_version', '1');
 $nx_loader = '(function(d){var e=d.documentElement;e.className=e.className.replace(/\bno-js\b/,"js");'
     . 'try{if(localStorage.getItem(' . json_encode($nx_announce_key) . ')==="1")e.className+=" ann-off"}catch(x){}'
     . 'var s=d.createElement("script");s.src=' . json_encode(nx_asset('js/site.js'), JSON_UNESCAPED_SLASHES)
-    . ';s.async=true;d.head.appendChild(s)})(document);';
+    . ';s.async=true;d.head.appendChild(s)' . nx_ads_loader_js() . '})(document);';
 
 nx_security_headers(nx_csp_for_page(
     array(base64_encode(hash('sha256', $nx_loader, true))),
-    array(base64_encode(hash('sha256', $nx_css, true)))
+    array(base64_encode(hash('sha256', $nx_css, true))),
+    nx_ads_open_csp() ? nx_ads_csp_sources() : array()
 ));
+nx_ads_send_cookies();
 if (!headers_sent()) {
     // Generated per request and varying on the language cookie: revalidate
     // every time, never sit in a shared cache.

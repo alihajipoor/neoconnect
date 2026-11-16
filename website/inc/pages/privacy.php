@@ -36,10 +36,20 @@ require NX_INC . '/partials/head.php';
   <div class="wrap">
     <article class="card prose">
       <?php foreach ($nx_privacy['sections'] as $nx_section): ?>
-        <h2><?php echo nx_esc(nx_pick($nx_section['title'])); ?></h2>
+        <h2<?php echo isset($nx_section['id']) ? ' id="' . nx_esc($nx_section['id']) . '"' : ''; ?>><?php echo nx_esc(nx_pick($nx_section['title'])); ?></h2>
         <?php foreach (nx_pick_list($nx_section, 'body') as $nx_para): ?>
           <p><?php echo nx_esc($nx_para); ?></p>
         <?php endforeach; ?>
+        <?php if (!empty($nx_section['ads_off_link'])): ?>
+          <?php /* A plain link, so it works from any page and needs no
+                   script on this one for anyone else. The request it makes
+                   runs assets/js/ads.js, which records the "no" and deletes
+                   the cookies; the line below is shown only once it has. */ ?>
+          <p><a href="<?php echo nx_esc(nx_url('privacy') . '?ads=off#ads'); ?>"><?php echo nx_e('privacy.ads_off.link'); ?></a></p>
+          <?php if (nx_ads_mode() === 'off'): ?>
+            <p class="ads-done" data-ads-off-done hidden><?php echo nx_e('privacy.ads_off.done'); ?></p>
+          <?php endif; ?>
+        <?php endif; ?>
         <?php $nx_bullets = nx_pick_list($nx_section, 'bullets'); ?>
         <?php if ($nx_bullets): ?>
           <ul>

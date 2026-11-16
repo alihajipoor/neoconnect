@@ -30,7 +30,7 @@ defined('NX') || exit;
 
 return array(
 
-    'updated' => '2026-10-28',
+    'updated' => '2026-11-15',
 
     'sections' => array(
 
@@ -131,16 +131,44 @@ return array(
             ),
             'body' => array(
                 'en' => array(
-                    'This website sets at most two cookies, and only when you use the switch each one belongs to. One remembers whether you chose English or Persian, the other whether you chose the light or dark theme. Each holds that one word and nothing else, and neither identifies anyone. That\'s why there\'s no cookie banner: remembering a choice you made yourself doesn\'t need consent. There\'s no analytics, nothing loads from any other company, and nothing tracks you between visits.',
+                    'This website sets at most two cookies, and only when you use the switch each one belongs to. One remembers whether you chose English or Persian, the other whether you chose the light or dark theme. Each holds that one word and nothing else, and neither identifies anyone. That\'s why there\'s no cookie banner: remembering a choice you made yourself doesn\'t need consent. There\'s no analytics, nothing loads from any other company, and nothing tracks you between visits. The one exception is a visit that starts from one of our Google ads, described in the next section.',
                     'Before you choose a language, we pick one from the language your browser asks for, and from a country code if the network in front of our server adds one to the request. Neither is stored, and you can always switch.',
                     'If you send the contact form or apply to be a reseller, we receive what you typed: your name, email address and message, plus the extra fields on the reseller form. We also store a one-way hash of your IP address to stop the form being abused. We don\'t keep the address itself.',
                 ),
                 'fa' => array(
-                    'این سایت حداکثر دو کوکی می‌گذارد، آن هم فقط وقتی از کلید مربوط به هرکدام استفاده کنید. یکی به خاطر می‌سپارد انگلیسی را انتخاب کرده‌اید یا فارسی، و دیگری حالت روشن یا تیره را. در هرکدام فقط همان یک کلمه هست و هیچ‌کدام کسی را شناسایی نمی‌کند. برای همین بنر کوکی نداریم؛ به خاطر سپردن انتخابی که خودتان کرده‌اید رضایت جداگانه لازم ندارد. ابزار آمار و تحلیل نداریم، چیزی از سرور شرکت‌های دیگر بارگذاری نمی‌شود و بین بازدیدها ردیابی‌تان نمی‌کنیم.',
+                    'این سایت حداکثر دو کوکی می‌گذارد، آن هم فقط وقتی از کلید مربوط به هرکدام استفاده کنید. یکی به خاطر می‌سپارد انگلیسی را انتخاب کرده‌اید یا فارسی، و دیگری حالت روشن یا تیره را. در هرکدام فقط همان یک کلمه هست و هیچ‌کدام کسی را شناسایی نمی‌کند. برای همین بنر کوکی نداریم؛ به خاطر سپردن انتخابی که خودتان کرده‌اید رضایت جداگانه لازم ندارد. ابزار آمار و تحلیل نداریم، چیزی از سرور شرکت‌های دیگر بارگذاری نمی‌شود و بین بازدیدها ردیابی‌تان نمی‌کنیم. تنها استثنا بازدیدی است که از یکی از تبلیغ‌های ما در گوگل شروع شود و در بخش بعد توضیحش آمده است.',
                     'تا وقتی زبان را انتخاب نکرده‌اید، زبان صفحه را از روی زبانی که مرورگرتان درخواست می‌کند تعیین می‌کنیم، و از روی کد کشور اگر شبکه‌ای که جلوی سرور ماست آن را به درخواست اضافه کند. هیچ‌کدام ذخیره نمی‌شود و همیشه می‌توانید زبان را عوض کنید.',
                     'اگر فرم تماس یا درخواست نمایندگی را بفرستید، آنچه نوشته‌اید به دست ما می‌رسد: نام، ایمیل و پیامتان، به‌علاوه فیلدهای اضافه فرم نمایندگی. یک هش یک‌طرفه از آدرس IP شما را هم نگه می‌داریم تا جلوی سوءاستفاده از فرم گرفته شود. خود آدرس IP را نگه نمی‌داریم.',
                 ),
             ),
+        ),
+
+        // Must match what inc/ads.php and assets/js/ads.js actually do.
+        // Change either and this section changes with it.
+        array(
+            'id' => 'ads',
+            'title' => array(
+                'en' => 'Visits from our Google ads',
+                'fa' => 'بازدید از راه تبلیغ‌های ما در گوگل',
+            ),
+            'body' => array(
+                'en' => array(
+                    'If you come to this website by tapping one of our ads on Google, and only then, the page loads Google\'s tag. It shows us which ads lead to a download, so we spend on the ones that work.',
+                    'Google\'s tag stores up to three cookies on this site, each kept for 90 days: _gcl_au, and _gcl_aw or _gcl_gb, which hold the reference of the ad you tapped. We add one of our own, nx_ad. It holds the number 1, is deleted when you close the browser, and keeps the measurement on for the rest of that visit. When you tap a download button, Google is told which one. As on any site that uses its tag, Google also gets your IP address and browser details. We tell Google not to use any of this to personalise ads.',
+                    'None of this involves the VPN. This website can\'t see what you do through Neoxify, and it tells Google nothing about it.',
+                    'If your device\'s time zone is in Europe, or we can\'t tell, we ask first, and nothing from Google loads unless you choose Allow. If you choose No thanks, we remember it until you close the tab, without a cookie. Everywhere else the tag loads without asking. You can say no at any time with the link below. It turns the measurement off in this browser, deletes those cookies, and leaves a note in your browser\'s own storage so it stays off.',
+                    'Everyone else, including anyone who comes here any other way, gets the same two cookies as above and nothing from Google.',
+                ),
+                'fa' => array(
+                    'اگر با زدن یکی از تبلیغ‌های ما در گوگل به این سایت بیایید، و فقط در همین حالت، صفحه تگ گوگل را بارگذاری می‌کند. این تگ به ما نشان می‌دهد کدام تبلیغ‌ها به دانلود می‌رسند تا هزینه تبلیغ را صرف همان‌هایی کنیم که جواب می‌دهند.',
+                    'تگ گوگل حداکثر سه کوکی در این سایت می‌گذارد و هرکدام ۹۰ روز می‌ماند: _gcl_au، و _gcl_aw یا _gcl_gb که شناسه تبلیغی را که زده‌اید نگه می‌دارد. ما هم یک کوکی خودمان می‌گذاریم به اسم nx_ad. فقط عدد ۱ در آن است، با بستن مرورگر پاک می‌شود و باعث می‌شود سنجش تا آخر همان بازدید ادامه داشته باشد. وقتی دکمه دانلودی را می‌زنید، به گوگل گفته می‌شود کدام دکمه بوده. مثل هر سایت دیگری که تگ گوگل دارد، آدرس IP و مشخصات مرورگرتان هم به گوگل می‌رسد. از گوگل خواسته‌ایم از هیچ‌کدام از این‌ها برای شخصی‌سازی تبلیغ استفاده نکند.',
+                    'هیچ‌کدام از این‌ها به وی‌پی‌ان ربطی ندارد. این سایت نمی‌بیند با نئوکسیفای چه کار می‌کنید و چیزی هم درباره‌اش به گوگل نمی‌گوید.',
+                    'اگر منطقه زمانی دستگاهتان در اروپا باشد، یا نتوانیم تشخیصش بدهیم، اول از شما می‌پرسیم و تا «اجازه می‌دهم» را نزنید هیچ چیزی از گوگل بارگذاری نمی‌شود. اگر «نه، ممنون» را بزنید، تا وقتی همین زبانه باز است یادمان می‌ماند، بدون کوکی. جاهای دیگر تگ بدون پرسیدن بارگذاری می‌شود. هر وقت خواستید می‌توانید با لینک زیر آن را رد کنید. این لینک سنجش را در همین مرورگر خاموش می‌کند، آن کوکی‌ها را پاک می‌کند و یادداشتی در حافظه خود مرورگر می‌گذارد تا خاموش بماند.',
+                    'بقیه بازدیدکننده‌ها، یعنی هر کسی که از راه دیگری به این سایت می‌آید، همان دو کوکی بالا را دارند و هیچ چیزی از گوگل برایشان بارگذاری نمی‌شود.',
+                ),
+            ),
+            // Rendered by inc/pages/privacy.php as the "turn it off" link.
+            'ads_off_link' => true,
         ),
 
         array(
@@ -150,12 +178,12 @@ return array(
             ),
             'body' => array(
                 'en' => array(
-                    'We don\'t sell your data, and we don\'t share it for advertising.',
-                    'It goes to other companies only where the service can\'t work without it: our payment providers process your payments, and our email provider delivers the emails we send you. We may also disclose information when a law that actually applies to us requires it.',
+                    'We don\'t sell your data, and we don\'t share your account data for advertising.',
+                    'It goes to other companies only where the service can\'t work without it: our payment providers process your payments, and our email provider delivers the emails we send you. The one other case is Google, for a visit that starts from one of our Google ads, as described above; your account data is never part of that. We may also disclose information when a law that actually applies to us requires it.',
                 ),
                 'fa' => array(
-                    'اطلاعات شما را نمی‌فروشیم و برای تبلیغات در اختیار کسی نمی‌گذاریم.',
-                    'اطلاعات فقط وقتی به شرکت‌های دیگر می‌رسد که سرویس بدون آن کار نکند: شرکت‌های پرداخت، پرداخت شما را انجام می‌دهند و سرویس ایمیل ما، ایمیل‌هایمان را به دستتان می‌رساند. اگر قانونی که واقعاً شامل حال ما می‌شود لازم بداند، ممکن است اطلاعاتی را در اختیار بگذاریم.',
+                    'اطلاعات شما را نمی‌فروشیم و اطلاعات حسابتان را برای تبلیغات در اختیار کسی نمی‌گذاریم.',
+                    'اطلاعات فقط وقتی به شرکت‌های دیگر می‌رسد که سرویس بدون آن کار نکند: شرکت‌های پرداخت، پرداخت شما را انجام می‌دهند و سرویس ایمیل ما، ایمیل‌هایمان را به دستتان می‌رساند. تنها مورد دیگر گوگل است، برای بازدیدی که از یکی از تبلیغ‌های ما در گوگل شروع شود، همان‌طور که بالاتر گفتیم؛ اطلاعات حساب شما هیچ‌وقت جزو آن نیست. اگر قانونی که واقعاً شامل حال ما می‌شود لازم بداند، ممکن است اطلاعاتی را در اختیار بگذاریم.',
                 ),
             ),
         ),

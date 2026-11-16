@@ -1,0 +1,20 @@
+/* The question asked of a visitor in Europe who arrived from one of our
+ * Google ads (assets/js/ads.js builds it). Inlined into the page's
+ * stylesheet only on such requests (inc/partials/head.php), so nobody else
+ * gets a byte of it.
+ *
+ * In the page flow at the top of <main>, never fixed: on a phone a fixed bar
+ * sits over whatever is under it, and on /download/ that is the buttons.
+ * Both answers are the same kind of button at the same size. */
+/* The sticky header overlaps the top of <main> by 74px (base.css); the
+ * bar starts below it, and the section after it gives back the room it
+ * normally keeps for the header. */
+.adsbar{position:relative;z-index:1;padding-top:calc(74px + 14px)}
+.adsbar + section{padding-top:clamp(28px,4vw,56px)}
+.adsbar__box{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;padding:14px 16px;border-radius:var(--r-card);background:linear-gradient(180deg,var(--card-a),var(--card-b));box-shadow:var(--card-drop);color:var(--ink)}
+.adsbar__text{flex:1 1 320px;min-width:0;font-size:15px;color:var(--ink-2)}
+.adsbar__text a{color:var(--ink);text-decoration:underline;text-underline-offset:2px;margin-inline-start:4px;white-space:nowrap}
+.adsbar__actions{display:flex;gap:8px;flex:0 0 auto}
+.adsbar__actions .btn{min-width:112px;justify-content:center}
+@media (max-width:520px){.adsbar__actions{flex:1 1 100%}.adsbar__actions .btn{flex:1 1 0;min-width:0}}
+.ads-done{padding:12px 14px;border-radius:12px;background:var(--ok-tint);color:var(--ink)}

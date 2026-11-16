@@ -378,6 +378,39 @@ holds one word, identifies nobody, and needs no consent banner because
 remembering a preference someone deliberately asked for is exempt. If you ever
 add a second cookie, that page has to change.
 
+The one exception is below: visitors from our Google ads.
+
+### Google ads measurement (2026-11-15)
+
+The Google tag (`google_tag_id` in `config.php`, a Tag Manager container)
+reaches **only** a visitor who arrived from one of our Google ads, and nobody
+else ever loads anything from Google. `inc/ads.php` decides per request:
+
+- **Ad click**: the address carries `gclid`, `gbraid` or `wbraid`.
+- **Later page of an allowed ad visit**: the `nx_ad=1` session cookie, set
+  by `assets/js/ads.js` once measurement is allowed. A cookie, not
+  sessionStorage, because the policy header is built on the server.
+- Everyone else: the page and its policy header are byte-for-byte what they
+  were before. `scripts/check-ads.php` proves it against the built-in server.
+
+On those two kinds of request only, the CSP adds Google's documented sources
+for Ads conversions and the loader adds `assets/js/ads.js`. That script
+decides in the browser: time zone in Europe (or unknown, or UTC) -> a bar
+asks first, nothing from Google loads and nothing is stored before "Allow";
+"No thanks" goes in sessionStorage. Elsewhere it loads without asking.
+Consent is set before the tag: ad storage and ad user data granted, ad
+personalisation and analytics storage denied. A tap on a download choice on
+`/download/` pushes `download_click` with the platform, plus the Ads
+`conversion` event when `google_ads_send_to` is set; the click is never
+delayed or cancelled. The privacy page's link `/privacy/?ads=off` turns it
+off for that browser (localStorage `nx-ads-off`) and deletes the cookies.
+
+The privacy page's "Visits from our Google ads" section names what this
+stores (`_gcl_au`, `_gcl_aw`/`_gcl_gb`, `nx_ad`, the two storage keys).
+Change the code and that section changes with it. Run both checks:
+
+    php scripts/check-site.php && php scripts/check-ads.php
+
 ### Beta phase
 
 `beta_enabled` drives three things at once — a badge beside the wordmark, a
