@@ -31,7 +31,6 @@ describe("ResellersService activation links", () => {
       { customer: { findUnique } } as any,
       { sendMail } as any,
       { get: jest.fn().mockResolvedValue(websiteUrl ? { websiteUrl } : {}) } as any,
-      { get: jest.fn().mockReturnValue(undefined) } as any,
       {} as any,
     );
     return { service, sendMail, findUnique };
@@ -70,6 +69,29 @@ describe("ResellersService activation links", () => {
 
     const sent = sendMail.mock.calls[0][0];
     expect(sent.text).toContain("https://staging.neoxify.net/account/?voucher=ABCD2345EFGH");
+  });
+
+  it("points the download tiles at the same website as the activation link", async () => {
+    // Both come from one address, so the email cannot send someone to
+    // activate on one site and download from another -- and never to the
+    // API's own domain, which restricted networks block.
+    for (const [configured, site] of [
+      [undefined, "https://neoxify.net"],
+      ["https://staging.neoxify.net/", "https://staging.neoxify.net"],
+      // An http setting is upgraded: these links hand over an installer.
+      ["http://staging.neoxify.net", "https://staging.neoxify.net"],
+    ] as const) {
+      const { service, sendMail } = build(configured);
+
+      await service["sendVoucherEmail"]("ABCD2345EFGH", "Pro", "buyer@example.com", null);
+
+      const sent = sendMail.mock.calls[0][0];
+      expect(sent.html).toContain(`href="${site}/get/windows"`);
+      expect(sent.html).toContain(`href="${site}/get/android"`);
+      expect(sent.html).toContain('href="https://apps.apple.com/app/id6815764263"');
+      expect(sent.text).toContain(`Windows: ${site}/get/windows`);
+      expect(sent.html).not.toContain("/updates/installer");
+    }
   });
 
   it("writes in English to somebody who has no account yet", async () => {

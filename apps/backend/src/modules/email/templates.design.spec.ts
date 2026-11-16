@@ -15,6 +15,7 @@ import { reachabilityAlertEmail, reachabilityRecoveryEmail } from "../reachabili
 import { relayOperatorMail } from "../relay-auth/relay-alerts";
 import { panelUrlFrom } from "./email-brand.service";
 import {
+  APP_STORE_URL,
   BRAND_LINKS_SLOT,
   BRAND_LOGO_SLOT,
   fillBrandSlots,
@@ -384,5 +385,111 @@ describe("the email logo files", () => {
       const size = file.includes("-2x") ? 80 : 40;
       expect(`${file}:${png.readUInt32BE(16)}x${png.readUInt32BE(20)}`).toBe(`${file}:${size}x${size}`);
     }
+  });
+});
+
+describe("where the voucher email sends people to install", () => {
+  const render = (locale: "en" | "fa", siteUrl?: string) =>
+    resellerVoucherEmail({
+      locale,
+      code: "ABCD2345EFGH",
+      planName: "Pro",
+      activationUrl: "https://example.com/account/?voucher=ABCD2345EFGH",
+      siteUrl,
+      expiresAt: null,
+    });
+
+  it.each(["en", "fa"] as const)("offers Windows, Android and iPhone in %s", (locale) => {
+    const { html, text } = render(locale, "https://example.com/");
+    for (const [label, href] of [
+      ["Windows", "https://example.com/get/windows"],
+      ["Android", "https://example.com/get/android"],
+      ["iPhone", APP_STORE_URL],
+    ]) {
+      expect(html).toContain(`href="${href}"`);
+      expect(html).toContain(`>${label}</span>`);
+      // The plain part carries the same three, not a shorter list.
+      expect(text).toContain(`${label}: ${href}`);
+    }
+    expect(html.match(/class="nx-tile"/g)).toHaveLength(3);
+  });
+
+  it("links iPhone to the App Store listing", () => {
+    expect(APP_STORE_URL).toBe("https://apps.apple.com/app/id6815764263");
+    expect(render("en", "https://example.com").html).toContain(">App Store</span>");
+    expect(render("fa", "https://example.com").html).toContain(">اپ‌استور</span>");
+  });
+
+  it("names iPhone in the sentence above the tiles, in both languages", () => {
+    expect(render("en", "https://example.com").html).toContain("on Windows, Android or iPhone");
+    expect(render("fa", "https://example.com").html).toContain("روی ویندوز، اندروید یا آیفون");
+  });
+
+  it("activates first, installs second, and never sends the code into the app", () => {
+    // The iPhone app has no field for a code. The code is activated on
+    // the web by the button, then the app is installed and signed in to.
+    for (const locale of ["en", "fa"] as const) {
+      const { html, text } = render(locale, "https://example.com");
+      expect(html.indexOf("/account/?voucher=")).toBeLessThan(html.indexOf("/get/windows"));
+      expect(text.indexOf("/account/?voucher=")).toBeLessThan(text.indexOf("/get/windows"));
+    }
+    const en = render("en", "https://example.com");
+    expect(`${en.html}\n${en.text}`).not.toMatch(/code (in|into) the app/i);
+  });
+
+  it("stacks the tiles on a phone and lays them out as a table for Outlook", () => {
+    const { html } = render("en", "https://example.com");
+    expect(html).toContain(".nx-tile{display:block!important;width:100%!important;");
+    // Inline padding is cut so three fit at 320px without the sheet; the
+    // sheet gives it back.
+    expect(html).toContain("padding:12px 4px;");
+    expect(html).toContain(".nx-tile-a{padding:12px!important;}");
+    expect(html).not.toMatch(/display:\s*flex/);
+  });
+
+  it("puts the first tile on the right in Persian", () => {
+    const { html } = render("fa", "https://example.com");
+    // The row runs right to left, so the gap sits on each tile's left.
+    expect(html).toContain('dir="rtl" style="margin:0 0 20px 0;width:100%;"');
+    expect(html).toContain("padding:0 0 0 6px");
+  });
+
+  it("never links customers to the API's download redirects", () => {
+    // The API's domain is blocked on many recipients' networks; the
+    // website is not. An `/updates/installer` link would be dead there.
+    for (const locale of ["en", "fa"] as const) {
+      for (const site of ["https://example.com", undefined]) {
+        const { html, text } = render(locale, site);
+        expect(html).not.toContain("/updates/installer");
+        expect(text).not.toContain("/updates/installer");
+      }
+    }
+  });
+
+  it("without a website address, says where to go and still links the App Store", () => {
+    for (const locale of ["en", "fa"] as const) {
+      const { html, text } = render(locale);
+      expect(html).not.toContain("/get/");
+      expect(html).toContain(`href="${APP_STORE_URL}"`);
+      expect(html).toContain("neoxify.net");
+      expect(text).toContain(`iPhone: ${APP_STORE_URL}`);
+    }
+  });
+
+  it("does not tell a stranger they have an account", () => {
+    // The recipient may never have heard of us: a reseller set a plan up
+    // for their address. The footer says that instead.
+    const en = render("en", "https://example.com").html;
+    const fa = render("fa", "https://example.com").html;
+    expect(en).not.toContain("because you have a Neoxify account");
+    expect(en).toContain("someone set up a Neoxify plan for this email address");
+    expect(fa).not.toContain("حساب کاربری دارید");
+    expect(fa).toContain("یک پلن نئوکسیفای آماده کرده است");
+  });
+
+  it("escapes a site address that would break out of href", () => {
+    const { html } = render("en", 'https://example.com/a"b');
+    expect(html).not.toContain('a"b/get/');
+    expect(html).toContain("https://example.com/a&quot;b/get/windows");
   });
 });

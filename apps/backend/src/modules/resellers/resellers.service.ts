@@ -8,7 +8,6 @@ import {
   Logger,
   NotFoundException,
 } from "@nestjs/common";
-import { ConfigService } from "@nestjs/config";
 import { AdminRole, CustomerStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
@@ -94,7 +93,6 @@ export class ResellersService {
     private readonly prisma: PrismaService,
     private readonly email: EmailService,
     private readonly appLinks: AppLinksService,
-    private readonly config: ConfigService,
     private readonly vouchers: VouchersService,
   ) {}
 
@@ -631,10 +629,21 @@ export class ResellersService {
    * So this is the form that works on the host we actually run. Going
    * back to /r/CODE means installing website/nginx-website.conf.example
    * on the web host first, and not before. */
-  private async activationUrl(code: string): Promise<string> {
-    const links = await this.appLinks.get();
-    const site = (links.websiteUrl ?? DEFAULT_WEBSITE).replace(/\/$/, "");
+  private activationUrl(site: string, code: string): string {
     return `${site}/account/?voucher=${encodeURIComponent(code)}`;
+  }
+
+  /** The website this email points at: the configured one, or
+   * neoxify.net. The activation link and the Windows and Android download
+   * tiles are both built from it, so they cannot name two different
+   * sites.
+   *
+   * Always https: the tiles hand over an installer, and on a network that
+   * tampers with traffic a plain-http download can be swapped in transit.
+   * An http value in the settings is upgraded rather than trusted. */
+  private async siteUrl(): Promise<string> {
+    const links = await this.appLinks.get();
+    return (links.websiteUrl ?? DEFAULT_WEBSITE).replace(/\/+$/, "").replace(/^http:\/\//i, "https://");
   }
 
   /** Best-effort, like every other send in this codebase: a mail failure
@@ -648,12 +657,13 @@ export class ResellersService {
     expiresAt: Date | null,
   ): Promise<boolean> {
     try {
+      const site = await this.siteUrl();
       const message = resellerVoucherEmail({
         locale: await this.localeFor(to),
         code,
         planName,
-        activationUrl: await this.activationUrl(code),
-        publicApiUrl: this.config.get<string>("publicApiUrl"),
+        activationUrl: this.activationUrl(site, code),
+        siteUrl: site,
         expiresAt,
       });
       return await this.email.sendMail({ to, ...message });
