@@ -650,7 +650,7 @@ function nx_flag($code)
  * Render a location as "City, Country" -- or just the country where the
  * repo does not record a city.
  *
- * Built here rather than in a template because four of the seven locations
+ * Built here rather than in a template because most of the locations
  * have no city and the fallback would otherwise be repeated at every call
  * site, which is how "Frankfurt, " with a trailing comma gets shipped.
  *

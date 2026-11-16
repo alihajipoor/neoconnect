@@ -174,7 +174,9 @@ return array(
     'installer_store_dir' => 'dl',
 
     // The bookkeeping beside the copies (the remembered release answer, the
-    // lock, the last failure). Private, so it stays inside data/.
+    // lock, the last failure). Inside data/, which the live nginx host does
+    // NOT deny, so get/index.php keeps every state file as a guarded or
+    // empty .php file that a direct request runs and gets nothing from.
     'installer_state_dir' => 'data/installers',
 
     // Release files are fetched only from these hosts, over https, and the
