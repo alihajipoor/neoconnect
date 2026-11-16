@@ -406,7 +406,7 @@ delayed or cancelled. The privacy page's link `/privacy/?ads=off` turns it
 off for that browser (localStorage `nx-ads-off`) and deletes the cookies.
 
 The privacy page's "Visits from our Google ads" section names what this
-stores (`_gcl_au`, `_gcl_aw`/`_gcl_gb`, `nx_ad`, the two storage keys).
+stores (`_gcl_au`, `_gcl_aw`/`_gcl_gb`, `_gcl_ls`, `nx_ad`, the two storage keys, the page views Google is told, Google's own cookie on its own sites).
 Change the code and that section changes with it. Run both checks:
 
     php scripts/check-site.php && php scripts/check-ads.php

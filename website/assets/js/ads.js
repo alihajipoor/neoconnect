@@ -49,8 +49,12 @@
   }
 
   /* Every cookie this file or Google's tag can have set here, on every
-   * domain form the tag may have used (it picks the widest it can). */
+   * domain form the tag may have used (it picks the widest it can), and
+   * the copy of the click id the tag keeps in localStorage (_gcl_ls, seen
+   * on the live site 2026-11-16). Google's own cookies on google.com and
+   * doubleclick.net are out of this page's reach. */
   function forget() {
+    try { window.localStorage.removeItem("_gcl_ls"); } catch (e) { /* storage blocked */ }
     var names = ["nx_ad", "_gcl_au", "_gcl_aw", "_gcl_gb", "_gcl_dc", "_gcl_ag", "_gcl_gs", "_gcl_ha"];
     var host = location.hostname, parts = host.split("."), domains = [""];
     for (var i = 0; i < parts.length - 1; i++) { domains.push("; domain=" + parts.slice(i).join(".")); }
