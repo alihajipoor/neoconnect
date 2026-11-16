@@ -1,8 +1,8 @@
 # Working in this repo
 
 Neoxify: a commercial multi-protocol VPN. NestJS backend + Next.js panel
-+ Go node agent + Tauri clients (Windows desktop, Android/iOS mobile) +
-a bash installer. A large share of users are in Iran, on censored
++ Go node agent + Tauri clients (Windows desktop, Linux desktop,
+Android/iOS mobile) + a bash installer. A large share of users are in Iran, on censored
 networks.
 
 This is the VPN, **neoxify.net**. There is a second, unrelated Neoxify
@@ -78,6 +78,12 @@ What carries over from the one-machine period, unchanged:
   nothing ever answers: a leak shows as packets *sent*, never as a
   reply. This matters more than anything else in this file; see *How
   work is expected to be done here* below.
+- **There is a Linux guest too** (2026-11-16): `Neoxify-Linux`, Ubuntu
+  24.04 with a real GNOME session, reached over SSH. It builds and
+  proves the Linux client, with a capture taken inside the guest at its
+  own uplink. See *Linux desktop* below. This PC does not have the
+  memory to run it beside the Windows guest while the owner's own
+  programs are open: put one in saved state before starting the other.
 - **Fleet SSH keys** (`ovh_neo`, `azs_vps`, `neo_tr1`) went with the
   old box. Node access has to be re-established before any node-side
   work.
@@ -143,6 +149,7 @@ GitHub-hosted runner**, so shipping does not depend on local toolchains:
 |---|---|---|---|
 | Windows desktop | `release-desktop-windows.yml` | `windows-latest` | tag `desktop-v*` |
 | Android | `release-android.yml` | `ubuntu-latest` | tag `android-v*` |
+| Linux desktop | `release-desktop-linux.yml` | `ubuntu-22.04` | tag `linux-v*` |
 | Node agent | `release-agent.yml` | `ubuntu-latest` | tag `v*` |
 | iOS (compile only) | `ci-ios.yml` | `macos-latest` | push to `main` |
 | Lint/typecheck/build/test | `ci.yml` | ubuntu + `windows-latest` | push to `main`/`claude/**`/`rig/**`, PR to `main`, `workflow_dispatch` |
@@ -225,12 +232,12 @@ release once shipped 0.8.0 under a 0.9.0 tag. Do not add a second
 version field.
 
 Tag prefixes are load-bearing and must not be shared: `desktop-v*`,
-`android-v*`, `v*` (agent). The API resolves "newest release" per
+`linux-v*`, `android-v*`, `v*` (agent). The API resolves "newest release" per
 prefix, and a desktop release once hijacked the agent installer's
 download URL precisely because they collided.
 
-Current: desktop `0.9.64`, mobile `0.2.41`, agent `v0.2.12` — each
-matching its latest released tag.
+Current: desktop `0.9.64`, linux `0.1.0`, mobile `0.2.41`, agent
+`v0.2.12` — each matching its latest released tag.
 
 **The production backend tracks `main`** as of 2026-11-11 (`8b2ca7b4`,
 with migrations through `20261112_usage_hourly` applied; per-device credentials and device
@@ -243,6 +250,79 @@ database to `/root/db-backups/pre-<what>-<time>.sql.gz` first, then
 `docker compose -f infra/docker-compose.prod.yml --env-file infra/.env up -d --build`.
 Migrations apply at container start. Always deploy the backend before
 releasing clients that depend on it.
+
+## Linux desktop
+
+`apps/desktop-linux`, first released as `linux-v0.1.0` on 2026-11-16.
+Four pieces, and only the interface is shared with Windows:
+
+| Piece | Where | What it is |
+|---|---|---|
+| Helper | `helper` | the root daemon `neoxify-helper`, on `/run/neoxify/helper.sock` |
+| Engines, routes, DNS | `tunnel` | bundled Xray with its own tun, kernel WireGuard, the distribution's OpenVPN |
+| Leak protection | `netguard` | one nftables table, `inet neoxify` |
+| App | `src-tauri`, `src` | Tauri, reusing `apps/desktop-windows/src` as `@shared` |
+
+The helper speaks the Windows wire contract unchanged
+(`apps/desktop-windows/ipc`: one JSON line in, one out), so the app's
+side of a connect is the same code path on both systems. The Windows
+service itself was not ported: it is 58,000 lines of WFP, WinDivert and
+RAS. What was copied are its OS-free lifecycle files and its config
+builders.
+
+**The shared interface has a platform switch, and its default is
+Windows.** `lib/desktop-platform.ts` is set once by each app's entry
+file. The Windows app ships to live users from the same files, so a
+change there must leave the default exactly as it was, and CI's desktop
+job is what says so. On Linux, what is missing is not offered and its
+requests are never sent: a Linux session must not show or log an error
+for a feature it does not have.
+
+**Not in it, each refused plainly by the helper:** IKEv2 (a stated gap,
+not a decision: strongSwan is the route), per-app split tunnelling,
+Repair, the reconnect hold, and installing updates from inside the app
+(Linux shows a notice with a link; Tauri's updater cannot install a
+`.deb` or `.rpm`). Gaming mode is not wanted on Linux at all (owner,
+2026-11-16): do not list it as missing.
+
+**nftables does not die with the process.** On Windows the kernel
+removes a dead service's filters by itself. Here a table outlives the
+helper, so three things delete it: teardown, the helper's start, and the
+unit's `ExecStopPost`. The stance is fail open, as on Windows without the
+reconnect hold: when a tunnel drops, the machine is back on its own
+network, and the app says so.
+
+**Who may call the helper:** root; or the app run by the user who is
+active at the machine's own seat (logind), or by a member of the
+`neoxify` group, which the package creates empty. An executable path
+alone is not an identity (`LD_PRELOAD`), which is why the user has to
+qualify too. Someone on a remote desktop or over SSH is not at a seat
+and needs the group.
+
+**Nothing Linux builds on this Windows PC.** `cargo check --target
+x86_64-unknown-linux-gnu` in `apps/desktop-linux` type-checks the three
+crates, which have no C dependencies; everything else happens in the
+VirtualBox guest `Neoxify-Linux`:
+
+```bash
+source C:/Users/aliha/Claude/vm/linux/tools/vm.sh
+vmsync "<worktree root>" <name>     # the tree, through git, to ~/w/<name>
+vmssh 'cd ~/w/<name> && pnpm --filter @neoxify/desktop-linux run package'
+```
+
+The proof is two scripts in `apps/desktop-linux/scripts`: `vm-proof.sh`
+(the installed package: every protocol at the wire, the leak attempts
+with a control run, the failure paths; 252 checks) and
+`vm-gui-proof.mjs` (the app through WebDriver). A change to the helper,
+the engines or the rules is not done until `vm-proof.sh` says ALL PASS.
+
+Traps that cost time: xray's Linux tun creates and names the device but
+gives it no IPv4 address; deleting a WireGuard link takes the kernel up
+to 1.6 s, so it belongs to the slow half of a stop; the app crashes
+under Xvfb when the `WEBKIT_DISABLE_*` variables are set and not
+otherwise; `health_ip::tests::never_asks_over_ipv6` fails on Ubuntu
+because `localhost` is not `::1` there, and it is Windows code pulled in
+by path.
 
 ## iOS
 

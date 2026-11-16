@@ -10089,3 +10089,128 @@ Android. armv7. The Play bundle on a device. WireGuard, OpenVPN and IKEv2
 on 0.2.41 in the emulator (their code did not change; not run). About a
 dozen iPhones are still on builds before 0.2.41 until the App Store
 updates them.
+
+## 2026-11-16 — A Linux desktop client: built, proven in a VM, released as linux-v0.1.0
+
+**Why.** The owner asked for a Linux build on the website, the same day
+Android 0.2.41 went out. There was no Linux code: `apps/desktop-macos`
+is a shell that reuses the interface and carries no tunnel, and the
+Windows service is 58,000 lines of WFP, WinDivert and RAS. So this is a
+new client, not a build target.
+
+**Shape.** `apps/desktop-linux`: a root helper (`helper`) speaking the
+Windows wire contract over `/run/neoxify/helper.sock`; `tunnel` (bundled
+Xray 26.6.27 with its own tun, kernel WireGuard by wg-quick's method
+without wg-quick, the distribution's OpenVPN; routes and DNS mirror what
+Windows does, so the shared interface's assumptions about how a server is
+reached hold); `netguard` (leak protection as one nftables table, fail
+open); and a Tauri app that pulls the Windows crate's portable modules in
+by path and reuses the React interface. The interface gained a platform
+switch (`lib/desktop-platform.ts`, default "windows"). Packages are a
+`.deb` and an `.rpm`; the tag prefix is `linux-v`. See CLAUDE.md, *Linux
+desktop*.
+
+**Proof, in a VirtualBox guest (Ubuntu 24.04), with real connect
+requests for a test account.**
+- `scripts/vm-proof.sh` against the INSTALLED package: 252 checks, ALL
+  PASS, twice on the final source. Per protocol (WireGuard, VLESS
+  REALITY, VLESS TLS, Trojan, Shadowsocks, OpenVPN): connect, status,
+  a page loads, the exit address is the server's, names resolve on the
+  tunnel's link; then a capture on the uplink while trying to leak on
+  purpose (a lookup sent straight at the on-link resolver, a request
+  forced out of the uplink, IPv6 given a made-up global address, route
+  and neighbour so a leak would really be transmitted): nothing but the
+  engine's own traffic. The same attempts with no tunnel were all caught,
+  so the capture would have seen a leak. Disconnect leaves routes, rules,
+  links, nftables, resolvectl and resolv.conf exactly as before.
+- Failure paths: engine killed, the drop is in status within 34-396 ms
+  and the machine is online; helper killed with SIGKILL, systemd restarts
+  it and the start sweep clears everything, at most 710 ms without
+  internet; unit stopped while connected, package removed while
+  connected: clean.
+- The app through its own interface (WebDriver, `vm-gui-proof.mjs`):
+  sign-in, all seven protocol choices for Germany and Automatic, Persian
+  layout, Settings showing nothing Linux lacks, the app killed while
+  connected (tunnel down in 136 ms).
+- The PUBLISHED `.deb`, installed in a real GNOME session at the
+  machine's own seat with NetworkManager and the user outside the
+  `neoxify` group: every installed file byte-identical to the package,
+  let in by the seat rule, three connects with the exit address the
+  server's, three minutes held with DNS on the tunnel, clean after
+  disconnect, close and kill.
+- A desktop without systemd-resolved (resolved stopped, a plain
+  NetworkManager-style resolv.conf): 33 of 33 for WireGuard, OpenVPN,
+  REALITY and Shadowsocks; the file is rewritten while connected and is
+  back byte for byte afterwards.
+- Other distributions, in containers on the VM's kernel: both packages
+  install with the website's command and their binaries load on Ubuntu
+  22.04 and 24.04, Debian 12 and 13, Fedora 40, 41 and 45; REALITY,
+  WireGuard and OpenVPN connect on Debian 12 and Fedora 45 with the exit
+  address the server's.
+
+**What the review found and what was done.** A second round reviewed the
+root helper and the network guarantees, each finding checked by a second
+reviewer, and the confirmed ones were fixed before the release: the
+caller check (an executable path is not an identity: now the app AND the
+seat's active user or the `neoxify` group); silent connections exhausting
+the helper's descriptors; a second app process taking over the exit
+watch; a server route that leads into our own tunnel now reports Down;
+leak protection and DNS are read back every second rather than remembered
+from connect; a status during a connect no longer says connected. One of
+mine: deleting a WireGuard link took the kernel up to 1.6 s and made a
+clean disconnect answer as a failure, so the link goes in the slow half.
+
+**Release.** Merged as `d00ac1f9` (CI green on the branch and on main,
+the Windows desktop job included). Backend deployed from main at
+22:43Z (dump `pre-linux-updates-20261116T224016Z`, rollback image
+`neoxify-backend:rollback-pre-linux-updates`; Windows and Android routes
+answer as before). Tag `linux-v0.1.0`, 6 minutes on `ubuntu-22.04`,
+published 22:46Z. Website live 23:35Z (main `65b98932`, 13 files, backup
+`site-pre-linux-20261116T233520Z.tgz`, 2 ssh connections): both buttons
+redirect to same-site copies whose sha256 equals the release's.
+
+**Known and stated, not fixed.**
+- No reconnect hold on Linux. When the uplink changes, the helper lifts
+  the rules, says not connected, and the app reconnects about 3 s after
+  the network is back; for roughly 2.5 s traffic leaves directly. Windows
+  behaves the same with its default settings.
+- While connected, NetworkManager's own connectivity check is refused by
+  the leak rules, so GNOME shows the network as "limited" (a "?" on the
+  icon) until its next check after disconnect. The network works.
+- Where `/etc/resolv.conf` cannot be replaced (a bind mount, as in a
+  container), WireGuard and OpenVPN connect but names do not resolve, and
+  only the status flag says so. Rewrite in place when the rename fails.
+- On Wayland a `neoconnect://` link reaches the running app but the
+  window does not raise itself; GNOME shows "Neoxify is ready".
+- Batch for the next merge: the Discord panel's Linux link is always the
+  `.deb`; the update notice's fallback link likewise; `knownNodes` is not
+  validated before stale host routes are purged; `ip route replace` can
+  take over a customer's own /32 to the server; `src_valid_mark` stays 1
+  after WireGuard; `sweep` exits 0 when it could not look; Settings
+  content scrolls under the window buttons; two protocol names are cut
+  short in the location panel; Linux is not in the email's install links.
+
+**Traps.**
+- Free memory on this PC was 5.7 GB with the owner's apps open: the idle
+  Windows test VM was put in saved state to make room (resume with
+  `VBoxManage startvm Neoxify-Test --type headless`).
+- `ssh host 'a && b && c & echo x' < file` backgrounds the whole chain,
+  whose stdin is then /dev/null: the "script" it wrote was empty. Twenty
+  minutes of waiting for an install that never started.
+- Windows git cannot open an index at `/tmp/...`; the VM sync helper
+  keeps its throwaway index at a `C:/` path.
+- The Playwright MCP tool hung twice for half an hour each on a simple
+  navigate. Screenshots now go through a 60-line CDP script
+  (`C:\Users\aliha\Claude\vm\linux\tools\shoot.mjs`).
+- The API's release cache holds "no Linux release" for five minutes after
+  the first release is published; the routes answer 404 and 503 until
+  then.
+
+**Not proven.** A real Fedora machine (SELinux was absent in the
+container). A real IPv6 path, a restricted network, Wi-Fi roaming and
+suspend. An X11 session. Google and Facebook sign-in end to end on Linux
+(the browser opens and the link comes back; no sign-in was completed).
+The in-app "new version" notice end to end (there is no newer version
+yet; the API answers correctly for an older one). Trojan, VLESS TLS and
+OpenVPN through the real desktop session (they passed through the same
+app under a virtual display).
