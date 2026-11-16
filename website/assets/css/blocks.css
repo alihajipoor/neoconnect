@@ -76,6 +76,7 @@ html[dir="rtl"] .flow__line{background:linear-gradient(270deg,var(--cobalt),#22d
 html[lang="fa"] .notice h2,html[lang="fa"] .notice h3{letter-spacing:0}
 .notice h2 svg,.notice h3 svg{width:20px;height:20px;color:var(--cobalt-ink)}
 .notice p{color:var(--ink-2)}
+.cmd{display:block;margin-top:6px;padding:8px 12px;border-radius:10px;background:var(--field);color:var(--ink);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13.5px;direction:ltr;text-align:left;white-space:nowrap;overflow-x:auto}
 .notice--warn{background:var(--warn-tint);box-shadow:none}
 .notice--warn h2,.notice--warn h3{color:var(--warn-ink)}
 .notice--warn p{color:var(--ink)}

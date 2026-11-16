@@ -6,6 +6,7 @@ import { API_ENDPOINT_MAX, clipTrace, LEGACY_API_ENDPOINT_MAX } from "./endpoint
 import { getTokens } from "./session";
 import { currentAttestation, currentClientIp } from "./network-identity";
 import { takeEngineNote } from "./webview-engine";
+import { desktopPlatform } from "./desktop-platform";
 
 /** Telling the panel how an attempt went, so a beta can be watched from
  * somewhere other than screenshots.
@@ -166,6 +167,10 @@ export function detectPlatform(
   if (/iphone|ipad|ipod/i.test(userAgent)) return "ios";
   if (/macintosh/i.test(userAgent)) return maxTouchPoints > 1 ? "ios" : "macos";
   if (/windows/i.test(userAgent)) return "windows";
+  // After Android, whose user agent also says Linux. A Linux user agent
+  // alone is not enough -- any browser on a Linux machine sends one -- so
+  // it is believed only inside the Linux app, which said so at start.
+  if (/linux/i.test(userAgent) && desktopPlatform() === "linux") return "linux";
   return "unknown";
 }
 

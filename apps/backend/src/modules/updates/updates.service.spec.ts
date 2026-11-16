@@ -48,13 +48,28 @@ describe("UpdatesService", () => {
     ],
   };
 
+  const linuxRelease = {
+    tag_name: "linux-v0.1.1",
+    name: "Neoxify Linux 0.1.1",
+    body: null,
+    published_at: "2026-11-16T20:00:00Z",
+    draft: false,
+    prerelease: false,
+    assets: [
+      { name: "Neoxify_0.1.1_amd64.deb", browser_download_url: "https://example.test/Neoxify_0.1.1_amd64.deb" },
+      { name: "Neoxify-0.1.1-1.x86_64.rpm", browser_download_url: "https://example.test/Neoxify-0.1.1-1.x86_64.rpm" },
+      { name: "sha256sums.txt", browser_download_url: "https://example.test/sha256sums.txt" },
+    ],
+  };
+
   let fetchMock: jest.Mock;
 
   const releasesOk = () => ({
     ok: true,
     status: 200,
-    json: () => Promise.resolve([windowsRelease, androidRelease]),
+    json: () => Promise.resolve([windowsRelease, androidRelease, linuxRelease]),
   });
+  const feedOf = (...releases: unknown[]) => ({ ok: true, status: 200, json: () => Promise.resolve(releases) });
   const failWith = (status: number) => ({ ok: false, status, json: () => Promise.resolve({}) });
 
   beforeEach(() => {
@@ -320,13 +335,155 @@ describe("UpdatesService", () => {
     });
   });
 
+  describe("Linux", () => {
+    it("offers the newer version to an older Linux app", async () => {
+      const service = new UpdatesService(configWith({}));
+      await expect(settle(service.checkLinux("0.1.0"))).resolves.toEqual({ status: "update", version: "0.1.1" });
+    });
+
+    it("reports current for an app on the newest build, or newer", async () => {
+      const service = new UpdatesService(configWith({}));
+      await expect(settle(service.checkLinux("0.1.1"))).resolves.toEqual({ status: "current" });
+      await expect(settle(service.checkLinux("0.2.0"))).resolves.toEqual({ status: "current" });
+    });
+
+    it("reports unknown, never current, when the feed cannot be read", async () => {
+      fetchMock.mockResolvedValue(failWith(504));
+      const service = new UpdatesService(configWith({}));
+      await expect(settle(service.checkLinux("0.1.0"))).resolves.toEqual({ status: "unknown" });
+    });
+
+    it("links each package format from the newest linux-v release", async () => {
+      const service = new UpdatesService(configWith({}));
+      await expect(settle(service.linuxPackageUrl("deb"))).resolves.toBe(
+        "https://github.com/alihajipoor/neoxify-releases/releases/download/linux-v0.1.1/Neoxify_0.1.1_amd64.deb",
+      );
+      await expect(settle(service.linuxPackageUrl("rpm"))).resolves.toBe(
+        "https://github.com/alihajipoor/neoxify-releases/releases/download/linux-v0.1.1/Neoxify-0.1.1-1.x86_64.rpm",
+      );
+    });
+
+    it("404s when no Linux release exists", async () => {
+      fetchMock.mockResolvedValue(feedOf(windowsRelease, androidRelease));
+      const service = new UpdatesService(configWith({}));
+      await expect(settle(service.linuxPackageUrl("deb"))).rejects.toThrow(
+        "No Linux release is available to download yet",
+      );
+    });
+
+    it("never serves a desktop-v release to Linux, even one carrying a stray .deb", async () => {
+      const strayDeb = {
+        ...windowsRelease,
+        tag_name: "desktop-v0.9.26",
+        assets: [
+          ...windowsRelease.assets,
+          { name: "Neoxify_0.9.26_amd64.deb", browser_download_url: "https://example.test/x.deb" },
+          { name: "Neoxify-0.9.26-1.x86_64.rpm", browser_download_url: "https://example.test/x.rpm" },
+        ],
+      };
+      fetchMock.mockResolvedValue(feedOf(strayDeb, linuxRelease));
+      const service = new UpdatesService(configWith({}));
+
+      await expect(settle(service.checkLinux("0.1.0"))).resolves.toEqual({ status: "update", version: "0.1.1" });
+      await expect(settle(service.linuxPackageUrl("deb"))).resolves.toContain("linux-v0.1.1");
+    });
+
+    it("never serves a linux-v release to Windows", async () => {
+      // Given a signature and a versioned payload, so the only thing
+      // keeping it from the Windows updater is its tag.
+      const linuxLookingLikeWindows = {
+        ...linuxRelease,
+        tag_name: "linux-v0.9.99",
+        assets: [
+          { name: "Neoxify_0.9.99_x64-setup.exe", browser_download_url: "https://example.test/a.exe" },
+          { name: "Neoxify_0.9.99_x64-setup.exe.sig", browser_download_url: "https://example.test/a.exe.sig" },
+          { name: "Neoxify-Setup.exe", browser_download_url: "https://example.test/b.exe" },
+        ],
+      };
+      fetchMock.mockResolvedValue(feedOf(linuxLookingLikeWindows, linuxRelease));
+      const service = new UpdatesService(configWith({}));
+
+      await expect(settle(service.checkFor("0.0.1"))).resolves.toEqual({ status: "unknown" });
+      await expect(settle(service.installerUrl())).rejects.toThrow("No release is available to download yet");
+    });
+
+    it("skips a release whose packages do not carry the tag's version", async () => {
+      const mislabelled = {
+        ...linuxRelease,
+        tag_name: "linux-v0.2.0",
+        assets: [
+          { name: "Neoxify_0.1.9_amd64.deb", browser_download_url: "https://example.test/x.deb" },
+          { name: "Neoxify-0.1.9-1.x86_64.rpm", browser_download_url: "https://example.test/x.rpm" },
+        ],
+      };
+      fetchMock.mockResolvedValue(feedOf(mislabelled, linuxRelease));
+      const service = new UpdatesService(configWith({}));
+      await expect(settle(service.checkLinux("0.1.0"))).resolves.toEqual({ status: "update", version: "0.1.1" });
+    });
+
+    it("skips a release missing one of the two packages", async () => {
+      const debOnly = {
+        ...linuxRelease,
+        tag_name: "linux-v0.2.0",
+        assets: [{ name: "Neoxify_0.2.0_amd64.deb", browser_download_url: "https://example.test/x.deb" }],
+      };
+      fetchMock.mockResolvedValue(feedOf(debOnly, linuxRelease));
+      const service = new UpdatesService(configWith({}));
+      await expect(settle(service.checkLinux("0.1.0"))).resolves.toEqual({ status: "update", version: "0.1.1" });
+    });
+
+    it("does not take a suffixed or unanchored filename for a package", async () => {
+      const odd = {
+        ...linuxRelease,
+        tag_name: "linux-v0.2.0",
+        assets: [
+          { name: "Neoxify_0.2.0_amd64.deb.zip", browser_download_url: "https://example.test/x" },
+          { name: "debug-Neoxify-0.2.0-1.x86_64.rpm", browser_download_url: "https://example.test/y" },
+        ],
+      };
+      fetchMock.mockResolvedValue(feedOf(odd, linuxRelease));
+      const service = new UpdatesService(configWith({}));
+      await expect(settle(service.checkLinux("0.1.0"))).resolves.toEqual({ status: "update", version: "0.1.1" });
+    });
+
+    it("serves last known good for Linux too", async () => {
+      const service = new UpdatesService(configWith({}));
+      const good = await settle(service.linuxPackageUrl("rpm"));
+
+      jest.setSystemTime(Date.now() + 6 * 60_000);
+      fetchMock.mockResolvedValue(failWith(504));
+
+      await expect(settle(service.linuxPackageUrl("rpm"))).resolves.toBe(good);
+    });
+  });
+
   describe("releaseSummary", () => {
-    it("reports both platforms from one feed read", async () => {
+    it("reports every platform from one feed read", async () => {
       const service = new UpdatesService(configWith({}));
       const summary = await settle(service.releaseSummary());
 
       expect(summary.find((entry) => entry.platform === "windows")?.version).toBe("0.9.25");
       expect(summary.find((entry) => entry.platform === "android")?.version).toBe("0.9.25");
+      const linux = summary.find((entry) => entry.platform === "linux");
+      expect(linux?.version).toBe("0.1.1");
+      expect(linux?.url).toContain("Neoxify_0.1.1_amd64.deb");
+      expect(linux?.packages?.deb).toBe(linux?.url);
+      expect(linux?.packages?.rpm).toContain("Neoxify-0.1.1-1.x86_64.rpm");
+      expect(linux?.publishedAt).toBe("2026-11-16T20:00:00Z");
+    });
+
+    it("reports Linux as not released rather than borrowing another platform's build", async () => {
+      fetchMock.mockResolvedValue(feedOf(windowsRelease, androidRelease));
+      const service = new UpdatesService(configWith({}));
+      const summary = await settle(service.releaseSummary());
+
+      expect(summary.find((entry) => entry.platform === "linux")).toEqual({
+        platform: "linux",
+        version: null,
+        url: null,
+        packages: null,
+        publishedAt: null,
+      });
     });
 
     it("reports nulls rather than throwing when the feed is unavailable", async () => {

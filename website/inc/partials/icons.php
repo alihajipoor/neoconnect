@@ -68,7 +68,7 @@ function nx_logo_sprite()
  * Used nominatively, to say which platform a download is for. That is what
  * they are for, and it is what visitors scan the page looking for.
  *
- * @param string $name  windows | android | apple
+ * @param string $name  windows | android | apple | linux
  * @param string $class
  * @return string
  */
@@ -87,6 +87,11 @@ function nx_platform_icon($name, $class = '')
 
         // Apple mark, used for both macOS and iOS.
         'apple' => '<path d="M16.4 12.6c0-2.2 1.8-3.3 1.9-3.4-1-1.5-2.6-1.7-3.2-1.7-1.4-.1-2.7.8-3.3.8-.7 0-1.7-.8-2.8-.8-1.5 0-2.8.8-3.6 2.1-1.5 2.6-.4 6.5 1.1 8.6.7 1 1.6 2.2 2.7 2.2 1.1 0 1.5-.7 2.8-.7 1.3 0 1.6.7 2.8.7 1.2 0 1.9-1 2.6-2.1.8-1.2 1.2-2.4 1.2-2.5 0 0-2.2-.9-2.2-3.2zM14.2 5.9c.6-.7 1-1.7.9-2.7-.9 0-1.9.6-2.5 1.3-.6.6-1 1.6-.9 2.6 1 .1 2-.5 2.5-1.2z"/>',
+
+        // Linux: a terminal window with a prompt and a cursor knocked out.
+        // Our own shape rather than the penguin or any distribution's logo,
+        // because the app is for all of them and belongs to none.
+        'linux' => '<path fill-rule="evenodd" d="M4.5 4h15A2.5 2.5 0 0 1 22 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-15A2.5 2.5 0 0 1 2 17.5v-11A2.5 2.5 0 0 1 4.5 4zM5.8 9.1l3 2.9-3 2.9 1.2 1.2 4.2-4.1L7 7.9zM12.4 14.6v1.7h5.8v-1.7z"/>',
     );
 
     if (!isset($paths[$name])) {

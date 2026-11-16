@@ -16,6 +16,7 @@ allowed_host_re='^https://(\*\.neoxify\.site(:\*)?|localhost:[0-9]+)(/\*)?$|^htt
 status=0
 
 for f in apps/desktop-windows/src-tauri/capabilities/default.json \
+         apps/desktop-linux/src-tauri/capabilities/default.json \
          apps/mobile/src-tauri/capabilities/default.json; do
   # The staged blob, not the working copy and not HEAD.
   #

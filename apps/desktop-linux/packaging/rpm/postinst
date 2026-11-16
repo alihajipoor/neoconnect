@@ -1,0 +1,17 @@
+# After the package's files are in place ($1 is how many copies are now
+# installed: 1 on a fresh install, 2 or more during an upgrade). Start the
+# helper, or restart it on an upgrade so the new binary is the one answering.
+chmod 0755 /usr/lib/neoxify/neoxify-helper /usr/lib/neoxify/xray
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload || :
+  if [ "$1" -ge 2 ]; then
+    systemctl enable neoxify-helper.service || :
+    systemctl restart neoxify-helper.service || echo "neoxify: the helper did not restart; see: journalctl -u neoxify-helper" >&2
+  else
+    systemctl enable --now neoxify-helper.service || echo "neoxify: the helper did not start; see: journalctl -u neoxify-helper" >&2
+  fi
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications || :
+fi
+exit 0

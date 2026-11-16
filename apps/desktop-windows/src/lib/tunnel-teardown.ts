@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { withTimeout } from "./service-call";
+import { supportsGaming } from "./desktop-platform";
 
 /** Taking the tunnel down because the customer's session is ending.
  *
@@ -64,7 +65,9 @@ export interface TeardownDeps {
  * for the life of the process. */
 export const desktopTeardownDeps: TeardownDeps = {
   disconnect: () => withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect"),
-  disarmGaming: () => withTimeout(invoke<void>("gaming_disarm"), "gaming_disarm"),
+  // Not asked at all where there is no gaming mode (Linux): a refused
+  // command there would be an error about a feature it never had.
+  disarmGaming: () => (supportsGaming() ? withTimeout(invoke<void>("gaming_disarm"), "gaming_disarm") : Promise.resolve()),
   connected: () =>
     withTimeout(invoke<{ connected: boolean }>("vpn_status"), "vpn_status").then((s) => s.connected),
   now: () => Date.now(),

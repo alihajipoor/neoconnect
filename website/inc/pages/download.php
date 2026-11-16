@@ -8,11 +8,12 @@
  * state where a button appears that cannot work.
  *
  * Availability comes from config (windows_installer_url,
- * android_installer_url, ios_app_store_url and platforms_planned), so a
+ * android_installer_url, linux_deb_installer_url, linux_rpm_installer_url,
+ * ios_app_store_url and platforms_planned), so a
  * platform shipping is a config change, not an edit in three places that
  * can disagree.
  *
- * The Windows and Android buttons point at /get/<platform> on this site
+ * The Windows, Android and Linux buttons point at /get/<platform> on this site
  * (get/index.php), which hands out a copy kept here, so they work where the
  * control plane's domain is blocked. The App Store and Google Play buttons
  * are plain links in the site's own style: no store badge artwork.
@@ -28,6 +29,9 @@ $nx_available = nx_windows_available();
 $nx_android = nx_android_available();
 $nx_play = nx_android_play_url();
 $nx_ios = nx_ios_available();
+$nx_linux = nx_linux_available();
+$nx_linux_deb = nx_installer_button_url('linux-deb');
+$nx_linux_rpm = nx_installer_button_url('linux-rpm');
 $nx_planned = nx_cfg('platforms_planned', array());
 
 require NX_INC . '/partials/head.php';
@@ -105,6 +109,38 @@ require NX_INC . '/partials/head.php';
         </article>
       <?php endif; ?>
 
+      <!-- Linux. Always shown, between Android and iPhone: as a download
+           once a package is configured, and until then as not available
+           yet, the way a planned platform is shown, never a dead button. -->
+      <?php if ($nx_linux): ?>
+        <article class="platform platform--ready">
+          <span class="platform__glyph"><?php echo nx_platform_icon('linux'); ?></span>
+          <h3 class="platform__name"><?php echo nx_e('download.linux.name'); ?></h3>
+          <?php /* Beta on this tile alone: the first Linux version is newer
+                   than the rest, and someone installing it should know. */ ?>
+          <span class="tag tag--hl"><?php echo nx_e('beta.badge'); ?></span>
+          <p class="platform__meta"><?php echo nx_e('download.linux.requirements'); ?></p>
+          <?php if ($nx_linux_deb !== ''): ?>
+            <a class="btn btn--primary btn--block" href="<?php echo nx_esc($nx_linux_deb); ?>">
+              <?php echo nx_icon('download'); ?><span><?php echo nx_e('download.linux.button_deb'); ?></span>
+            </a>
+          <?php endif; ?>
+          <?php if ($nx_linux_rpm !== ''): ?>
+            <a class="btn <?php echo $nx_linux_deb !== '' ? 'btn--ghost' : 'btn--primary'; ?> btn--block" href="<?php echo nx_esc($nx_linux_rpm); ?>">
+              <?php echo nx_icon('download'); ?><span><?php echo nx_e('download.linux.button_rpm'); ?></span>
+            </a>
+          <?php endif; ?>
+          <p class="platform__note"><?php echo nx_e('download.linux.beta'); ?></p>
+        </article>
+      <?php else: ?>
+        <article class="platform platform--soon">
+          <span class="platform__glyph"><?php echo nx_platform_icon('linux'); ?></span>
+          <h3 class="platform__name"><?php echo nx_e('download.linux.name'); ?></h3>
+          <span class="tag"><?php echo nx_e('download.other.status'); ?></span>
+          <p class="platform__meta"><?php echo nx_e('download.linux.soon'); ?></p>
+        </article>
+      <?php endif; ?>
+
       <!-- iPhone and iPad -->
       <?php if ($nx_ios): ?>
         <article class="platform platform--ready">
@@ -123,6 +159,9 @@ require NX_INC . '/partials/head.php';
       <?php
       $nx_platform_glyphs = array('macos' => 'apple', 'ios' => 'apple', 'android' => 'android');
       foreach ($nx_planned as $nx_key):
+          if ($nx_key === 'linux') {
+              continue; // it has its own tile above, in either state
+          }
           $nx_glyph = isset($nx_platform_glyphs[$nx_key]) ? $nx_platform_glyphs[$nx_key] : 'apple'; ?>
         <article class="platform platform--soon">
           <span class="platform__glyph"><?php echo nx_platform_icon($nx_glyph); ?></span>
@@ -155,6 +194,26 @@ require NX_INC . '/partials/head.php';
             </ol>
           </div>
         <?php endif; ?>
+
+        <?php if ($nx_linux): ?>
+          <?php /* The one command for each format, because opening a package
+                   by double-click works on some desktops and not others,
+                   and the terminal way works on all of them. The file name
+                   is a pattern so the page still carries no version. */ ?>
+          <div class="notice">
+            <h2><?php echo nx_e('download.linux.steps.title'); ?></h2>
+            <p><?php echo nx_e('download.linux.steps.intro'); ?></p>
+            <?php if ($nx_linux_deb !== ''): ?>
+              <p class="u-mt-sm"><?php echo nx_e('download.linux.steps.deb'); ?></p>
+              <code class="cmd" dir="ltr">sudo apt install ./Neoxify_*_amd64.deb</code>
+            <?php endif; ?>
+            <?php if ($nx_linux_rpm !== ''): ?>
+              <p class="u-mt-sm"><?php echo nx_e('download.linux.steps.rpm'); ?></p>
+              <code class="cmd" dir="ltr">sudo dnf install ./Neoxify-*.x86_64.rpm</code>
+            <?php endif; ?>
+            <p class="u-mt-sm"><?php echo nx_e('download.linux.steps.after'); ?></p>
+          </div>
+        <?php endif; ?>
       </div>
 
       <div>
@@ -167,6 +226,11 @@ require NX_INC . '/partials/head.php';
                        system will not let an app replace its own installer
                        without the customer confirming. */ ?>
               <p class="u-mt-sm"><?php echo nx_e($nx_play !== '' ? 'download.autoupdate.android_play' : 'download.autoupdate.android'); ?></p>
+            <?php endif; ?>
+            <?php if ($nx_linux): ?>
+              <?php /* Linux has no in-app installer for updates in its first
+                       version: it tells you, and you install the new package. */ ?>
+              <p class="u-mt-sm"><?php echo nx_e('download.autoupdate.linux'); ?></p>
             <?php endif; ?>
             <?php if ($nx_ios): ?>
               <p class="u-mt-sm"><?php echo nx_e('download.autoupdate.ios'); ?></p>

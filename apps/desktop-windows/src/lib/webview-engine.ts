@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { desktopPlatform } from "./desktop-platform";
 
 /** The Windows web component the app is drawn in (Microsoft Edge WebView2
  * Runtime), so how many customers run an old one is known instead of
@@ -22,6 +23,9 @@ let versionPromise: Promise<string | null> | null = null;
 /** The WebView2 Runtime's version, as Rust read it at start; null when it
  * could not be read (or outside the app). */
 export function webviewVersion(): Promise<string | null> {
+  // WebView2 is Windows's: the Linux app draws in WebKitGTK and has no such
+  // command, so it is not asked.
+  if (desktopPlatform() === "linux") return Promise.resolve(null);
   versionPromise ??= invoke<unknown>("webview_version").then(
     (v) => (typeof v === "string" ? cleanVersion(v) : null),
     () => null,
@@ -77,6 +81,18 @@ export async function takeEngineNote(): Promise<string | null> {
 export function resetEngineNoteForTests(): void {
   noteTaken = false;
   versionPromise = null;
+}
+
+/** The WebKit version in a user agent ("AppleWebKit/605.1.15"). */
+export function webkitFromUserAgent(userAgent: string = typeof navigator === "undefined" ? "" : navigator.userAgent): string | null {
+  const m = /\bAppleWebKit\/(\d[\d.]*)/.exec(userAgent);
+  return m ? cleanVersion(m[1]) : null;
+}
+
+/** The Linux app's line: it draws in WebKitGTK, whose user agent carries a
+ * WebKit version, not a Chromium one. */
+export function webkitLine(webkit: string | null): string {
+  return `webview: WebKitGTK ${webkit ?? "(version could not be read)"}`;
 }
 
 /** The diagnostics line: "webview2: 100.0.1185.36 (Chromium 100.0.4896.75)". */

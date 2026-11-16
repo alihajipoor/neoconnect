@@ -1,0 +1,23 @@
+#!/bin/sh
+# After the package's files are in place: start the helper, or restart it
+# on an upgrade so the new binary is the one answering.
+set -e
+
+# The bundler's file mappings are not trusted to keep the executable bit.
+chmod 0755 /usr/lib/neoxify/neoxify-helper /usr/lib/neoxify/xray
+
+if [ "$1" = "configure" ] && [ -d /run/systemd/system ]; then
+  systemctl daemon-reload || true
+  if [ -n "$2" ]; then
+    systemctl enable neoxify-helper.service || true
+    systemctl restart neoxify-helper.service || echo "neoxify: the helper did not restart; see: journalctl -u neoxify-helper" >&2
+  else
+    systemctl enable --now neoxify-helper.service || echo "neoxify: the helper did not start; see: journalctl -u neoxify-helper" >&2
+  fi
+fi
+
+# So neoconnect:// links find the app without a log out and in.
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications || true
+fi
+exit 0

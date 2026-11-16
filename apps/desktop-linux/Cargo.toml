@@ -19,7 +19,6 @@ serde_json = "1"
 neoconnect-ipc = { path = "../desktop-windows/ipc" }
 
 [profile.release]
-panic = "abort"
 strip = true
 opt-level = "s"
 lto = true

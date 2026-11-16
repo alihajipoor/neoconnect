@@ -155,6 +155,7 @@ import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } f
 import { setConfinedAround } from "../lib/connected-mirrors";
 import { egressWorthAnotherLook } from "../lib/confinement-recheck";
 import { repairUnderWay } from "../lib/repair";
+import { supportsCustomMode, supportsGaming, supportsRepair } from "../lib/desktop-platform";
 import { appPrefs } from "../lib/app-prefs";
 import { autoConnectDecision, autoConnectLatch } from "../lib/auto-connect";
 import {
@@ -1023,6 +1024,8 @@ export function Dashboard({
   // screen stays mounted under it.
   useEffect(() => {
     if (!onMainPage) return;
+    // Nothing to read where there is no Custom mode (Linux).
+    if (!supportsCustomMode()) return;
     loadSplitTunnel()
       .then((settings) => {
         setCustomConfigured(isEffective(settings));
@@ -1296,7 +1299,7 @@ export function Dashboard({
     const fromStatus = stateFromStatus(status);
     if (fromStatus === "disconnected") return "disconnected";
     let measured: Promise<ConnectionState>;
-    if (status.splitTunnelActive) {
+    if (status.splitTunnelActive && supportsCustomMode()) {
       // The probe holds the service's owning thread, as the health poll's
       // does: marked, so a liveness answer it causes is not read as a drop.
       const probed = statusDisturbances.begin(PROBE_CAP_MS);
@@ -1512,6 +1515,8 @@ export function Dashboard({
   // starting in VPN mode somebody who chose gaming mode would quietly
   // offer to tunnel a machine whose owner had asked for the opposite.
   useEffect(() => {
+    // No gaming mode on this platform (Linux): it is always VPN mode.
+    if (!supportsGaming()) return undefined;
     let cancelled = false;
     void loadGaming().then((loaded) => {
       if (!cancelled) setAppMode(loaded.mode);
@@ -1542,7 +1547,7 @@ export function Dashboard({
     setAppMode(next);
     const current = await loadGaming();
     await saveGaming({ ...current, mode: next });
-    if (next === "vpn") {
+    if (next === "vpn" && supportsGaming()) {
       try {
         await gamingDisarm();
       } catch {
@@ -2501,7 +2506,8 @@ export function Dashboard({
       // was carrying the selected apps. Measured on a Windows 11 guest:
       // curl.exe selected and exiting through the node, the screen
       // yellow for one poll.
-      const customMode = Boolean(status.splitTunnelActive);
+      // Never on a platform without Custom mode, whatever a status says.
+      const customMode = supportsCustomMode() && Boolean(status.splitTunnelActive);
       setSplitTunnelActive(customMode);
       setSplitTunnelProblem(readCustomModeProblem(status));
       setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
@@ -3756,21 +3762,25 @@ export function Dashboard({
       // their selection mid-connect and the second push overwrites the
       // first with something they no longer have on screen.
       let splitTunnelSettings: SplitTunnelSettings | null = null;
-      try {
-        const settings = await loadSplitTunnel();
-        // No egress named, and that is not a placeholder. Nothing is
-        // established yet, and the ladder below may well settle
-        // somewhere other than its first pick -- so any exit named here
-        // would be a guess. The service reports a preference it cannot
-        // compare as `unknown`, which is the truthful answer for the
-        // seconds this covers.
-        await pushSplitTunnel(settings);
-        splitTunnelSettings = settings;
-        customMode = isEffective(settings);
-      } catch {
-        // A failure here means Custom mode does not apply to this
-        // attempt, which the status poll will report honestly rather
-        // than the connection being blocked over a preference.
+      // Only where Custom mode exists: a Linux session sends nothing for a
+      // feature its helper does not have.
+      if (supportsCustomMode()) {
+        try {
+          const settings = await loadSplitTunnel();
+          // No egress named, and that is not a placeholder. Nothing is
+          // established yet, and the ladder below may well settle
+          // somewhere other than its first pick -- so any exit named here
+          // would be a guess. The service reports a preference it cannot
+          // compare as `unknown`, which is the truthful answer for the
+          // seconds this covers.
+          await pushSplitTunnel(settings);
+          splitTunnelSettings = settings;
+          customMode = isEffective(settings);
+        } catch {
+          // A failure here means Custom mode does not apply to this
+          // attempt, which the status poll will report honestly rather
+          // than the connection being blocked over a preference.
+        }
       }
 
       // The ladder, not a single credential. Everything the subscription
@@ -5359,9 +5369,11 @@ export function Dashboard({
           : // Beside the warning that some connections go around a
             // tunnel not confined, not contradicting it.
             t(isTunnelUp(connectionState) && ipv4NotConfined ? "dash.modeVpnHintNotConfined" : "dash.modeVpnHint");
+  // Without gaming mode (Linux) there is nothing to switch between: only
+  // the line under it is drawn.
   const modeBar = subscription ? (
     <div className="nx-modebar">
-      <Segmented
+      {supportsGaming() ? <Segmented
         label={t("mode.label")}
         value={appMode}
         onChange={(value) => void changeMode(value)}
@@ -5371,7 +5383,7 @@ export function Dashboard({
           { value: "vpn", label: t("dash.modeVpn"), icon: <Shield aria-hidden /> },
           { value: "gaming", label: t("dash.modeGaming"), icon: <Gamepad2 aria-hidden /> },
         ]}
-      />
+      /> : null}
       {/* Clamped to two lines beside the hero; the whole sentence is the title. */}
       <p className="nx-modehint" title={modeHint}>
         {modeHint}
@@ -5451,7 +5463,7 @@ export function Dashboard({
             <summary>{t("err.showDetail")}</summary>
             <p data-ltr>{connectionError.detail}</p>
           </details>
-          {NOT_THE_NETWORK.has(connectionError.kind) ? null : <RepairNetwork variant="inline" />}
+          {NOT_THE_NETWORK.has(connectionError.kind) || !supportsRepair() ? null : <RepairNetwork variant="inline" />}
         </div>
       ) : null}
     </>

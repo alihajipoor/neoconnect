@@ -175,6 +175,16 @@ function nx_t($key, $vars = array())
         return '⟪' . $key . '⟫';
     }
 
+    // The sentences that list the platforms come in two versions: KEY, which
+    // leaves Linux out, and KEY.with_linux, which names it. The second is
+    // used only once a Linux package is actually configured, so the page,
+    // its title and the social card cannot claim a Linux app that does not
+    // exist yet -- and nobody has to remember to edit them on release day.
+    if (isset($NX_LANG[$key . '.with_linux']) && is_string($NX_LANG[$key . '.with_linux'])
+        && nx_linux_available()) {
+        $key .= '.with_linux';
+    }
+
     $text = $NX_LANG[$key];
     foreach ($vars as $name => $value) {
         $text = str_replace(':' . $name, (string) $value, $text);
@@ -400,15 +410,58 @@ function nx_android_download_url()
 }
 
 /**
+ * Whether there is a Linux package to link to: either format's URL is set.
+ *
+ * Its own switch for the same reason Android has one. Linux ships on its own
+ * schedule, and until its first release the tile says so instead of
+ * offering a button that cannot work.
+ *
+ * @return bool
+ */
+function nx_linux_available()
+{
+    return nx_linux_download_url('deb') !== '' || nx_linux_download_url('rpm') !== '';
+}
+
+/**
+ * Configured URL of one Linux package format, or '' if unreleased.
+ *
+ * @param string $format 'deb' or 'rpm'
+ */
+function nx_linux_download_url($format)
+{
+    return trim((string) nx_cfg('linux_' . ($format === 'rpm' ? 'rpm' : 'deb') . '_installer_url', ''));
+}
+
+/**
+ * The configured installer URL for each download key, the same keys as
+ * get/index.php's nxg_platforms() and its /get/<key> address. A lookup
+ * rather than an if/else, so a new key cannot silently fall through to
+ * another platform's file.
+ *
+ * @return array key => URL, '' for an unreleased one
+ */
+function nx_installer_upstreams()
+{
+    return array(
+        'windows' => nx_windows_download_url(),
+        'android' => nx_android_download_url(),
+        'linux-deb' => nx_linux_download_url('deb'),
+        'linux-rpm' => nx_linux_download_url('rpm'),
+    );
+}
+
+/**
  * What a download button links to: this site's own /get/<platform> when
  * installer_local_copy is on, otherwise the configured installer URL.
- * '' when the platform is not released.
+ * '' when the platform is not released or the key is unknown.
  *
- * @param string $platform 'windows' or 'android'
+ * @param string $platform 'windows', 'android', 'linux-deb' or 'linux-rpm'
  */
 function nx_installer_button_url($platform)
 {
-    $upstream = $platform === 'windows' ? nx_windows_download_url() : nx_android_download_url();
+    $all = nx_installer_upstreams();
+    $upstream = isset($all[$platform]) ? $all[$platform] : '';
     if ($upstream === '') {
         return '';
     }

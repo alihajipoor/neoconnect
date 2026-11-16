@@ -64,6 +64,7 @@ function findChannel(guild: Guild, name: string): TextChannel | null {
 const PLATFORM_LABELS: Record<string, string> = {
   windows: "🖥️  Windows",
   android: "🤖  Android",
+  linux: "🐧  Linux",
 };
 
 function downloadsEmbed(releases: PlatformRelease[], config: BotConfig): EmbedBuilder {

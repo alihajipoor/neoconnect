@@ -361,3 +361,50 @@ jobs:
       - name: Test
         working-directory: apps/desktop-windows
         run: cargo test --workspace
+
+  desktop-linux:
+    name: Linux desktop client tests
+    # The release's runner, so a crate that builds here builds there. The
+    # helper, tunnel and netguard tests run unprivileged by design: a test
+    # that needs root to pass would be skipped on every developer machine
+    # and silently prove nothing.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Tauri app links WebKitGTK and GTK even to type-check, through
+      # their -sys crates' pkg-config probes. The rest is what the release
+      # needs, kept the same so this job notices a missing package first.
+      - name: Install build packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev \
+            pkg-config build-essential file rpm patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Two workspaces, two lock files: the helper's, and the Tauri app's,
+      # which is kept apart so a half-finished app cannot stop the helper
+      # building.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop-linux/target
+            apps/desktop-linux/src-tauri/target
+          key: desktop-linux-cargo-${{ hashFiles('apps/desktop-linux/Cargo.lock', 'apps/desktop-linux/src-tauri/Cargo.lock') }}
+
+      - name: Test the helper, tunnel and netguard
+        working-directory: apps/desktop-linux
+        run: cargo test --workspace
+
+      # generate_context! refuses to compile while frontendDist does not
+      # exist, and building the interface here would only repeat what the
+      # TypeScript job does. An empty folder is enough to type-check.
+      - name: Check the app
+        working-directory: apps/desktop-linux/src-tauri
+        run: |
+          mkdir -p ../dist
+          cargo check --all-targets

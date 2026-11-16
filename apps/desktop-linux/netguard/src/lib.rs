@@ -15,7 +15,15 @@
 //! crate's own business.
 
 use std::fmt;
+use std::io::Write as _;
 use std::net::Ipv4Addr;
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+mod lan;
+mod script;
+
+use script::{TAG_DNS, TAG_IPV4, TAG_IPV6};
 
 /// The table's name, in the `inet` family. Nothing else is ever ours.
 pub const TABLE: &str = "neoxify";
@@ -109,29 +117,196 @@ impl std::error::Error for Error {}
 /// The complete nft script for a plan: pure, no I/O, so it can be tested
 /// anywhere. Loading it must replace any earlier table of ours in the
 /// same transaction.
-pub fn ruleset(_plan: &Plan) -> String {
-    unimplemented!("netguard::ruleset")
+pub fn ruleset(plan: &Plan) -> String {
+    script::build(plan)
 }
 
 /// Put the plan in force, replacing whatever of ours was there, and say
 /// what the kernel now holds.
-pub fn apply(_plan: &Plan) -> Result<Applied, Error> {
-    unimplemented!("netguard::apply")
+pub fn apply(plan: &Plan) -> Result<Applied, Error> {
+    validate(plan).map_err(Error::Refused)?;
+    let nft = nft()?;
+    let mut child = Command::new(nft)
+        .args(["-f", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::NftMissing(format!("{}: {e}", nft.display())))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(ruleset(plan).as_bytes()).map_err(|e| Error::Refused(format!("writing the rules: {e}")))?;
+    }
+    let out = child.wait_with_output().map_err(|e| Error::Refused(e.to_string()))?;
+    if !out.status.success() {
+        return Err(Error::Refused(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+    }
+    // What the customer is told comes from the kernel, not the plan: a
+    // flag the plan asked for and the table does not show is an error.
+    let Some(applied) = in_force()? else {
+        return Err(Error::NotVerified("the table is not there after loading it".into()));
+    };
+    let missing: Vec<&str> = [
+        (plan.block_ipv6 && !applied.ipv6_blocked, "the IPv6 block"),
+        (plan.confine_dns && !applied.dns_confined, "the DNS confinement"),
+        (plan.confine_ipv4 && !applied.ipv4_confined, "the IPv4 confinement"),
+    ]
+    .into_iter()
+    .filter_map(|(gone, what)| gone.then_some(what))
+    .collect();
+    if !missing.is_empty() {
+        return Err(Error::NotVerified(format!("not found in the kernel's table: {}", missing.join(", "))));
+    }
+    Ok(applied)
 }
 
 /// Delete the table. Finding none is not an error.
 pub fn remove() -> Result<Removal, Error> {
-    unimplemented!("netguard::remove")
+    let nft = nft()?;
+    let out = Command::new(nft)
+        .args(["delete", "table", "inet", TABLE])
+        .output()
+        .map_err(|e| Error::NftMissing(format!("{}: {e}", nft.display())))?;
+    if out.status.success() {
+        return Ok(Removal::Removed);
+    }
+    // Rather than read nft's wording of "no such table", which changes
+    // between versions, ask whether the table is there.
+    if !table_exists(nft)? {
+        return Ok(Removal::Nothing);
+    }
+    Err(Error::Refused(String::from_utf8_lossy(&out.stderr).trim().to_string()))
 }
 
 /// What is in force right now, or `None` when there is no table.
 pub fn in_force() -> Result<Option<Applied>, Error> {
-    unimplemented!("netguard::in_force")
+    let nft = nft()?;
+    let out = Command::new(nft)
+        .args(["-j", "list", "table", "inet", TABLE])
+        .output()
+        .map_err(|e| Error::NftMissing(format!("{}: {e}", nft.display())))?;
+    if !out.status.success() {
+        if !table_exists(nft)? {
+            return Ok(None);
+        }
+        return Err(Error::NotVerified(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+    }
+    readback(&String::from_utf8_lossy(&out.stdout)).map(Some).map_err(Error::NotVerified)
 }
 
 /// The on-link private IPv4 prefixes of the interfaces that are up,
 /// leaving out the named (tunnel) interfaces. Never a whole private
 /// range: only what an interface is actually addressed in.
-pub fn lan_prefixes(_exclude_ifaces: &[&str]) -> Vec<Cidr4> {
-    unimplemented!("netguard::lan_prefixes")
+pub fn lan_prefixes(exclude_ifaces: &[&str]) -> Vec<Cidr4> {
+    let ip = ["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"].into_iter().map(Path::new).find(|p| p.is_file());
+    let Some(ip) = ip else { return Vec::new() };
+    match Command::new(ip).args(["-j", "-4", "addr", "show", "up"]).output() {
+        Ok(out) if out.status.success() => lan::parse(&String::from_utf8_lossy(&out.stdout), exclude_ifaces),
+        _ => Vec::new(),
+    }
 }
+
+/// nft from the system's own directories only. The helper runs as root,
+/// and a `PATH` lookup would run whatever `nft` comes first in it.
+fn nft() -> Result<&'static Path, Error> {
+    ["/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft", "/bin/nft"]
+        .into_iter()
+        .map(Path::new)
+        .find(|p| p.is_file())
+        .ok_or_else(|| Error::NftMissing("no nft in /usr/sbin, /sbin, /usr/bin or /bin".into()))
+}
+
+fn table_exists(nft: &Path) -> Result<bool, Error> {
+    let out = Command::new(nft)
+        .args(["list", "tables", "inet"])
+        .output()
+        .map_err(|e| Error::NftMissing(format!("{}: {e}", nft.display())))?;
+    if !out.status.success() {
+        return Err(Error::NotVerified(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+    }
+    let wanted = format!("table inet {TABLE}");
+    Ok(String::from_utf8_lossy(&out.stdout).lines().any(|l| l.trim() == wanted))
+}
+
+/// Everything in a plan that is written into the script, checked before
+/// it is: nothing a plan carries may become nft syntax, and nothing may
+/// quietly turn a permit into a permit for everything.
+fn validate(plan: &Plan) -> Result<(), String> {
+    for name in &plan.tunnel_ifaces {
+        if !script::valid_iface(name) {
+            return Err(format!("{name:?} is not an interface name this accepts"));
+        }
+    }
+    if plan.engine_fwmark == Some(0) {
+        return Err("an engine mark of 0 would match every unmarked packet".into());
+    }
+    for t in &plan.transports {
+        if t.ip.is_unspecified() || t.ip.is_broadcast() || t.ip.is_multicast() || t.port == 0 {
+            return Err(format!("{}:{} is not a server's address", t.ip, t.port));
+        }
+    }
+    if plan.confine_ipv4 {
+        for c in &plan.lan {
+            // Anything wider than a /8 is most of the internet, not a LAN.
+            if c.prefix < 8 || c.prefix > 32 {
+                return Err(format!("{}/{} is not a local network", c.addr, c.prefix));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Which guarantees the kernel's table holds, from `nft -j list table`.
+/// A guarantee counts only when a refusal rule carrying its tag sits in
+/// a chain hooked where it has to act: IPv4 and IPv6 on output, input
+/// and forward; DNS on output and forward.
+fn readback(json: &str) -> Result<Applied, String> {
+    use serde_json::Value;
+    let v: Value = serde_json::from_str(json).map_err(|e| format!("unreadable nft output: {e}"))?;
+    let items = v.get("nftables").and_then(Value::as_array).ok_or("nft output has no \"nftables\" list")?;
+    let mut hooks: Vec<(String, String)> = Vec::new();
+    let mut refusals: Vec<(String, String)> = Vec::new();
+    for item in items {
+        if let Some(chain) = item.get("chain") {
+            if chain.get("table").and_then(Value::as_str) != Some(TABLE) {
+                continue;
+            }
+            if let (Some(name), Some(hook)) =
+                (chain.get("name").and_then(Value::as_str), chain.get("hook").and_then(Value::as_str))
+            {
+                hooks.push((name.to_string(), hook.to_string()));
+            }
+        }
+        if let Some(rule) = item.get("rule") {
+            if rule.get("table").and_then(Value::as_str) != Some(TABLE) {
+                continue;
+            }
+            let (Some(chain), Some(comment)) =
+                (rule.get("chain").and_then(Value::as_str), rule.get("comment").and_then(Value::as_str))
+            else {
+                continue;
+            };
+            let refuses = rule
+                .get("expr")
+                .and_then(Value::as_array)
+                .is_some_and(|e| e.iter().any(|x| x.get("reject").is_some() || x.get("drop").is_some()));
+            if refuses {
+                refusals.push((chain.to_string(), comment.to_string()));
+            }
+        }
+    }
+    let held = |tag: &str, at: &[&str]| {
+        at.iter().all(|hook| {
+            refusals
+                .iter()
+                .any(|(chain, comment)| comment == tag && hooks.iter().any(|(n, h)| n == chain && h == hook))
+        })
+    };
+    Ok(Applied {
+        ipv6_blocked: held(TAG_IPV6, &["output", "input", "forward"]),
+        dns_confined: held(TAG_DNS, &["output", "forward"]),
+        ipv4_confined: held(TAG_IPV4, &["output", "input", "forward"]),
+    })
+}
+
+#[cfg(test)]
+mod tests;

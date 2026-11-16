@@ -1,0 +1,12 @@
+#!/bin/sh
+# Before removal: stop the helper, which takes down any tunnel and its
+# leak protection (the unit's ExecStopPost sweeps). Not on an upgrade:
+# postinst restarts it onto the new binary instead.
+set -e
+if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
+  if [ -d /run/systemd/system ]; then
+    systemctl stop neoxify-helper.service || true
+    systemctl disable neoxify-helper.service || true
+  fi
+fi
+exit 0

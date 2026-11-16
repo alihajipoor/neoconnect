@@ -1,0 +1,10 @@
+# After removal. RPM has no purge, so the helper's state in /var/lib/neoxify
+# is kept, as a deb's is on a plain remove; deleting it is left to the
+# person, who can see it there.
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload || :
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications || :
+fi
+exit 0

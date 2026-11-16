@@ -34,6 +34,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ReconnectPhase, ReconnectStop } from "./auto-reconnect";
 import { serviceGone, withTimeout } from "./service-call";
+import { supportsReconnectHold } from "./desktop-platform";
 
 /** Whether "Block the internet while reconnecting" has been proved: false
  * until it has.
@@ -63,11 +64,13 @@ export const RECONNECT_HOLD_PROVEN = true;
 export const RECONNECT_HOLD_OFFERED: boolean = RECONNECT_HOLD_PROVEN || import.meta.env.VITE_RECONNECT_HOLD === "1";
 
 /** The setting as the hold acts on it: the customer's preference, in a
- * build that offers it. Every read of the preference that decides what the
+ * build that offers it, on a desktop whose service has a hold (not Linux's
+ * first version). Every read of the preference that decides what the
  * service holds, or what the screen says about it, goes through this -- a
- * preference saved by a test build is nothing in a release. */
+ * preference saved by a test build is nothing in a release, and a Linux
+ * session never asks its helper for a hold it does not have. */
 export function holdWanted(preference: boolean): boolean {
-  return RECONNECT_HOLD_OFFERED && preference;
+  return RECONNECT_HOLD_OFFERED && supportsReconnectHold() && preference;
 }
 
 export type ReconnectHoldProblem = "filtersRefused" | "tunnelNotPermitted" | "timedOut" | "notCovered" | "other";

@@ -1,0 +1,8 @@
+# Before removal ($1 is how many copies will remain: 0 on an erase, 1 or
+# more during an upgrade). Stop the helper only on an erase; the unit's
+# ExecStopPost sweeps any tunnel and leak protection it left.
+if [ "$1" -eq 0 ] && [ -d /run/systemd/system ]; then
+  systemctl stop neoxify-helper.service || :
+  systemctl disable neoxify-helper.service || :
+fi
+exit 0

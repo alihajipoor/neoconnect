@@ -16,6 +16,24 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
+// The shared plumbing every engine uses, each in its own module so the
+// WireGuard and OpenVPN engines can be added beside `xray` without
+// touching it: `cmd` runs system programs within a budget, `ledger`
+// records what is owed back to the machine, `routes`, `link` and `dns`
+// change the machine and undo it, `process` starts and finds engines,
+// `cleanup` undoes the ledger and sweeps after a crash.
+mod cleanup;
+mod cmd;
+mod dns;
+mod files;
+mod ledger;
+mod link;
+mod openvpn;
+mod process;
+mod routes;
+mod wireguard;
+mod xray;
+
 pub use neoconnect_ipc::{ConnectProfile, ExitProfile, TunnelHealth};
 
 /// Where things live. The helper fills this in once at start; nothing in
@@ -137,32 +155,65 @@ pub trait Tunnel: Send {
 /// every other protocol); `known_nodes` are server addresses whose stale
 /// host routes may be purged before connecting.
 pub fn connect(
-    _profile: &ConnectProfile,
-    _exits: &[ExitProfile],
-    _known_nodes: &[String],
-    _dirs: &Dirs,
-    _limits: &Limits,
+    profile: &ConnectProfile,
+    exits: &[ExitProfile],
+    known_nodes: &[String],
+    dirs: &Dirs,
+    limits: &Limits,
 ) -> Result<Box<dyn Tunnel>, Problem> {
-    unimplemented!("tunnel::connect")
+    match profile {
+        ConnectProfile::XrayVlessReality(_)
+        | ConnectProfile::XrayVlessTls(_)
+        | ConnectProfile::XrayTrojan(_)
+        | ConnectProfile::Shadowsocks(_) => xray::connect(profile, exits, known_nodes, dirs, limits),
+        ConnectProfile::Wireguard(_) => wireguard::connect(profile, known_nodes, dirs, limits),
+        ConnectProfile::Openvpn(_) => openvpn::connect(profile, known_nodes, dirs, limits),
+        ConnectProfile::Ikev2(_) => Err(Problem::Failed("IKEv2 is not available on Linux yet".into())),
+    }
 }
 
 /// Is there a way out to the internet for this profile's server right
 /// now? Answers from the routing table. Never dials anything.
-pub fn way_out(_profile: &ConnectProfile) -> Result<(), Problem> {
-    unimplemented!("tunnel::way_out")
+pub fn way_out(profile: &ConnectProfile) -> Result<(), Problem> {
+    // The server's own address when the profile names it by one (as nodes
+    // are registered); otherwise any public address -- the question is
+    // whether there is a way out at all, and a name is not looked up.
+    let probe = server_literal(profile).unwrap_or(Ipv4Addr::new(1, 1, 1, 1));
+    match routes::way_out_to(probe) {
+        Ok(false) => Err(Problem::NoNetwork),
+        // Found one, or could not read the table: a table that could not
+        // be read says nothing, and the connect goes on to find out.
+        Ok(true) | Err(_) => Ok(()),
+    }
+}
+
+/// The server's address when the profile names it by one, without
+/// looking anything up.
+fn server_literal(profile: &ConnectProfile) -> Option<Ipv4Addr> {
+    let host_of = |endpoint: &str| endpoint.rsplit_once(':').map(|(host, _)| host.to_string());
+    let host = match profile {
+        ConnectProfile::Wireguard(p) => host_of(&p.endpoint),
+        ConnectProfile::Openvpn(p) => host_of(&p.endpoint),
+        ConnectProfile::XrayVlessReality(p) => Some(p.host.clone()),
+        ConnectProfile::XrayVlessTls(p) => Some(p.host.clone()),
+        ConnectProfile::XrayTrojan(p) => Some(p.host.clone()),
+        ConnectProfile::Shadowsocks(p) => Some(p.host.clone()),
+        ConnectProfile::Ikev2(p) => Some(p.server.clone()),
+    };
+    host.and_then(|host| host.parse().ok())
 }
 
 /// Clean up after a helper that died: orphaned engines (matched by
 /// their full program path only), our links, our routes and rules, DNS
 /// we pointed at ourselves, and whatever the ledger says is still owed.
 /// Returns one plain line per thing it removed or could not remove.
-pub fn sweep_leftovers(_dirs: &Dirs) -> Vec<String> {
-    unimplemented!("tunnel::sweep_leftovers")
+pub fn sweep_leftovers(dirs: &Dirs) -> Vec<String> {
+    cleanup::sweep(dirs)
 }
 
 /// The name of one of our tunnel interfaces if the kernel shows one up
 /// right now. For answering a status question when the session's owner
 /// is busy: what the machine shows, not what we remember.
 pub fn visible_tunnel() -> Option<String> {
-    unimplemented!("tunnel::visible_tunnel")
+    link::OURS.iter().find(|name| link::is_up(name) == Some(true)).map(|name| name.to_string())
 }

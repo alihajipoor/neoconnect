@@ -150,6 +150,20 @@ return array(
     // says so rather than offering a dead button.
     'android_installer_url' => 'https://connect.neoxify.site/api/updates/installer/android',
 
+    // The Linux packages, one URL per format, same arrangement again: the
+    // API answers /updates/installer/linux-deb and /updates/installer/
+    // linux-rpm with a redirect to the newest linux-v* release's file.
+    //
+    // EMPTY UNTIL linux-v0.1.0 IS PUBLISHED, on purpose. Before there is a
+    // release those endpoints have nothing to redirect to, and a button
+    // pointing at them would be a dead one; empty instead shows the Linux
+    // tile as not available yet. On release day, set each to the same
+    // address as android_installer_url with "android" replaced by
+    // "linux-deb" and "linux-rpm". Either one set makes the tile live,
+    // with a button for each format that is set.
+    'linux_deb_installer_url' => '',
+    'linux_rpm_installer_url' => '',
+
     // ---------------------------------------------------------------
     // Downloads served from this site (get/index.php)
     // ---------------------------------------------------------------
@@ -157,7 +171,8 @@ return array(
     // The two installer URLs above are on the control plane's domain,
     // which networks that block VPNs often block too: a visitor there can
     // load this page and still not download. So the buttons point at
-    // /get/windows and /get/android on THIS site instead. On a request,
+    // /get/windows, /get/android, /get/linux-deb and /get/linux-rpm on THIS
+    // site instead. On a request,
     // the site (which sits outside) asks the URL above where the current
     // release is, keeps one copy of that file in installer_store_dir, and
     // sends the visitor to the copy here. The visitor's browser needs no
@@ -190,6 +205,8 @@ return array(
     'installer_release_prefix' => 'https://github.com/alihajipoor/neoxify-releases/releases/download/',
 
     // Refuse anything bigger than this. Today: Windows ~21 MB, Android ~87 MB.
+    // The Linux packages are not built yet; they carry the app and the xray
+    // engine, so expect them near the Windows size, well under the cap.
     'installer_max_bytes' => 200 * 1024 * 1024,
 
     // How long the answer to "where is the current release" is trusted.

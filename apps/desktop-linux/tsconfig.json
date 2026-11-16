@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    // ES2021, matching the Windows, macOS and mobile projects: all of them
+    // compile @shared from the Windows app's src, including the API client
+    // that races endpoints with Promise.any.
+    "lib": ["ES2021", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    /* The interface lives in the Windows app; see vite.config.ts. tsc
+       resolves through these paths and the bundler through the alias
+       there, so the two have to agree. */
+    "baseUrl": ".",
+    "paths": { "@shared/*": ["../desktop-windows/src/*"] }
+  },
+  "include": ["src", "../desktop-windows/src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

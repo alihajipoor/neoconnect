@@ -63,8 +63,10 @@ import type { NotifySetting } from "../lib/notify";
 
 /** Which device this is: decides the rows that only exist on one of them
  * (gaming mode, Custom mode, Repair and leak protection are Windows's; the
- * web portal has none of them). */
-export type SettingsPlatform = "windows" | "android" | "ios" | "web";
+ * web portal has none of them). Linux has leak protection and nothing else
+ * of those in its first version; macOS is drawn as Windows is until its
+ * shell says otherwise. */
+export type SettingsPlatform = "windows" | "linux" | "macos" | "android" | "ios" | "web";
 
 /** What this platform does for the device's own behaviour. A row exists
  * only for what the platform has bound -- a switch nothing honours is not
@@ -106,8 +108,10 @@ export interface DeviceSettings {
  * account and signing out ask first, in a dialog. */
 type SubView = "gaming" | "custom" | "password" | "recovery" | "repair";
 
-const OS_NAME: Record<SettingsPlatform, "set.osWin" | "set.osAndroid" | "set.osIos" | null> = {
+const OS_NAME: Record<SettingsPlatform, "set.osWin" | "set.osLinux" | "set.osMac" | "set.osAndroid" | "set.osIos" | null> = {
   windows: "set.osWin",
+  linux: "set.osLinux",
+  macos: "set.osMac",
   android: "set.osAndroid",
   ios: "set.osIos",
   web: null,
@@ -210,6 +214,13 @@ export function Settings({
   }, []);
 
   const windows = platform === "windows";
+  const linux = platform === "linux";
+  // The Linux helper confines the tunnel for every protocol it offers, so
+  // the leak row is there too, without the exceptions Windows names.
+  const leakRow = windows || linux;
+  // Nor does its helper hold the internet while reconnecting: the row is
+  // not drawn there, whatever the app bound.
+  const reconnectHold = linux ? undefined : device.reconnectHold;
   const osName = OS_NAME[platform] ? t(OS_NAME[platform]!) : null;
   const unconfirmedRelay = customer !== null && !customer.emailVerifiedAt && Boolean(customer.relayUnverifiedSince);
   const socialOnly = customer?.hasPassword === false;
@@ -263,9 +274,9 @@ export function Settings({
       <div className="nx-cols">
         {/* Only with a row in it: the web portal has no tunnel and no relay,
             and an empty titled card says there is something to set. */}
-        {windows || device.autostart || device.autoConnect || device.reconnectHold || relaySupported() ? (
+        {leakRow || device.autostart || device.autoConnect || reconnectHold || relaySupported() ? (
           <ListGroup title={t("set.connection")}>
-            {windows ? (
+            {leakRow ? (
               <Row
                 icon={<ShieldCheck />}
                 label={t("set.leak")}
@@ -276,18 +287,19 @@ export function Settings({
             {/* The relay of last resort's switch: on until turned off here
                 (last-resort.ts). Nothing where there is no relay. */}
             <BackupRouteSection />
-            {device.autostart ? <AutostartRow binding={device.autostart} /> : null}
+            {device.autostart ? <AutostartRow binding={device.autostart} linux={linux} /> : null}
             {device.autoConnect ? (
               <SwitchRow
                 icon={<Play />}
                 label={t("set.autoConnect")}
-                hint={t("set.autoConnectHint")}
+                // Linux has no gaming mode, so its hint does not mention one.
+                hint={t(linux ? "set.autoConnectHintNoGaming" : "set.autoConnectHint")}
                 checked={prefs.value.autoConnect}
                 disabled={!prefs.loaded}
                 onChange={(next) => void appPrefs.set("autoConnect", next)}
               />
             ) : null}
-            {device.reconnectHold ? (
+            {reconnectHold ? (
               <SwitchRow
                 icon={<WifiOff />}
                 label={t("set.blockRecon")}
@@ -300,7 +312,7 @@ export function Settings({
                   // The live session is told at once: armed now, or let go
                   // of. A service that cannot be reached is told on the
                   // next connect, which always says.
-                  void device.reconnectHold?.apply(next).catch(() => undefined);
+                  void reconnectHold?.apply(next).catch(() => undefined);
                 }}
               />
             ) : null}
@@ -508,15 +520,17 @@ export function Settings({
           <li className="ok">
             <Check aria-hidden />
             <span>
-              <b>{t("leak.heldLead")}</b> {t("leak.held")}
+              <b>{t("leak.heldLead")}</b> {t(linux ? "leak.heldAll" : "leak.held")}
             </span>
           </li>
-          <li>
-            <Info aria-hidden />
-            <span>
-              <b>{t("leak.notHeldLead")}</b> {t("leak.notHeld")}
-            </span>
-          </li>
+          {linux ? null : (
+            <li>
+              <Info aria-hidden />
+              <span>
+                <b>{t("leak.notHeldLead")}</b> {t("leak.notHeld")}
+              </span>
+            </li>
+          )}
           <li className={windows && holdWanted(prefs.value.blockWhileReconnecting) ? "ok" : undefined}>
             {windows && holdWanted(prefs.value.blockWhileReconnecting) ? <Check aria-hidden /> : <Info aria-hidden />}
             <span>
@@ -552,7 +566,7 @@ function useAppPrefs(): { value: AppPrefs; loaded: boolean } {
  * page opens, and after a change shows what Windows then says -- not what
  * was pressed (lib/autostart.ts). Until the first answer the switch is
  * not offered. */
-function AutostartRow({ binding }: { binding: AutostartBinding }) {
+function AutostartRow({ binding, linux = false }: { binding: AutostartBinding; linux?: boolean }) {
   const { t } = useI18n();
   const [on, setOn] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
@@ -583,8 +597,14 @@ function AutostartRow({ binding }: { binding: AutostartBinding }) {
   return (
     <SwitchRow
       icon={<Power />}
-      label={t("set.autoStart")}
-      hint={failed ? <span className="nx-osset">{t("set.autoStartFailed")}</span> : t("set.autoStartHint")}
+      label={t(linux ? "set.autoStartLinux" : "set.autoStart")}
+      hint={
+        failed ? (
+          <span className="nx-osset">{t(linux ? "set.autoStartFailedLinux" : "set.autoStartFailed")}</span>
+        ) : (
+          t(linux ? "set.autoStartHintLinux" : "set.autoStartHint")
+        )
+      }
       checked={on === true}
       disabled={on === null || busy}
       onChange={(next) => void change(next)}
@@ -695,7 +715,10 @@ type NotifyHint =
   | "set.notifsOffPhone"
   | "set.notifsOffApp"
   | "set.notifsOffAll"
-  | "set.notifsOffPolicy";
+  | "set.notifsOffPolicy"
+  | "set.notifsOffAppLinux"
+  | "set.notifsOffAllLinux"
+  | "set.notifsOffPolicyLinux";
 
 /** What the notifications row says under its switch, and the row it adds
  * under it: the system's question while it can still be asked, or the
@@ -715,7 +738,7 @@ export function notificationsRowView(input: {
   if (input.checked && phone && input.os === "disabledForApp") {
     return { hint: "set.notifsOffPhone", blocked: true, action: input.canOpen ? "open" : null };
   }
-  const windowsBlock = phone ? null : OS_BLOCKS[input.os];
+  const windowsBlock = phone ? null : (input.platform === "linux" ? LINUX_BLOCKS : OS_BLOCKS)[input.os];
   if (input.checked && windowsBlock) return { hint: windowsBlock, blocked: true, action: null };
   return { hint: HINT[input.platform], blocked: false, action: null };
 }
@@ -724,6 +747,8 @@ export function notificationsRowView(input: {
  * a phone from the tunnel's own service or extension, which say less. */
 const HINT: Record<SettingsPlatform, "set.notificationsHint" | "set.notificationsHintAndroid" | "set.notificationsHintIos"> = {
   windows: "set.notificationsHint",
+  linux: "set.notificationsHint",
+  macos: "set.notificationsHint",
   android: "set.notificationsHintAndroid",
   ios: "set.notificationsHintIos",
   web: "set.notificationsHint",
@@ -738,6 +763,16 @@ const OS_BLOCKS: Record<NotifySetting, "set.notifsOffApp" | "set.notifsOffAll" |
   disabledForApp: "set.notifsOffApp",
   disabledForUser: "set.notifsOffAll",
   disabledByPolicy: "set.notifsOffPolicy",
+  unknown: null,
+};
+
+/** The same on Linux, worded for a desktop that is not Windows. */
+const LINUX_BLOCKS: Record<NotifySetting, "set.notifsOffAppLinux" | "set.notifsOffAllLinux" | "set.notifsOffPolicyLinux" | null> = {
+  enabled: null,
+  canAsk: null,
+  disabledForApp: "set.notifsOffAppLinux",
+  disabledForUser: "set.notifsOffAllLinux",
+  disabledByPolicy: "set.notifsOffPolicyLinux",
   unknown: null,
 };
 

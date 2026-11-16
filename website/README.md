@@ -285,9 +285,39 @@ another app, and there is no Custom mode (per-app routing is Android and
 Windows only). The App Store's own prices are not on this site; the
 structured data gives the iPhone node the trial offer only.
 
+### Linux
+
+Two formats, two keys, each its own endpoint: `linux_deb_installer_url`
+(the API's `/updates/installer/linux-deb`) and `linux_rpm_installer_url`
+(`/updates/installer/linux-rpm`), served from this site as
+`/get/linux-deb` and `/get/linux-rpm`. **Both are empty until the first
+`linux-v*` release is published**: before then the API has nothing to
+redirect to, so the download page shows a Linux tile marked "Not
+available yet" (between Android and iPhone), never a dead button. On
+release day set each to the Android address with `android` replaced by
+`linux-deb` / `linux-rpm`. Either one set makes the tile live, with a
+button per configured format, a Beta mark, the one install command per
+format, and a line in the updates notice: the Linux app says when a new
+version exists but does not install it itself. The release files must be
+on the same release repository as the others (`installer_release_prefix`),
+or the site refuses them and falls back.
+
+The texts that list the platforms (the download page's title and
+description, the home description and hero note, the closing points, the
+social-card alt text) each have a `KEY.with_linux` version that names
+Linux. `nx_t()` uses it only while `nx_linux_available()` is true, so the
+site never claims a Linux app before there is one and nothing has to be
+edited on release day. Every `.with_linux` key in `en.php` needs its
+Persian twin in `fa.php`, or Persian pages get the English line. The
+schema.org Linux node follows the same switch.
+
+The tile's glyph is a terminal window with a prompt, drawn for the site:
+not the penguin and not any distribution's logo.
+
 ### Served from this site
 
-The Windows and Android buttons link to `/get/windows` and `/get/android`
+The Windows, Android and Linux buttons link to `/get/windows`,
+`/get/android`, `/get/linux-deb` and `/get/linux-rpm`
 (`get/index.php`, routed by `index.php` and on Apache by `.htaccess`), not
 to the control plane, because networks that block VPNs block the control
 plane's domain too (measured 2026-11-14) while this site and GitHub's
@@ -313,7 +343,8 @@ start with `installer_release_prefix` and every fetch hop must be https on
 `installer_release_hosts` (no SSRF); tag and file name reduced to
 `[A-Za-z0-9._-]`; one fetch at a time per platform (flock), the next
 visitor waits for it; temp name, Content-Length, size cap and the file's
-first bytes (`MZ`, `PK`) checked before the rename; `ignore_user_abort`;
+first bytes (`MZ`, `PK`, `!<arch>` and a newline for a .deb, `ED AB EE DB`
+for an .rpm) checked before the rename; `ignore_user_abort`;
 a failed fetch is not retried for five minutes; two newest copies kept per
 platform; when the release endpoint cannot be asked, the last copy on disk
 is served instead of the fallback (which is that same endpoint). **Anything failing sends the visitor to the configured installer
@@ -327,15 +358,21 @@ Things to know:
   past it the visitor gets the fallback. Measured from the host, the release file answered
   in well under a second. `php get/index.php warm` does the same from the
   command line with no time cap -- run it once right after a deploy, and
-  it is what a cron job would call.
+  it is what a cron job would call. With no platform named it warms only
+  the platforms whose installer URL is set, so an unreleased Linux does
+  not fail the check; `warm linux-deb` names one.
 - **`dl/<platform>/` and `data/installers/` are runtime state.** Deploys
   copy named files and leave both alone; both must be left out of any
   live-equals-main comparison, like the submissions and the secret. `dl/`
   must be writable by the PHP user (`www-data`).
-- **Content-Type.** On Apache, `dl/.htaccess` sets the `.apk` type. On
-  nginx the host's `mime.types` has no `.apk` entry, so without the
-  `location ^~ /dl/` block from `nginx-website.conf.example` the `.apk`
-  goes out as `application/octet-stream` (the `.exe` is right either way).
+- **Content-Type.** On Apache, `dl/.htaccess` sets the `.apk`, `.deb`
+  (`application/vnd.debian.binary-package`) and `.rpm`
+  (`application/x-rpm`) types. On nginx the host's `mime.types` has no
+  `.apk` entry, so without the `location ^~ /dl/` block from
+  `nginx-website.conf.example` the `.apk` goes out as
+  `application/octet-stream` (the `.exe` is right either way; whether the
+  host's map has `.deb` and `.rpm` is not checked, and the example block
+  now lists both).
   Adding that block to the live vhost means an nginx reload on the shared
   box -- the owner's to approve. Android's browsers go by the `.apk` name;
   unverified on a phone either way.
@@ -462,7 +499,8 @@ URLs, `/sitemap.xml` and `/r/CODE` all returned the home page with a
 200, and `www.neoxify.net` served a full copy. So the top of
 `index.php` routes, before anything else: `/` and `/index.php` render
 the home page, `/sitemap.xml` requires `sitemap.php`, `/r/CODE` hands
-the code to `r/index.php`, and **anything else renders `404.php` with a
+the code to `r/index.php`, `/get/<platform>` (windows, android,
+linux-deb, linux-rpm) hands the platform to `get/index.php`, and **anything else renders `404.php` with a
 404** (in Persian under `/fa/`). `inc/bootstrap.php` 301s any `www.`
 host to `site_url`. None of it needs server configuration, and on Apache
 `.htaccess` does the same in front of it.

@@ -24,8 +24,9 @@ export type DialledCredential = {
   credentials?: Record<string, unknown> | null;
 };
 
-/** Which client is asking. */
-export type ClientPlatform = "windows" | "phone";
+/** Which client is asking. Linux is its own name but answers as Windows
+ * does: its helper mirrors the Windows routes (see `reachesServerAround`). */
+export type ClientPlatform = "windows" | "linux" | "phone";
 
 /** How long resolving one server name may take. The connect ladder asks
  * before every rung; a name that does not resolve in this long is one
@@ -79,6 +80,13 @@ const PHONE_THROUGH = new Set([
  *    endpoint; it binds its own socket to the physical interface, and
  *    the rest of the machine's traffic to that address follows the
  *    tunnel's routes. From upstream's design, NOT measured here.
+ *
+ * Linux: as Windows, read from the helper's design rather than measured.
+ * Xray gets a host route for the server via the uplink gateway and
+ * OpenVPN's `redirect-gateway def1` adds one for the remote: around.
+ * WireGuard sends everything, the app's own requests included, through
+ * the tunnel by fwmark policy routing, with only the kernel's own
+ * encrypted packets marked to leave outside it: through.
  *
  * Phones: through for Xray and WireGuard (see `PHONE_THROUGH`), around
  * for IKEv2 -- the system's own client, whose routing for its server is
