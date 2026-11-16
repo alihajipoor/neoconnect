@@ -57,7 +57,8 @@
           "nftables",
           "iproute2",
           "wireguard-tools",
-          "openvpn"
+          "openvpn",
+          "xdg-utils"
         ],
         "files": {
           "/usr/lib/neoxify/neoxify-helper": "resources/neoxify-helper",
@@ -75,7 +76,8 @@
           "nftables",
           "iproute",
           "wireguard-tools",
-          "openvpn"
+          "openvpn",
+          "xdg-utils"
         ],
         "files": {
           "/usr/lib/neoxify/neoxify-helper": "resources/neoxify-helper",

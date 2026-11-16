@@ -171,6 +171,8 @@ pub(crate) struct OvpnTunnel {
     /// When the log was first seen ending on a restart, for the age of a
     /// stale link. Cleared when it comes back up.
     restarting_since: Option<Instant>,
+    /// The server, whose route `health` watches.
+    server: Ipv4Addr,
 }
 
 pub(crate) fn connect(
@@ -219,6 +221,7 @@ pub(crate) fn connect(
         baseline: None,
         log: dirs.run.join(LOG_FILE),
         restarting_since: None,
+        server,
     };
     // From here an early return drops `tunnel`, which undoes what it did.
     tunnel.bring_up(&exe, &config, server, &uplink, dirs, &budget)?;
@@ -323,21 +326,18 @@ fn wait_until_up(child: &mut Child, log: &Path, budget: &Budget) -> Result<(), P
         }
         match child.try_wait() {
             Ok(Some(status)) => {
-                return Err(Problem::Failed(format!(
-                    "OpenVPN stopped before the tunnel came up ({status}): {}",
-                    process::log_tail(log)
-                )));
+                process::log_last_words("OpenVPN", log);
+                return Err(Problem::Failed(format!("OpenVPN stopped before the tunnel came up ({status})")));
             }
             Ok(None) => {}
             Err(e) => return Err(Problem::Failed(format!("could not check whether OpenVPN was still running: {e}"))),
         }
         budget.check().map_err(|stop| stop.problem("OpenVPN to finish connecting"))?;
+        // Running and never finishing is the server not completing the
+        // handshake, so it is said in the same words as the deadline above.
         if capped.expired() {
-            return Err(Problem::Failed(format!(
-                "OpenVPN did not finish connecting within {}s: {}",
-                TUNNEL_UP_WITHIN.as_secs(),
-                process::log_tail(log)
-            )));
+            process::log_last_words("OpenVPN", log);
+            return Err(Problem::TimedOut("OpenVPN to finish connecting".into()));
         }
         budget.nap();
     }
@@ -361,6 +361,13 @@ impl Tunnel for OvpnTunnel {
         if Path::new("/sys/class/net").is_dir() && !link::exists(LINK) {
             return TunnelHealth::Down;
         }
+        // Its host route to the server goes with a device that goes down,
+        // as Xray's does (`XrayTunnel::health`): OpenVPN's own packets then
+        // loop into its tun.
+        if routes::leads_into(self.server, LINK) {
+            eprintln!("neoxify-helper: OpenVPN's server is now routed into its own tunnel (its way out went away)");
+            return TunnelHealth::Down;
+        }
         if link_restarting(&read_tail(&self.log)) {
             let since = *self.restarting_since.get_or_insert_with(Instant::now);
             TunnelHealth::Stale { age_secs: since.elapsed().as_secs() }
@@ -368,6 +375,10 @@ impl Tunnel for OvpnTunnel {
             self.restarting_since = None;
             TunnelHealth::Unknown
         }
+    }
+
+    fn dns_protected(&self) -> bool {
+        self.dns.as_ref().is_some_and(dns::still_in_force)
     }
 
     fn counters(&self) -> Option<(u64, u64)> {
@@ -396,6 +407,9 @@ impl Tunnel for OvpnTunnel {
         if let Some(mut child) = self.child.take() {
             let _ = child.wait();
         }
+        // The log names the server and how it was reached; nothing reads
+        // it once the engine is gone, so it does not outlive the tunnel.
+        let _ = std::fs::remove_file(&self.log);
         self.remove_engine_routes(&budget);
         if let Some(owed) = self.dns.take() {
             match dns::undo(&owed, &budget) {

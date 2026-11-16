@@ -6,6 +6,14 @@ set -e
 # The bundler's file mappings are not trusted to keep the executable bit.
 chmod 0755 /usr/lib/neoxify/neoxify-helper /usr/lib/neoxify/xray
 
+# The helper serves the app run by whoever is at the screen, and by members
+# of this group: for a machine used without a screen of its own. Created
+# empty; adding anyone is the administrator's decision. Kept on removal,
+# as a group may own files elsewhere.
+if ! getent group neoxify >/dev/null 2>&1; then
+  groupadd --system neoxify || echo "neoxify: could not create the neoxify group" >&2
+fi
+
 if [ "$1" = "configure" ] && [ -d /run/systemd/system ]; then
   systemctl daemon-reload || true
   if [ -n "$2" ]; then

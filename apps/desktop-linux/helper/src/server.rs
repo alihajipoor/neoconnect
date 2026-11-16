@@ -48,6 +48,29 @@ const HEALTH_POLL: Duration = Duration::from_secs(1);
 
 const SPLIT_TUNNEL_UNAVAILABLE: &str = "Custom mode is not available on Linux yet";
 const IKEV2_UNAVAILABLE: &str = "IKEv2 is not available on Linux yet";
+const REFUSED: &str =
+    "only the Neoxify app, run by the person at this computer's screen or by a member of the neoxify group, may control the Neoxify helper";
+const ANOTHER_USERS_SESSION: &str = "another user's Neoxify connection is active on this computer";
+
+/// How long a connection may take to send each request line. The app
+/// writes its request the moment it connects; a caller that sends nothing
+/// is holding a descriptor, and is let go.
+pub const REQUEST_WAIT: Duration = Duration::from_secs(5);
+
+/// How many connections are served at once. The app uses one at a time,
+/// a few when a status crosses a connect; this is far above that and far
+/// below the unit's descriptor limit, so a flood of connections waits its
+/// turn rather than leaving no descriptor for the `nft` and `ip` that a
+/// teardown has to run.
+pub const MAX_CONNECTIONS: usize = 256;
+
+/// Who owns the live session: the caller whose Connect made it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Owner {
+    uid: u32,
+    /// The app's process, watched; `None` for root's tools, which are not.
+    pid: Option<u32>,
+}
 
 /// Everything a connection handler needs. Cheap to clone.
 #[derive(Clone)]
@@ -58,9 +81,14 @@ pub struct Shared {
     pub policy: Arc<Policy>,
     /// The last time the app asked anything.
     last_seen: Arc<Mutex<Instant>>,
-    /// The process being watched, so the app's connection-per-request
-    /// habit does not produce a watch per request.
+    /// The session's owner. Only its Connect sets it, so another process
+    /// that passes as the app -- a status poll, a second user's app --
+    /// neither takes over the exit watch nor decides when the tunnel ends.
+    owner: Arc<Mutex<Option<Owner>>>,
+    /// The process being watched, so a second Connect from the same app
+    /// does not produce a second watch.
     watched: Arc<Mutex<Option<u32>>>,
+    slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl Shared {
@@ -71,8 +99,14 @@ impl Shared {
             backend,
             policy,
             last_seen: Arc::new(Mutex::new(Instant::now())),
+            owner: Arc::new(Mutex::new(None)),
             watched: Arc::new(Mutex::new(None)),
+            slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
         }
+    }
+
+    fn owner(&self) -> std::sync::MutexGuard<'_, Option<Owner>> {
+        self.owner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn heard(&self) {
@@ -107,12 +141,22 @@ pub async fn serve(listener: UnixListener, shared: Shared, stop: impl std::futur
     spawn_idle_watchdog(shared.clone());
     tokio::pin!(stop);
     loop {
+        // A slot before accepting, so a flood waits in the listen backlog
+        // instead of taking every descriptor the helper has.
+        let slot = tokio::select! {
+            _ = &mut stop => return,
+            slot = Arc::clone(&shared.slots).acquire_owned() => match slot {
+                Ok(slot) => slot,
+                Err(_) => return,
+            },
+        };
         tokio::select! {
             _ = &mut stop => return,
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
                     let shared = shared.clone();
                     tokio::spawn(async move {
+                        let _slot = slot;
                         if let Err(err) = handle_connection(stream, shared).await {
                             eprintln!("neoxify-helper: connection error: {err}");
                         }
@@ -122,6 +166,10 @@ pub async fn serve(listener: UnixListener, shared: Shared, stop: impl std::futur
                 // the daemon; a moment's pause stops it spinning.
                 Err(err) => {
                     eprintln!("neoxify-helper: accept failed: {err}");
+                    // The app cannot reach us now, which is not the app
+                    // having gone: the idle watchdog must not take that
+                    // silence for it. The process watch still sees an exit.
+                    shared.heard();
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             },
@@ -130,37 +178,65 @@ pub async fn serve(listener: UnixListener, shared: Shared, stop: impl std::futur
 }
 
 async fn handle_connection(stream: UnixStream, shared: Shared) -> std::io::Result<()> {
-    let caller = match stream.peer_cred() {
-        Ok(cred) => shared.policy.judge(cred.uid(), cred.pid()),
-        Err(_) => Caller::Refused { who: "a caller whose credentials could not be read".into() },
+    let (uid, pid) = match stream.peer_cred() {
+        Ok(cred) => (Some(cred.uid()), cred.pid()),
+        Err(_) => (None, None),
     };
-    if let Caller::App { pid } = caller {
-        watch_the_app(&shared, pid);
+    // The process is pinned before anything is read about it, so the
+    // judgement below cannot be of a pid that was recycled meanwhile.
+    let pinned = pid.and_then(|p| u32::try_from(p).ok()).and_then(|p| PidWatch::open(p).ok());
+    let mut caller = match uid {
+        Some(uid) => shared.policy.judge(uid, pid),
+        None => Caller::Refused { who: "a caller whose credentials could not be read".into() },
+    };
+    if matches!(caller, Caller::App { .. }) && pinned.as_ref().is_some_and(|p| !p.still_running()) {
+        caller = Caller::Refused { who: "a process that exited while it was being checked".into() };
     }
-    let allowed = !matches!(caller, Caller::Refused { .. });
-    if allowed {
-        shared.heard();
+    let mut pinned = pinned;
+
+    // Refused: answered at once and let go, without reading a byte, so a
+    // refused caller holds nothing. What it may have sent is read for a
+    // moment afterwards only so that closing does not cut off the answer.
+    if let Caller::Refused { who } = &caller {
+        if shared.policy.first_refusal(who) {
+            eprintln!("neoxify-helper: refused a caller ({who})");
+        }
+        let mut stream = stream;
+        let mut encoded = serde_json::to_string(&Response::Error { message: REFUSED.to_string() }).unwrap_or_default();
+        encoded.push('\n');
+        let _ = tokio::time::timeout(Duration::from_secs(1), stream.write_all(encoded.as_bytes())).await;
+        let _ = stream.shutdown().await;
+        let mut sink = [0u8; 4096];
+        let _ = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut sink)).await;
+        return Ok(());
     }
+    shared.heard();
 
     let mut reader = BufReader::new(stream);
     let mut line = Vec::new();
     loop {
         line.clear();
-        let read = (&mut reader).take(MAX_REQUEST_BYTES).read_until(b'\n', &mut line).await?;
+        let read =
+            match tokio::time::timeout(REQUEST_WAIT, (&mut reader).take(MAX_REQUEST_BYTES).read_until(b'\n', &mut line))
+                .await
+            {
+                Ok(read) => read?,
+                // Nothing, or no whole line, in time: let go.
+                Err(_) => return Ok(()),
+            };
         if read == 0 {
             return Ok(());
         }
         let too_long = line.last() != Some(&b'\n') && read as u64 >= MAX_REQUEST_BYTES;
 
-        let response = if let Caller::Refused { who } = &caller {
-            if shared.policy.first_refusal(who) {
-                eprintln!("neoxify-helper: refused a caller that is not the Neoxify app ({who})");
-            }
-            Response::Error { message: "only the Neoxify app may control the Neoxify helper".to_string() }
-        } else if too_long {
+        let response = if too_long {
             Response::Error { message: "malformed request: longer than the helper accepts".to_string() }
         } else {
             match serde_json::from_slice::<Request>(trim(&line)) {
+                Ok(request @ Request::Connect { .. }) => match claim_session(&shared, &caller, &mut pinned) {
+                    Some(refusal) => refusal,
+                    None => dispatch(request, &shared).await,
+                },
                 Ok(request) => dispatch(request, &shared).await,
                 Err(err) => Response::Error { message: malformed(&err) },
             }
@@ -171,15 +247,38 @@ async fn handle_connection(stream: UnixStream, shared: Shared) -> std::io::Resul
         encoded.push('\n');
         reader.get_mut().write_all(encoded.as_bytes()).await?;
         reader.get_mut().flush().await?;
-        if allowed {
-            // Again on the way out, so a long request counts as the app
-            // being alive for its whole duration.
-            shared.heard();
-        }
-        if too_long || !allowed {
+        // Again on the way out, so a long request counts as the app being
+        // alive for its whole duration.
+        shared.heard();
+        if too_long {
             return Ok(());
         }
     }
+}
+
+/// A Connect makes its caller the session's owner, and the app's process
+/// the one watched. Refused while another user's session is live or being
+/// made: one person's tunnel is not another's to replace.
+pub(crate) fn claim_session(shared: &Shared, caller: &Caller, pinned: &mut Option<PidWatch>) -> Option<Response> {
+    let (uid, pid) = match caller {
+        Caller::App { pid, uid } => (*uid, Some(*pid)),
+        Caller::Trusted => (shared.policy.trusted_uid, None),
+        Caller::Refused { .. } => return Some(Response::Error { message: REFUSED.to_string() }),
+    };
+    {
+        let mut owner = shared.owner();
+        let session_standing = shared.ledger.live_protocol().is_some() || shared.ledger.is_connecting();
+        let someone_else = owner.is_some_and(|o| o.uid != uid);
+        // Root's own tools may always act: they are root's to run.
+        if session_standing && someone_else && !matches!(caller, Caller::Trusted) {
+            return Some(Response::Error { message: ANOTHER_USERS_SESSION.to_string() });
+        }
+        *owner = Some(Owner { uid, pid });
+    }
+    if let Some(watch) = pinned.take().filter(|w| Some(w.pid) == pid) {
+        watch_the_app(shared, watch);
+    }
+    None
 }
 
 fn trim(line: &[u8]) -> &[u8] {
@@ -202,29 +301,34 @@ fn malformed(err: &serde_json::Error) -> String {
     format!("malformed request: {kind} (line {}, column {})", err.line(), err.column())
 }
 
-/// Watch the app's process, once per process, and take its tunnel down
-/// when it exits.
-fn watch_the_app(shared: &Shared, pid: u32) {
+/// Watch the session owner's process, once per process, and take its
+/// tunnel down when it exits. Without a pidfd (a kernel before 5.3) the
+/// idle watchdog stands in.
+fn watch_the_app(shared: &Shared, watch: PidWatch) {
+    let pid = watch.pid;
     let newly_seen = shared.watched.lock().map(|mut w| w.replace(pid) != Some(pid)).unwrap_or(false);
     if !newly_seen {
         return;
     }
-    let watch = match PidWatch::open(pid) {
-        Ok(watch) => watch,
-        Err(err) => {
-            eprintln!("neoxify-helper: cannot watch the app (pid {pid}): {err}; the idle watchdog stands in");
-            return;
-        }
-    };
     let shared = shared.clone();
     tokio::spawn(async move {
         let signal = watch.exited().await;
+        if let Ok(mut watched) = shared.watched.lock() {
+            if *watched == Some(pid) {
+                *watched = None;
+            }
+        }
         if !client_watch::tears_down(client_watch::shutting_down()) {
             return;
         }
-        // A newer app took over the watch: that one's exit decides.
-        if shared.watched.lock().map(|w| *w != Some(pid)).unwrap_or(false) {
-            return;
+        // Only the owner's exit ends the session: another connect has
+        // made someone else its owner since.
+        {
+            let mut owner = shared.owner();
+            if !matches!(*owner, Some(o) if o.pid == Some(pid)) {
+                return;
+            }
+            *owner = None;
         }
         eprintln!("neoxify-helper: {}", signal.reason());
         // Whatever it was doing is no longer wanted by anyone.
@@ -259,6 +363,12 @@ async fn status_without_the_thread(shared: &Shared) -> Response {
     if shared.ledger.confirmed_drop().is_some() {
         return nothing(TunnelHealth::Down);
     }
+    // A connect in flight has finished nothing: its link may be up before
+    // its routes, DNS and leak protection, and it may yet be rolled back.
+    // Not connected, and not verified either way.
+    if shared.ledger.is_connecting() {
+        return nothing(TunnelHealth::Unknown);
+    }
     let backend = Arc::clone(&shared.backend);
     let Ok(seen) = tokio::task::spawn_blocking(move || backend.visible_tunnel()).await else {
         return Response::Error { message: "could not read the tunnel state".to_string() };
@@ -275,7 +385,8 @@ async fn status_without_the_thread(shared: &Shared) -> Response {
         split_tunnel_problem: None,
         split_tunnel_restart_needed: Vec::new(),
         ipv6_blocked: guard.as_ref().is_some_and(|g| g.ipv6_blocked),
-        tunnel_dns_unprotected: false,
+        // Protected only on the session's own record; with none, unproven.
+        tunnel_dns_unprotected: !guard.as_ref().is_some_and(|g| g.dns_protected),
         ipv4_confined: guard.as_ref().map(|g| g.ipv4_confined),
         confinement_problem: guard.and_then(|g| g.problem),
         reconnect_hold: None,
@@ -373,7 +484,7 @@ pub async fn dispatch(request: Request, shared: &Shared) -> Response {
             // Taken as the connect is queued and checked when it starts: a
             // Disconnect in between means nothing is dialled.
             let wanted = engines.generation();
-            let busy = Ledger::busy(ledger);
+            let busy = Ledger::connecting(ledger);
             engines
                 .run(move |s: &mut Session, token| {
                     let _busy = busy;

@@ -139,7 +139,11 @@ impl RunError {
         match self {
             RunError::Missing(program) => Problem::EngineMissing(program.clone()),
             RunError::Spawn(why) => Problem::Failed(format!("could not {what}: {why}")),
-            RunError::Stopped(stop) => stop.problem(what),
+            // A local step that ran out of time is not a server that did
+            // not answer, and the app files "timed out" against the server
+            // it was dialling. So it is said without those words.
+            RunError::Stopped(Stop::TimedOut) => Problem::Failed(format!("could not {what} in time")),
+            RunError::Stopped(Stop::Cancelled) => Problem::Cancelled,
         }
     }
 }

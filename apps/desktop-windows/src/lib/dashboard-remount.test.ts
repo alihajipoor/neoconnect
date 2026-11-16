@@ -288,8 +288,11 @@ describe("the Dashboard's wiring", () => {
       const shown = fn("  function showLoadedCredential(");
       // The pin, and with it no name for a tunnel; over a tunnel the screen
       // shows up, the credential it holds, by id.
-      expect(shown).toContain("setProtocolUser(users.find((u) => u.routeId === routeId) ?? users[0] ?? null);");
-      const pin = shown.indexOf("setProtocolUser(users.find((u) => u.routeId === routeId)");
+      // Taken from what this platform can dial: an IKEv2 credential on
+      // Linux is never the pin.
+      expect(shown).toContain("const offered = offeredUsers(users.slice());");
+      expect(shown).toContain("setProtocolUser(offered.find((u) => u.routeId === routeId) ?? offered[0] ?? null);");
+      const pin = shown.indexOf("setProtocolUser(offered.find((u) => u.routeId === routeId)");
       expect(shown.slice(pin, pin + 160)).toContain("setTunnelRouteUnknown(true);");
       expect(shown.indexOf("if (keepHeld || describesTunnel(connectionStateRef.current)) {")).toBeLessThan(pin);
       // Every load takes its credential this way.

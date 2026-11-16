@@ -106,14 +106,22 @@ pub(crate) fn sweep(dirs: &Dirs) -> Vec<String> {
         }
     }
 
-    for file in [crate::xray::CONFIG_FILE, crate::openvpn::CONFIG_FILE, crate::wireguard::KEY_FILE] {
+    // The engines' logs too: they name the server, and a crash is exactly
+    // when the tunnel's own stop never ran to delete them.
+    for file in [
+        crate::xray::CONFIG_FILE,
+        crate::openvpn::CONFIG_FILE,
+        crate::wireguard::KEY_FILE,
+        crate::xray::LOG_FILE,
+        crate::openvpn::LOG_FILE,
+    ] {
         let config = dirs.run.join(file);
         if !config.exists() {
             continue;
         }
         match std::fs::remove_file(&config) {
-            Ok(()) => lines.push(format!("deleted a leftover engine config ({})", config.display())),
-            Err(e) => lines.push(format!("could not delete a leftover engine config ({}): {e}", config.display())),
+            Ok(()) => lines.push(format!("deleted a leftover engine file ({})", config.display())),
+            Err(e) => lines.push(format!("could not delete a leftover engine file ({}): {e}", config.display())),
         }
     }
     lines

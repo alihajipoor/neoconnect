@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use neoconnect_ipc::{ConnectProfile, ExitProfile, Response, TunnelHealth};
-use neoxify_netguard::Plan;
+use neoxify_netguard::{Applied, Plan};
 use neoxify_tunnel::{Dirs, Limits, Problem, Tunnel};
 
 use crate::backend::{transport, Backend};
@@ -21,8 +21,23 @@ struct Live {
     generation: u64,
     started: Instant,
     guard: GuardFacts,
-    dns_protected: bool,
+    /// The table asked for, and what the kernel confirmed of it (`None`
+    /// when it did not go in), for the once-a-second look that it is
+    /// still there (`recheck_protection`).
+    plan: Plan,
+    applied: Option<Applied>,
     meter: Meter,
+}
+
+/// What the status says of a table the kernel confirmed.
+fn facts_of(applied: &Applied, dns_protected: bool) -> GuardFacts {
+    GuardFacts {
+        ipv6_blocked: applied.ipv6_blocked,
+        ipv4_confined: applied.ipv4_confined,
+        dns_protected,
+        problem: (!applied.ipv4_confined || !applied.ipv6_blocked || !applied.dns_confined)
+            .then(|| "leak protection is only partly in force".to_string()),
+    }
 }
 
 pub struct Session {
@@ -102,19 +117,20 @@ impl Session {
         // as on Windows: the tunnel carries, and the app must not claim
         // full protection over it. Anything half-written is deleted, so
         // what stands is either the whole table or none of it.
-        let guard = match self.backend.guard_apply(&plan) {
-            Ok(applied) => GuardFacts {
-                ipv6_blocked: applied.ipv6_blocked,
-                ipv4_confined: applied.ipv4_confined,
-                problem: (!applied.ipv4_confined || !applied.ipv6_blocked || !applied.dns_confined)
-                    .then(|| "leak protection is only partly in force".to_string()),
-            },
+        let (guard, applied) = match self.backend.guard_apply(&plan) {
+            Ok(applied) => (facts_of(&applied, up.dns_protected), Some(applied)),
             Err(err) => {
                 eprintln!("neoxify-helper: leak protection did not go in, the tunnel stays up without it: {err}");
                 if let Err(e) = self.backend.guard_remove() {
                     eprintln!("neoxify-helper: removing a half-written table: {e}");
                 }
-                GuardFacts { ipv6_blocked: false, ipv4_confined: false, problem: Some(err.to_string()) }
+                let facts = GuardFacts {
+                    ipv6_blocked: false,
+                    ipv4_confined: false,
+                    dns_protected: up.dns_protected,
+                    problem: Some(err.to_string()),
+                };
+                (facts, None)
             }
         };
         self.ledger.note_guard(generation, guard.clone());
@@ -124,7 +140,8 @@ impl Session {
             generation,
             started: Instant::now(),
             guard,
-            dns_protected: up.dns_protected,
+            plan,
+            applied,
             meter: Meter::default(),
         });
 
@@ -188,9 +205,66 @@ impl Session {
         if let Some(live) = &mut self.live {
             if live.tunnel.health() == TunnelHealth::Down {
                 self.end_dead();
+            } else {
+                self.recheck_protection();
             }
         }
         self.owes_finish()
+    }
+
+    /// What the status claims about DNS and the table, read back from the
+    /// machine rather than kept from the connect. Either can be undone
+    /// under a live tunnel -- a DHCP client rewriting `/etc/resolv.conf`,
+    /// `nft flush ruleset` from a firewall reload -- and the app tells the
+    /// customer they are protected on these words. A table that went is
+    /// put back; one that will not go back is reported as gone.
+    fn recheck_protection(&mut self) {
+        let Some(live) = &mut self.live else { return };
+        let mut changed = false;
+
+        let dns = live.tunnel.dns_protected();
+        if dns != live.guard.dns_protected {
+            if !dns {
+                eprintln!("neoxify-helper: the machine's DNS no longer points into the tunnel; something else rewrote it");
+            }
+            live.guard.dns_protected = dns;
+            changed = true;
+        }
+
+        if let Some(expected) = live.applied {
+            match self.backend.guard_in_force() {
+                Ok(Some(now)) if now == expected => {}
+                Ok(_) => {
+                    eprintln!("neoxify-helper: leak protection was changed or removed by something else; putting it back");
+                    live.guard = match self.backend.guard_apply(&live.plan) {
+                        Ok(applied) => {
+                            live.applied = Some(applied);
+                            facts_of(&applied, dns)
+                        }
+                        Err(err) => {
+                            eprintln!("neoxify-helper: leak protection could not be put back: {err}");
+                            let _ = self.backend.guard_remove();
+                            live.applied = None;
+                            GuardFacts {
+                                ipv6_blocked: false,
+                                ipv4_confined: false,
+                                dns_protected: dns,
+                                problem: Some(format!(
+                                    "leak protection was removed by something else and could not be put back: {err}"
+                                )),
+                            }
+                        }
+                    };
+                    changed = true;
+                }
+                // A look that could not run proves nothing either way.
+                Err(_) => {}
+            }
+        }
+
+        if changed {
+            self.ledger.note_guard(live.generation, live.guard.clone());
+        }
     }
 
     /// The status, from the session itself. Also returns whether a
@@ -208,7 +282,7 @@ impl Session {
                     split_tunnel_problem: None,
                     split_tunnel_restart_needed: Vec::new(),
                     ipv6_blocked: live.guard.ipv6_blocked,
-                    tunnel_dns_unprotected: !live.dns_protected,
+                    tunnel_dns_unprotected: !live.guard.dns_protected,
                     ipv4_confined: Some(live.guard.ipv4_confined),
                     confinement_problem: live.guard.problem.clone(),
                     reconnect_hold: None,

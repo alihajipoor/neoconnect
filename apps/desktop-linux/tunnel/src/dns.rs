@@ -205,6 +205,22 @@ pub(crate) fn undo(owed: &Owed, budget: &Budget) -> Result<Option<String>, Strin
     }
 }
 
+/// Whether a DNS change made at connect is still in force.
+pub(crate) fn still_in_force(owed: &Owed) -> bool {
+    match owed {
+        Owed::ResolvConf { ours, .. } => resolv_conf_is(Path::new(RESOLV_CONF), ours),
+        // Resolved keeps a link's settings until the link goes, and a
+        // tunnel whose link has gone is reported down by its engine.
+        Owed::ResolvedLink { .. } => true,
+        _ => false,
+    }
+}
+
+/// `etc` is still the file we wrote: not a symlink, and word for word ours.
+pub(crate) fn resolv_conf_is(etc: &Path, ours: &str) -> bool {
+    std::fs::read_link(etc).is_err() && std::fs::read_to_string(etc).ok().as_deref() == Some(ours)
+}
+
 pub(crate) fn restore_resolv_conf(
     etc: &Path,
     backup: &Path,
@@ -305,6 +321,25 @@ mod tests {
         let said = restore_resolv_conf(&etc, backup, symlink.as_deref(), *existed, ours).unwrap();
         assert!(said.is_some());
         assert_eq!(std::fs::read_to_string(&etc).unwrap(), "nameserver 198.51.100.53\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A DHCP client rewriting the file mid-session is seen, so the status
+    /// stops saying DNS is protected.
+    #[test]
+    fn a_file_rewritten_mid_session_is_no_longer_ours() {
+        let dir = scratch("midsession");
+        let etc = dir.join("resolv.conf");
+        std::fs::write(&etc, "nameserver 192.0.2.1\n").unwrap();
+        let ledger = Ledger::in_dir(&dir);
+        let owed = rewrite_resolv_conf(&etc, &dir.join(BACKUP_FILE), &ledger).unwrap();
+        let Owed::ResolvConf { ours, .. } = &owed else { panic!() };
+        assert!(resolv_conf_is(&etc, ours));
+        std::fs::write(&etc, "nameserver 192.0.2.1\n").unwrap();
+        assert!(!resolv_conf_is(&etc, ours));
+        std::fs::remove_file(&etc).unwrap();
+        std::os::unix::fs::symlink(dir.join(BACKUP_FILE), &etc).unwrap();
+        assert!(!resolv_conf_is(&etc, ours), "a symlink is never ours");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

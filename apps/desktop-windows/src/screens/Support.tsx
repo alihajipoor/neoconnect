@@ -11,7 +11,7 @@ import {
 import { collectDiagnostics, diagnosticsToText } from "../lib/repair";
 import { loadFlagSet } from "../lib/flag-art";
 import { reportedPlatform } from "../lib/attempts";
-import { chromiumFromUserAgent, engineLine, webkitFromUserAgent, webkitLine, webviewVersion } from "../lib/webview-engine";
+import { chromiumFromUserAgent, engineLine, webkitGtkVersion, webkitLine, webviewVersion } from "../lib/webview-engine";
 import { supportsRepair } from "../lib/desktop-platform";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
@@ -197,7 +197,7 @@ function DiagnosticsCard() {
             platform === "windows"
               ? engineLine(await webviewVersion(), chromiumFromUserAgent())
               : platform === "linux"
-                ? webkitLine(webkitFromUserAgent())
+                ? webkitLine(await webkitGtkVersion())
                 : undefined,
           () => undefined,
         ),

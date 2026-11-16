@@ -82,6 +82,18 @@ impl PidWatch {
         Ok(Self { pid, fd })
     }
 
+    /// Whether the process is still running. With the pidfd opened before
+    /// anything is read from `/proc/<pid>`, a yes here means those reads
+    /// were of this process: a pid is only reused once its process has
+    /// exited, which the pidfd would show.
+    pub fn still_running(&self) -> bool {
+        use std::os::fd::AsRawFd;
+        let mut poll = libc::pollfd { fd: self.fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        // SAFETY: one pollfd, valid for the call; a zero timeout never blocks.
+        let ready = unsafe { libc::poll(&mut poll, 1, 0) };
+        ready == 0
+    }
+
     /// Resolves when the process has exited.
     pub async fn exited(self) -> ExitSignal {
         let pid = self.pid;
@@ -107,10 +119,12 @@ mod tests {
     async fn a_process_that_exits_is_seen_to_exit() {
         let mut child = std::process::Command::new("sleep").arg("0.3").spawn().expect("sleep");
         let watch = PidWatch::open(child.id()).expect("pidfd_open");
+        let early = PidWatch::open(child.id()).expect("pidfd_open");
         let signal = tokio::time::timeout(Duration::from_secs(10), watch.exited())
             .await
             .expect("the exit was never seen");
         assert_eq!(signal, ExitSignal::Exited { pid: child.id() });
+        assert!(!early.still_running(), "a pidfd opened earlier must see the exit too");
         let _ = child.wait();
     }
 
@@ -119,6 +133,7 @@ mod tests {
     async fn a_running_process_is_not_seen_to_exit() {
         let mut child = std::process::Command::new("sleep").arg("30").spawn().expect("sleep");
         let watch = PidWatch::open(child.id()).expect("pidfd_open");
+        assert!(watch.still_running());
         let early = tokio::time::timeout(Duration::from_millis(400), watch.exited()).await;
         assert!(early.is_err(), "a running process was reported gone");
         let _ = child.kill();

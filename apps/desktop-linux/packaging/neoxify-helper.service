@@ -24,6 +24,9 @@ ExecStart=/usr/lib/neoxify/neoxify-helper
 ExecStopPost=/usr/lib/neoxify/neoxify-helper sweep
 Restart=on-failure
 RestartSec=2
+# Room for every connection the helper serves at once (256) and for the
+# nft and ip it must still be able to run to take a tunnel down.
+LimitNOFILE=65536
 
 RuntimeDirectory=neoxify
 RuntimeDirectoryMode=0755

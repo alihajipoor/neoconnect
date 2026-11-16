@@ -23,7 +23,7 @@ const { orderCandidates, offeredUsers } = await import("./failover");
 const { classifyConnectionError } = await import("./connection-errors");
 const { detectPlatform } = await import("./attempts");
 const { reachesServerAround } = await import("./tunnel-server");
-const { webviewVersion, resetEngineNoteForTests } = await import("./webview-engine");
+const { webviewVersion, resetEngineNoteForTests, takeEngineNote, webkitGtkVersion, webkitLine } = await import("./webview-engine");
 import type { DeviceSettings, SettingsPlatform } from "../screens/Settings";
 import type { Protocol, ProtocolUser } from "./types";
 
@@ -87,6 +87,15 @@ describe("the default platform", () => {
     expect(detectPlatform("Mozilla/5.0 (X11; Linux x86_64)", 0)).toBe("unknown");
   });
 
+  it("still notes an old WebView2 on the first report, and asks nothing about WebKitGTK", async () => {
+    invoke.mockResolvedValue("100.0.1185.36");
+    expect(await takeEngineNote()).toBe("webview 100.0.1185.36");
+    expect(invoke).toHaveBeenCalledWith("webview_version", undefined);
+    invoke.mockClear();
+    expect(await webkitGtkVersion()).toBeNull();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it("draws Windows' Settings as before", () => {
     const html = renderSettings("windows", { custom: true, gaming: true }, {
       ...DESKTOP_DEVICE,
@@ -146,6 +155,17 @@ describe("on Linux", () => {
     await desktopTeardownDeps.disarmGaming();
     expect(await webviewVersion()).toBeNull();
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("notes no old engine for WebKitGTK's 2.x, and names it in the diagnostics line", async () => {
+    invoke.mockResolvedValue("2.44.0");
+    expect(await takeEngineNote()).toBeNull();
+    expect(invoke).not.toHaveBeenCalled();
+    expect(webkitLine(await webkitGtkVersion())).toBe("webview: WebKitGTK 2.44.0");
+    expect(invoke).toHaveBeenCalledWith("webview_version", undefined);
+    resetEngineNoteForTests();
+    invoke.mockRejectedValue(new Error("no such command"));
+    expect(webkitLine(await webkitGtkVersion())).toBe("webview: WebKitGTK (version could not be read)");
   });
 
   it("leaves IKEv2 out of the automatic order and out of the server list", () => {
@@ -210,6 +230,12 @@ describe("the guarded call sites", () => {
 
   it("Support offers its diagnostics only where the helper has them", () => {
     expect(support).toContain("{supportsRepair() ? <DiagnosticsCard /> : null}");
+  });
+
+  it("Support's engine line is WebView2's on Windows as before, and WebKitGTK's on Linux", () => {
+    expect(support).toMatch(/platform === "windows"\s+\? engineLine\(await webviewVersion\(\), chromiumFromUserAgent\(\)\)/);
+    expect(support).toContain('platform === "linux"');
+    expect(support).toContain("? webkitLine(await webkitGtkVersion())");
   });
 });
 

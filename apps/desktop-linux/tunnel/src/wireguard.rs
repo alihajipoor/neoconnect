@@ -246,7 +246,7 @@ impl WgTunnel {
         self.delete_key_file();
         match set {
             Ok(out) if out.success => {}
-            Ok(out) => return Err(Problem::Failed(format!("WireGuard refused its configuration: {}", out.complaint()))),
+            Ok(out) => return Err(Problem::Failed(format!("WireGuard did not accept its configuration: {}", out.complaint()))),
             Err(e) => return Err(e.problem("configure WireGuard")),
         }
 
@@ -366,6 +366,10 @@ impl Tunnel for WgTunnel {
         parse_handshake(&out, now)
     }
 
+    fn dns_protected(&self) -> bool {
+        self.dns.as_ref().is_some_and(dns::still_in_force)
+    }
+
     fn counters(&self) -> Option<(u64, u64)> {
         let (rx, tx) = link::counters(LINK)?;
         let (rx0, tx0) = self.baseline.unwrap_or((0, 0));
@@ -374,12 +378,18 @@ impl Tunnel for WgTunnel {
 
     /// The rules first: with them gone nothing is looked up in table
     /// 28280 and traffic is back on the main table at once. Then the
-    /// route and the link, which is the engine. `ip` calls only.
+    /// route. `ip` calls only.
+    ///
+    /// The link is NOT deleted here. Deleting a WireGuard device makes
+    /// the kernel wait for its workers, which was measured at up to 1.6 s
+    /// in the VM, and a disconnect that slow was answered as a failure
+    /// though the customer's traffic had been back on their own network
+    /// since the rules went. With the rules and the route gone the link
+    /// carries nothing, so it waits for the thorough half.
     fn hard_stop(&mut self) {
         let budget = teardown();
         self.remove_rules(&budget);
         self.remove_routes(&budget);
-        self.remove_link(&budget);
     }
 
     fn finish_stop(&mut self) {

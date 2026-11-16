@@ -22,7 +22,8 @@ use crate::backend::Backend;
 use crate::lifecycle::cancel::CancelToken;
 use crate::lifecycle::ledger::Ledger;
 use crate::lifecycle::supervisor::Supervisor;
-use crate::peer::Policy;
+use crate::peer::{Caller, Policy};
+use neoconnect_ipc::Response;
 use crate::server::{self, Shared};
 use crate::session::Session;
 
@@ -40,6 +41,13 @@ struct World {
     connect_fails: Option<Problem>,
     guard_fails: bool,
     no_way_out: bool,
+    /// The table as the kernel holds it: put there by `guard_apply`,
+    /// taken by `guard_remove`, or by a test standing in for someone
+    /// else's `nft flush ruleset`.
+    table: Option<Applied>,
+    applies: usize,
+    /// Whether the machine's DNS still points into the tunnel.
+    dns_in_force: bool,
 }
 
 impl Default for World {
@@ -57,6 +65,9 @@ impl Default for World {
             connect_fails: None,
             guard_fails: false,
             no_way_out: false,
+            table: None,
+            applies: 0,
+            dns_in_force: true,
         }
     }
 }
@@ -79,6 +90,9 @@ impl Tunnel for FakeTunnel {
     }
     fn counters(&self) -> Option<(u64, u64)> {
         self.world.lock().unwrap().counters
+    }
+    fn dns_protected(&self) -> bool {
+        self.up.dns_protected && self.world.lock().unwrap().dns_in_force
     }
     fn hard_stop(&mut self) {
         let mut w = self.world.lock().unwrap();
@@ -142,14 +156,22 @@ impl Backend for Fake {
     fn guard_apply(&self, plan: &Plan) -> Result<Applied, neoxify_netguard::Error> {
         let mut w = self.0.lock().unwrap();
         w.last_plan = Some(plan.clone());
+        w.applies += 1;
         if w.guard_fails {
             return Err(neoxify_netguard::Error::NftMissing("nft was not found".into()));
         }
-        Ok(Applied { ipv6_blocked: true, dns_confined: true, ipv4_confined: true })
+        let applied = Applied { ipv6_blocked: true, dns_confined: true, ipv4_confined: true };
+        w.table = Some(applied);
+        Ok(applied)
     }
     fn guard_remove(&self) -> Result<Removal, neoxify_netguard::Error> {
-        self.0.lock().unwrap().removes += 1;
+        let mut w = self.0.lock().unwrap();
+        w.removes += 1;
+        w.table = None;
         Ok(Removal::Removed)
+    }
+    fn guard_in_force(&self) -> Result<Option<Applied>, neoxify_netguard::Error> {
+        Ok(self.0.lock().unwrap().table)
     }
     fn lan_prefixes(&self, _exclude_ifaces: &[&str]) -> Vec<Cidr4> {
         vec![Cidr4 { addr: Ipv4Addr::new(198, 51, 100, 0), prefix: 24 }]
@@ -278,11 +300,83 @@ async fn a_caller_that_is_neither_root_nor_the_app_is_refused() {
     assert_eq!(d.world().connects, 0, "a refused caller reached the engine");
 }
 
+/// A policy for `apps` under which this test's own user is the one at the
+/// screen, by a seat file of the test's own making.
+fn seated_policy(name: &str, apps: Vec<PathBuf>, seated: bool) -> Policy {
+    let seats = std::env::temp_dir().join(format!("nxh-{}-{name}-seats", std::process::id()));
+    let _ = std::fs::remove_dir_all(&seats);
+    std::fs::create_dir_all(&seats).unwrap();
+    if seated {
+        std::fs::write(seats.join("seat0"), format!("IS_SEAT0=1\nACTIVE=2\nACTIVE_UID={}\n", my_uid())).unwrap();
+    }
+    let mut policy = Policy::new(u32::MAX, apps);
+    policy.seats = seats;
+    policy.group = "neoxify-test-group-that-does-not-exist".into();
+    policy
+}
+
 #[tokio::test]
-async fn the_app_is_served_by_its_executable_and_watched() {
+async fn the_app_is_served_to_the_user_at_the_screen() {
     let me = std::env::current_exe().unwrap();
-    let d = start_with("app", World::default(), Policy::new(u32::MAX, vec![me])).await;
+    let d = start_with("app", World::default(), seated_policy("app", vec![me], true)).await;
     assert_eq!(d.ask(&Request::Status).await["status"], "state");
+}
+
+/// The executable is not enough: the app run by a user who is neither at
+/// the screen nor in the group is refused, and reaches nothing.
+#[tokio::test]
+async fn the_app_run_by_someone_not_at_the_screen_is_refused() {
+    let me = std::env::current_exe().unwrap();
+    let d = start_with("appaway", World::default(), seated_policy("appaway", vec![me], false)).await;
+    let reply = d.ask(&connect()).await;
+    assert_eq!(reply["status"], "error", "{reply}");
+    assert!(reply["message"].as_str().unwrap().contains("only the Neoxify app"), "{reply}");
+    assert_eq!(d.world().connects, 0);
+}
+
+/// A connection that sends nothing is let go, and a refused one is let go
+/// without being read: neither holds a descriptor for long.
+#[tokio::test]
+async fn a_silent_connection_is_let_go() {
+    let d = start("silent", World::default()).await;
+    let stream = tokio::net::UnixStream::connect(&d.path).await.unwrap();
+    let mut line = String::new();
+    let began = Instant::now();
+    let read = tokio::time::timeout(server::REQUEST_WAIT + Duration::from_secs(3), BufReader::new(stream).read_line(&mut line))
+        .await
+        .expect("the helper kept a silent connection open");
+    assert_eq!(read.unwrap(), 0, "{line}");
+    assert!(began.elapsed() >= server::REQUEST_WAIT - Duration::from_millis(200));
+
+    let d = start_with("silentrefused", World::default(), Policy::new(u32::MAX, Vec::new())).await;
+    let stream = tokio::net::UnixStream::connect(&d.path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut line)).await.expect("no refusal").unwrap();
+    assert!(line.contains("only the Neoxify app"), "{line}");
+    line.clear();
+    let read = tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut line)).await.expect("not let go");
+    assert_eq!(read.unwrap(), 0);
+}
+
+/// Another user's app cannot replace the session one user made; the same
+/// user can, and root's tools always can.
+#[tokio::test]
+async fn another_users_app_cannot_replace_a_live_session() {
+    let d = start("otheruser", World::default()).await;
+    let mut no_watch = None;
+    let alice = Caller::App { pid: 4242, uid: 1000 };
+    assert!(server::claim_session(&d.shared, &alice, &mut no_watch).is_none());
+    d.shared.ledger.begin("WIREGUARD");
+    let bob = Caller::App { pid: 4343, uid: 1001 };
+    let refused = server::claim_session(&d.shared, &bob, &mut no_watch);
+    assert!(
+        matches!(&refused, Some(Response::Error { message }) if message.contains("another user")),
+        "{refused:?}"
+    );
+    let alice_again = Caller::App { pid: 4244, uid: 1000 };
+    assert!(server::claim_session(&d.shared, &alice_again, &mut no_watch).is_none());
+    assert!(server::claim_session(&d.shared, &Caller::Trusted, &mut no_watch).is_none());
 }
 
 /// Every request the shared interface can send gets an answer it can
@@ -553,9 +647,27 @@ async fn status_is_answered_while_the_owning_thread_is_busy() {
     busy.await.unwrap();
 }
 
-/// The app's process exits: its tunnel comes down, both halves and the
-/// table, without waiting for the idle watchdog. The "app" is a python3
-/// process here, allowed by its executable exactly as /usr/bin/neoxify is.
+/// One request from a python3 process standing in for the app (allowed by
+/// its executable exactly as /usr/bin/neoxify is), which then lives on for
+/// `linger` seconds before exiting.
+const AS_THE_APP: &str = "import socket,sys,time\ns=socket.socket(socket.AF_UNIX)\ns.connect(sys.argv[1])\ns.sendall(sys.argv[2].encode()+b'\\n')\nprint(s.makefile().readline(),flush=True)\ns.close()\ntime.sleep(float(sys.argv[3]))\n";
+
+fn as_the_app(python: &PathBuf, socket: &PathBuf, request: &Request, linger: f32) -> std::process::Child {
+    std::process::Command::new(python)
+        .arg("-c")
+        .arg(AS_THE_APP)
+        .arg(socket)
+        .arg(serde_json::to_string(request).unwrap())
+        .arg(linger.to_string())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("python3")
+}
+
+/// The app that connected exits: its tunnel comes down, both halves and
+/// the table, without waiting for the idle watchdog. Another process that
+/// passes as the app and only asks the status is not the session's owner:
+/// its exit leaves the tunnel alone.
 #[tokio::test]
 async fn the_app_exiting_takes_its_tunnel_down() {
     let Ok(python) = std::fs::canonicalize("/usr/bin/python3") else {
@@ -563,15 +675,17 @@ async fn the_app_exiting_takes_its_tunnel_down() {
         return;
     };
     let d = start_with("appgone", World::default(), Policy::new(my_uid(), vec![python.clone()])).await;
-    assert_eq!(d.ask(&connect()).await["status"], "ok");
 
-    let script = format!(
-        "import socket,time\ns=socket.socket(socket.AF_UNIX)\ns.connect({:?})\ns.sendall(b'{{\"type\":\"status\"}}\\n')\ns.makefile().readline()\ntime.sleep(0.5)\n",
-        d.path.display().to_string()
-    );
-    let ran = tokio::task::spawn_blocking(move || std::process::Command::new(&python).arg("-c").arg(script).status());
-    assert!(tokio::time::timeout(Duration::from_secs(10), ran).await.expect("python finished").unwrap().unwrap().success());
+    let mut owner = as_the_app(&python, &d.path, &connect(), 3.0);
+    assert!(eventually(Duration::from_secs(10), || d.world().connects == 1).await, "the app's connect never ran");
+    assert!(eventually(Duration::from_secs(5), || d.shared.ledger.live_protocol().is_some()).await);
 
+    let mut other = as_the_app(&python, &d.path, &Request::Status, 0.0);
+    let _ = tokio::task::spawn_blocking(move || other.wait()).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(d.world().hard_stops, 0, "a status poller's exit took the owner's tunnel down");
+
+    let _ = tokio::task::spawn_blocking(move || owner.wait()).await;
     assert!(
         eventually(Duration::from_secs(5), || {
             let w = d.world();
@@ -581,4 +695,68 @@ async fn the_app_exiting_takes_its_tunnel_down() {
         "the tunnel outlived the app"
     );
     assert_eq!(d.ask(&Request::Status).await["connected"], false);
+}
+
+/// A status asked while a connect runs says not connected, even once the
+/// link is visible: nothing past the link is in yet.
+#[tokio::test]
+async fn a_status_during_a_connect_is_not_connected() {
+    let d = start(
+        "midconnect",
+        World { connect_takes: Duration::from_secs(3), visible: Some("neoxify-wg".into()), ..Default::default() },
+    )
+    .await;
+    let path = d.path.clone();
+    let connecting = tokio::spawn(async move {
+        let raw = serde_json::to_string(&connect()).unwrap();
+        server::call(&path, &raw).await.unwrap()
+    });
+    assert!(eventually(Duration::from_secs(5), || d.world().connects == 1).await);
+    let state = d.ask(&Request::Status).await;
+    assert_eq!(state["connected"], false, "{state}");
+    assert_ne!(state["health"]["state"], "down", "{state}");
+    let answered: Value = serde_json::from_str(&connecting.await.unwrap()).unwrap();
+    assert_eq!(answered["status"], "ok");
+}
+
+/// Something else flushes the ruleset under a live tunnel: the table is
+/// put back. And when it cannot be, the status stops claiming it.
+#[tokio::test]
+async fn a_table_flushed_by_someone_else_is_put_back_or_reported_gone() {
+    let d = start("flushed", World::default()).await;
+    assert_eq!(d.ask(&connect()).await["status"], "ok");
+    assert_eq!(d.world().applies, 1);
+    d.world().table = None;
+    assert!(eventually(Duration::from_secs(5), || d.world().applies == 2).await, "the table was not put back");
+    let state = d.ask(&Request::Status).await;
+    assert_eq!(state["ipv6_blocked"], true, "{state}");
+
+    d.world().guard_fails = true;
+    d.world().table = None;
+    assert!(eventually(Duration::from_secs(5), || d.world().applies == 3).await);
+    let state = d.ask(&Request::Status).await;
+    assert_eq!(state["connected"], true, "{state}");
+    assert_eq!(state["ipv6_blocked"], false, "{state}");
+    assert_eq!(state["ipv4_confined"], false, "{state}");
+    assert!(state["confinement_problem"].as_str().unwrap().contains("removed by something else"), "{state}");
+}
+
+/// The machine's DNS rewritten under a live tunnel is reported, not
+/// covered by what was true at connect.
+#[tokio::test]
+async fn dns_rewritten_mid_session_is_reported_unprotected() {
+    let d = start("dnsgone", World::default()).await;
+    assert_eq!(d.ask(&connect()).await["status"], "ok");
+    assert_eq!(d.ask(&Request::Status).await["tunnel_dns_unprotected"], false);
+    d.world().dns_in_force = false;
+    let mut reported = false;
+    for _ in 0..50 {
+        if d.ask(&Request::Status).await["tunnel_dns_unprotected"] == true {
+            reported = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(reported, "DNS stayed reported as protected");
+    assert_eq!(d.shared.ledger.guard().map(|g| g.dns_protected), Some(false), "the busy-path record was not updated");
 }

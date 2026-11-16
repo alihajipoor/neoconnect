@@ -70,6 +70,10 @@ let noteTaken = false;
 export async function takeEngineNote(): Promise<string | null> {
   if (noteTaken) return null;
   noteTaken = true;
+  // The note measures WebView2 against Chromium numbers. WebKitGTK's 2.x
+  // would read as an ancient engine, and every WebKitGTK that Tauri v2 runs
+  // on draws the whole stylesheet, so a Linux report carries no note.
+  if (desktopPlatform() === "linux") return null;
   try {
     return engineNote(await webviewVersion());
   } catch {
@@ -81,18 +85,27 @@ export async function takeEngineNote(): Promise<string | null> {
 export function resetEngineNoteForTests(): void {
   noteTaken = false;
   versionPromise = null;
+  webkitPromise = null;
 }
 
-/** The WebKit version in a user agent ("AppleWebKit/605.1.15"). */
-export function webkitFromUserAgent(userAgent: string = typeof navigator === "undefined" ? "" : navigator.userAgent): string | null {
-  const m = /\bAppleWebKit\/(\d[\d.]*)/.exec(userAgent);
-  return m ? cleanVersion(m[1]) : null;
+let webkitPromise: Promise<string | null> | null = null;
+
+/** The WebKitGTK version on Linux ("2.44.0"), as the Linux app's Rust read
+ * it at start (its own `webview_version`); null anywhere else, or when it
+ * could not be read. Not taken from the user agent: WebKitGTK's says
+ * "AppleWebKit/605.1.15" whatever the release, so it names nothing. */
+export function webkitGtkVersion(): Promise<string | null> {
+  if (desktopPlatform() !== "linux") return Promise.resolve(null);
+  webkitPromise ??= invoke<unknown>("webview_version").then(
+    (v) => (typeof v === "string" ? cleanVersion(v) : null),
+    () => null,
+  );
+  return webkitPromise;
 }
 
-/** The Linux app's line: it draws in WebKitGTK, whose user agent carries a
- * WebKit version, not a Chromium one. */
-export function webkitLine(webkit: string | null): string {
-  return `webview: WebKitGTK ${webkit ?? "(version could not be read)"}`;
+/** The Linux diagnostics line: "webview: WebKitGTK 2.44.0". */
+export function webkitLine(version: string | null): string {
+  return `webview: WebKitGTK ${version ?? "(version could not be read)"}`;
 }
 
 /** The diagnostics line: "webview2: 100.0.1185.36 (Chromium 100.0.4896.75)". */

@@ -53,7 +53,7 @@ import {
   type UplinkWatch,
 } from "../lib/uplink-watch";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
-import { installSeed, orderCandidates, ispHintsOf, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
+import { installSeed, offeredUsers, orderCandidates, ispHintsOf, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import {
   movedLately,
   recordAttempt,
@@ -155,7 +155,7 @@ import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } f
 import { setConfinedAround } from "../lib/connected-mirrors";
 import { egressWorthAnotherLook } from "../lib/confinement-recheck";
 import { repairUnderWay } from "../lib/repair";
-import { supportsCustomMode, supportsGaming, supportsRepair } from "../lib/desktop-platform";
+import { desktopPlatform, supportsCustomMode, supportsGaming, supportsRepair } from "../lib/desktop-platform";
 import { appPrefs } from "../lib/app-prefs";
 import { autoConnectDecision, autoConnectLatch } from "../lib/auto-connect";
 import {
@@ -890,6 +890,22 @@ export function Dashboard({
    * across one lands nothing: its reading is about the way out that was. */
   const uplinkEpochRef = useRef(0);
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
+  // Linux only: the helper is the system's service and comes back by
+  // itself (a restart, an upgrade), and with no tunnel on screen no poll
+  // runs to notice. So "the background service isn't running" is checked
+  // every few seconds and taken down once it answers, rather than standing
+  // over a service that is back. Windows is untouched.
+  useEffect(() => {
+    if (desktopPlatform() !== "linux" || connectionError?.messageKey !== "err.serviceUnavailableLinux") return;
+    const timer = setInterval(() => {
+      void serviceStatus().then(
+        () =>
+          setConnectionError((current) => (current?.messageKey === "err.serviceUnavailableLinux" ? null : current)),
+        () => undefined,
+      );
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [connectionError]);
   /** What the plan's device limit has to say, when it is why this device
    * is not connected: refused before dialling, taken over by another
    * device, or a check that could not be made. See `deviceSlot`.
@@ -1858,7 +1874,12 @@ export function Dashboard({
       setProtocolUser((current) => users.find((u) => u.id === current?.id) ?? current);
       return;
     }
-    setProtocolUser(users.find((u) => u.routeId === routeId) ?? users[0] ?? null);
+    // Only from what this platform can dial (`offeredUsers`): an IKEv2
+    // credential held on Linux is a route never dialled, and naming it
+    // made every landing read as a move away from it. On Windows this is
+    // the same list.
+    const offered = offeredUsers(users.slice());
+    setProtocolUser(offered.find((u) => u.routeId === routeId) ?? offered[0] ?? null);
     setTunnelRouteUnknown(true);
   }
 
@@ -4747,6 +4768,9 @@ export function Dashboard({
           failedRungs.push({ routeId: candidate.routeId, fate: rungFate(classified.kind) });
           lastError = { ...classified, detail: describeAttempts(attempts, candidates.length) };
           if (classified.kind === "noNetwork") break;
+          // On Linux a helper that cannot be reached cannot dial any rung:
+          // walking all of them took 26 s to say so. Said at once instead.
+          if (classified.kind === "serviceUnavailable" && desktopPlatform() === "linux") break;
         }
 
         noNetworkSince = null;

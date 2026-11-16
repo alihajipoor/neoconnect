@@ -354,6 +354,8 @@ pub(crate) struct XrayTunnel {
     link_owed: Option<Owed>,
     config_owed: Option<Owed>,
     baseline: Option<(u64, u64)>,
+    /// The main server, whose route `health` watches.
+    server: Ipv4Addr,
 }
 
 /// How long a teardown step may take; `ip` answers in milliseconds.
@@ -428,6 +430,7 @@ pub(crate) fn connect(
         link_owed: None,
         config_owed: None,
         baseline: None,
+        server: main_ip,
     };
     // From here, an early return drops `tunnel`, which undoes what it did.
     tunnel.bring_up(&exe, &main_profile, &exit_profiles, &uplinks, dirs, &budget)?;
@@ -481,10 +484,10 @@ impl XrayTunnel {
         process::confirm_started(child, "Xray", &log, budget)?;
 
         if let Err(problem) = wait_for_link(budget, child) {
-            return Err(match problem {
-                Problem::Failed(why) => Problem::Failed(format!("{why}: {}", process::log_tail(&log))),
-                other => other,
-            });
+            if matches!(problem, Problem::Failed(_)) {
+                process::log_last_words("Xray", &log);
+            }
+            return Err(problem);
         }
 
         // The address, which the routes into the interface need as a
@@ -529,8 +532,15 @@ fn wait_for_link(budget: &Budget, child: &mut Child) -> Result<(), Problem> {
             died = Some(status);
             break Ok(());
         }
+        // Local, like the engine starting: never worded as a timeout,
+        // which the app would file against the server.
         if let Err(stop) = budget.check() {
-            break Err(stop.problem(&format!("the tunnel interface ({ADAPTER_NAME})")));
+            break Err(match stop {
+                cmd::Stop::Cancelled => Problem::Cancelled,
+                cmd::Stop::TimedOut => {
+                    Problem::Failed(format!("the tunnel interface ({ADAPTER_NAME}) did not appear in time"))
+                }
+            });
         }
         if capped.expired() {
             break Err(Problem::Failed(format!(
@@ -563,7 +573,22 @@ impl Tunnel for XrayTunnel {
         if std::path::Path::new("/sys/class/net").is_dir() && !link::exists(ADAPTER_NAME) {
             return TunnelHealth::Down;
         }
+        // The host route to the server is added once, on the uplink of the
+        // moment. A network change or a suspend takes that device down and
+        // the kernel flushes the route with it; Xray's own connection then
+        // follows the half-defaults into its own tunnel and loops, with the
+        // engine alive and the link up. Down, so the tunnel is taken away
+        // and the machine is back on its own network, rather than offline
+        // under a tunnel the app calls connected.
+        if routes::leads_into(self.server, ADAPTER_NAME) {
+            eprintln!("neoxify-helper: Xray's server is now routed into its own tunnel (its way out went away)");
+            return TunnelHealth::Down;
+        }
         TunnelHealth::Unknown
+    }
+
+    fn dns_protected(&self) -> bool {
+        self.dns.as_ref().is_some_and(dns::still_in_force)
     }
 
     fn counters(&self) -> Option<(u64, u64)> {
@@ -631,6 +656,9 @@ impl Tunnel for XrayTunnel {
         }
         if let Some(owed) = self.config_owed.take() {
             if let Owed::File { path } = &owed {
+                // The engine's log sits beside its config and, like it,
+                // names the server; neither outlives the tunnel.
+                let _ = std::fs::remove_file(path.with_file_name(LOG_FILE));
                 match std::fs::remove_file(path) {
                     Ok(()) => self.ledger.settle(&owed),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.ledger.settle(&owed),

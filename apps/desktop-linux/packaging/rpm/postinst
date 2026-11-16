@@ -2,6 +2,11 @@
 # installed: 1 on a fresh install, 2 or more during an upgrade). Start the
 # helper, or restart it on an upgrade so the new binary is the one answering.
 chmod 0755 /usr/lib/neoxify/neoxify-helper /usr/lib/neoxify/xray
+# The helper serves the app run by whoever is at the screen, and by members
+# of this group (see the deb's postinst). Created empty, kept on removal.
+if ! getent group neoxify >/dev/null 2>&1; then
+  groupadd --system neoxify || echo "neoxify: could not create the neoxify group" >&2
+fi
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload || :
   if [ "$1" -ge 2 ]; then

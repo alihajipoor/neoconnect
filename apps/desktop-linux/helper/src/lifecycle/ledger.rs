@@ -34,6 +34,10 @@ pub struct Ended {
 pub struct GuardFacts {
     pub ipv6_blocked: bool,
     pub ipv4_confined: bool,
+    /// The machine's DNS points into the tunnel. Kept here, not assumed:
+    /// a status that cannot ask the owning thread must not say protected
+    /// on no evidence.
+    pub dns_protected: bool,
     pub problem: Option<String>,
 }
 
@@ -56,15 +60,23 @@ pub struct Ledger {
     /// Long jobs queued for, or running on, the owning thread that a
     /// status need not wait behind (`Ledger::busy`).
     busy: AtomicUsize,
+    /// Of those, the connects (`Ledger::connecting`).
+    connecting: AtomicUsize,
 }
 
 /// A long job on the owning thread, from when it is queued until it has
 /// run. Dropped with the job.
-pub struct Busy(Arc<Ledger>);
+pub struct Busy {
+    ledger: Arc<Ledger>,
+    connect: bool,
+}
 
 impl Drop for Busy {
     fn drop(&mut self) {
-        self.0.busy.fetch_sub(1, Ordering::SeqCst);
+        self.ledger.busy.fetch_sub(1, Ordering::SeqCst);
+        if self.connect {
+            self.ledger.connecting.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -81,7 +93,7 @@ impl Default for Ledger {
 
 impl Ledger {
     pub fn new() -> Self {
-        Self { state: Mutex::new(LedgerState::default()), busy: AtomicUsize::new(0) }
+        Self { state: Mutex::new(LedgerState::default()), busy: AtomicUsize::new(0), connecting: AtomicUsize::new(0) }
     }
 
     /// Survives a panic elsewhere: a poisoned ledger must still answer,
@@ -176,11 +188,24 @@ impl Ledger {
     /// waiting behind it for an answer that would be this one anyway.
     pub fn busy(ledger: &Arc<Ledger>) -> Busy {
         ledger.busy.fetch_add(1, Ordering::SeqCst);
-        Busy(Arc::clone(ledger))
+        Busy { ledger: Arc::clone(ledger), connect: false }
+    }
+
+    /// [`busy`](Self::busy), for a connect. While one is queued or running
+    /// no tunnel is finished: a link that is already up has no routes, DNS
+    /// or leak protection yet, and the connect may still be rolled back.
+    pub fn connecting(ledger: &Arc<Ledger>) -> Busy {
+        ledger.busy.fetch_add(1, Ordering::SeqCst);
+        ledger.connecting.fetch_add(1, Ordering::SeqCst);
+        Busy { ledger: Arc::clone(ledger), connect: true }
     }
 
     pub fn is_busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst) > 0
+    }
+
+    pub fn is_connecting(&self) -> bool {
+        self.connecting.load(Ordering::SeqCst) > 0
     }
 }
 
@@ -227,7 +252,7 @@ mod tests {
         let g = ledger.begin("WIREGUARD");
         ledger.note_guard(g + 1_000_000, GuardFacts::default());
         assert_eq!(ledger.guard(), None, "another generation's facts were taken");
-        let facts = GuardFacts { ipv6_blocked: true, ipv4_confined: false, problem: Some("x".into()) };
+        let facts = GuardFacts { ipv6_blocked: true, ipv4_confined: false, dns_protected: true, problem: Some("x".into()) };
         ledger.note_guard(g, facts.clone());
         assert_eq!(ledger.guard(), Some(facts));
         assert_eq!(ledger.live_protocol().as_deref(), Some("WIREGUARD"));
@@ -246,5 +271,11 @@ mod tests {
         assert!(ledger.is_busy());
         drop(b);
         assert!(!ledger.is_busy());
+        let c = Ledger::connecting(&ledger);
+        assert!(ledger.is_busy() && ledger.is_connecting());
+        let d = Ledger::busy(&ledger);
+        drop(c);
+        assert!(ledger.is_busy() && !ledger.is_connecting(), "a teardown's pass is not a connect");
+        drop(d);
     }
 }

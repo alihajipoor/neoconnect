@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use crate::cmd::{self, Budget};
+use crate::cmd::{self, Budget, Stop};
 use crate::Problem;
 
 /// How long an engine must stay alive after starting before it counts
@@ -38,13 +38,29 @@ pub(crate) fn spawn(exe: &Path, args: &[&str], log: &Path) -> std::io::Result<Ch
 pub(crate) fn confirm_started(child: &mut Child, engine: &str, log: &Path, budget: &Budget) -> Result<(), Problem> {
     let waited = budget.sleep(STARTUP_GRACE);
     match child.try_wait() {
-        Ok(None) => waited.map_err(|stop| stop.problem(&format!("{engine} to start"))),
-        Ok(Some(status)) => Err(Problem::Failed(format!("{engine} exited immediately ({status}): {}", log_tail(log)))),
+        // Starting is local: running out of time here says nothing about
+        // a server, so it is not worded as a timeout (`RunError::problem`).
+        Ok(None) => waited.map_err(|stop| match stop {
+            Stop::Cancelled => Problem::Cancelled,
+            Stop::TimedOut => Problem::Failed(format!("{engine} did not start in time")),
+        }),
+        Ok(Some(status)) => {
+            log_last_words(engine, log);
+            Err(Problem::Failed(format!("{engine} exited immediately ({status})")))
+        }
         Err(e) => Err(Problem::Failed(format!("could not check whether {engine} started: {e}"))),
     }
 }
 
-/// The last lines of an engine's log, on one line, for an error.
+/// Puts an engine's last words in the helper's journal. They are kept out
+/// of the error the app is given: the app sorts errors by their words, and
+/// a log line saying a certificate "expired" read there as the customer's
+/// subscription having run out.
+pub(crate) fn log_last_words(engine: &str, log: &Path) {
+    eprintln!("neoxify-helper: {engine}'s last words: {}", log_tail(log));
+}
+
+/// The last lines of an engine's log, on one line.
 pub(crate) fn log_tail(log: &Path) -> String {
     std::fs::read_to_string(log)
         .ok()
@@ -144,7 +160,11 @@ mod tests {
         let mut child = spawn(Path::new("/bin/sh"), &["-c", "echo config refused >&2; exit 3"], &log).unwrap();
         let budget = Budget::quick(Duration::from_secs(5));
         let err = confirm_started(&mut child, "Xray", &log, &budget).unwrap_err();
-        assert!(err.to_string().contains("config refused"), "{err}");
+        assert!(err.to_string().contains("Xray exited immediately"), "{err}");
+        // The engine's own words go to the journal, not into what the app
+        // sorts by wording ("refused" there means a server not answering).
+        assert!(!err.to_string().contains("refused"), "{err}");
+        assert!(log_tail(&log).contains("config refused"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

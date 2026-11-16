@@ -24,6 +24,8 @@ pub trait Backend: Send + Sync + 'static {
     fn visible_tunnel(&self) -> Option<String>;
     fn guard_apply(&self, plan: &Plan) -> Result<Applied, neoxify_netguard::Error>;
     fn guard_remove(&self) -> Result<Removal, neoxify_netguard::Error>;
+    /// What of the table is in the kernel now, or `None` with no table.
+    fn guard_in_force(&self) -> Result<Option<Applied>, neoxify_netguard::Error>;
     fn lan_prefixes(&self, exclude_ifaces: &[&str]) -> Vec<Cidr4>;
 }
 
@@ -60,6 +62,10 @@ impl Backend for System {
 
     fn guard_remove(&self) -> Result<Removal, neoxify_netguard::Error> {
         neoxify_netguard::remove()
+    }
+
+    fn guard_in_force(&self) -> Result<Option<Applied>, neoxify_netguard::Error> {
+        neoxify_netguard::in_force()
     }
 
     fn lan_prefixes(&self, exclude_ifaces: &[&str]) -> Vec<Cidr4> {

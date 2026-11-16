@@ -128,6 +128,23 @@ pub(crate) fn uplink_for(server: Ipv4Addr, budget: &Budget) -> Result<Uplink, Pr
 /// The server's IPv4 address. A literal is taken as it is; a name is
 /// looked up off this thread, so a cancel or the deadline ends the wait
 /// rather than the resolver's own timeout.
+/// Whether the kernel now sends `server`'s packets into `dev`, one of our
+/// own tunnels. That is an engine whose way out is gone -- its host route
+/// flushed with a device that went down (a network change, a suspend) --
+/// and whose connection to its server now loops into itself: alive, and
+/// carrying nothing. Only a clear answer says yes; a lookup that could not
+/// run proves nothing.
+pub(crate) fn leads_into(server: Ipv4Addr, dev: &str) -> bool {
+    let budget = Budget::quick(cmd::TEARDOWN_CAP);
+    cmd::ip(&["-j", "-4", "route", "get", &server.to_string()], &budget)
+        .is_ok_and(|answer| answer_leads_into(&answer, dev))
+}
+
+/// [`leads_into`], from `ip -j route get`'s answer.
+pub(crate) fn answer_leads_into(answer: &str, dev: &str) -> bool {
+    parse_rows(answer).first().is_some_and(|row| row.dev.as_deref() == Some(dev))
+}
+
 pub(crate) fn resolve_ipv4(host: &str, port: u16, budget: &Budget) -> Result<Ipv4Addr, Problem> {
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
         return Ok(ip);
@@ -432,6 +449,14 @@ mod tests {
     const ROUTE_GET_INTO_TUNNEL: &str = r#"[{"dst":"203.0.113.5","dev":"neoconnect0","prefsrc":"198.18.0.1","flags":[],"uid":0,"cache":[]}]"#;
     const DEFAULTS: &str = r#"[{"dst":"default","gateway":"192.0.2.1","dev":"wlp2s0","protocol":"dhcp","prefsrc":"192.0.2.40","metric":600,"flags":[]},{"dst":"default","gateway":"10.0.2.2","dev":"enp0s3","protocol":"dhcp","prefsrc":"10.0.2.15","metric":100,"flags":[]}]"#;
     const MAIN: &str = r#"[{"dst":"default","gateway":"10.0.2.2","dev":"enp0s3","protocol":"dhcp","prefsrc":"10.0.2.15","metric":100,"flags":[]},{"dst":"10.0.2.0/24","dev":"enp0s3","protocol":"kernel","scope":"link","prefsrc":"10.0.2.15","metric":100,"flags":[]},{"dst":"203.0.113.5","gateway":"10.0.2.2","dev":"enp0s3","protocol":"98","flags":[]},{"dst":"198.51.100.7","gateway":"10.0.2.2","dev":"enp0s3","protocol":"boot","flags":[]},{"dst":"198.51.100.8","gateway":"10.0.2.2","dev":"enp0s3","protocol":"dhcp","flags":[]},{"dst":"0.0.0.0/1","dev":"neoconnect0","protocol":"98","scope":"link","flags":[]},{"type":"blackhole","dst":"198.51.100.9","protocol":"boot","flags":[]}]"#;
+
+    #[test]
+    fn a_server_routed_into_our_own_tunnel_is_seen() {
+        assert!(answer_leads_into(ROUTE_GET_INTO_TUNNEL, "neoconnect0"));
+        assert!(!answer_leads_into(ROUTE_GET, "neoconnect0"), "the host route through the uplink is the healthy case");
+        assert!(!answer_leads_into("", "neoconnect0"), "no answer proves nothing");
+        assert!(!answer_leads_into("not json", "neoconnect0"));
+    }
 
     fn one(json: &str) -> Row {
         parse_rows(json).into_iter().next().unwrap()

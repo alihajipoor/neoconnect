@@ -9,7 +9,7 @@
 set -euo pipefail
 umask 022
 cd "$(dirname "$0")/.."
-chmod 0644 packaging/neoxify-helper.service packaging/neoxify.desktop
+chmod 0644 packaging/neoxify-helper.service packaging/neoxify.desktop src-tauri/icons/*.png
 chmod 0755 packaging/deb/postinst packaging/deb/prerm packaging/deb/postrm
 
 pnpm fetch-binaries

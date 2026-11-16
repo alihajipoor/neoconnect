@@ -303,7 +303,8 @@ async fn call_within(request: &Request, reply_timeout: Duration) -> Result<Respo
         Ok(Ok(stream)) => stream,
         Ok(Err(e)) => {
             return Err(format!(
-                "Could not reach the Neoxify background service ({e}). Try restarting the app, or reinstalling if this keeps happening."
+                "Could not reach the Neoxify background service ({}). Try restarting the app, or reinstalling if this keeps happening.",
+                socket_failure(&e)
             ))
         }
         Err(_) => {
@@ -345,6 +346,19 @@ async fn call_within(request: &Request, reply_timeout: Duration) -> Result<Respo
 
     serde_json::from_str(line.trim())
         .map_err(|e| format!("could not decode the background service's reply: {e}"))
+}
+
+/// Why the helper's socket could not be opened, in our own words. The
+/// system's text ("Connection refused (os error 111)") is not passed on:
+/// the interface sorts errors by their wording, and "refused" there means
+/// a server that did not answer, when no server was ever dialled.
+fn socket_failure(e: &std::io::Error) -> &'static str {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => "it is not running",
+        std::io::ErrorKind::ConnectionRefused => "it stopped answering",
+        std::io::ErrorKind::PermissionDenied => "it would not let this app in",
+        _ => "its socket could not be opened",
+    }
 }
 
 async fn call_expecting_ok(request: &Request) -> Result<(), String> {
@@ -1753,6 +1767,19 @@ mod linux_tests {
         assert!(err.starts_with("Could not reach the Neoxify background service ("), "{err}");
         let shared = include_str!("../../../desktop-windows/src/lib/service-call.ts");
         assert!(shared.contains("\"Could not reach the Neoxify background service\""));
+    }
+
+    /// None of the socket failures may carry words the interface reads as
+    /// a server that did not answer (connection-errors.ts).
+    #[test]
+    fn a_helper_that_cannot_be_reached_is_never_a_server_that_did_not_answer() {
+        use std::io::{Error, ErrorKind};
+        for kind in [ErrorKind::NotFound, ErrorKind::ConnectionRefused, ErrorKind::PermissionDenied, ErrorKind::TimedOut] {
+            let text = socket_failure(&Error::from(kind)).to_lowercase();
+            for word in ["refused", "timed out", "no route", "handshake", "timeout", "unreachable"] {
+                assert!(!text.contains(word), "{kind:?}: {text}");
+            }
+        }
     }
 
     #[test]

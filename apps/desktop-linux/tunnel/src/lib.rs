@@ -46,7 +46,8 @@ pub struct Dirs {
     /// owed back to the machine. `/var/lib/neoxify`.
     pub state: PathBuf,
     /// Root-only scratch for configs and engine logs, gone at reboot.
-    /// `/run/neoxify`.
+    /// `/run/neoxify/private` (the socket's directory above it has to be
+    /// readable by the app, so the private part is one level down).
     pub run: PathBuf,
 }
 
@@ -136,6 +137,15 @@ pub trait Tunnel: Send {
     /// Bytes received and sent on the tunnel interface since it came up,
     /// or `None` when they cannot be read. Never a made-up zero.
     fn counters(&self) -> Option<(u64, u64)>;
+
+    /// Whether the machine's lookups still go where the connect pointed
+    /// them. Read afresh rather than remembered, because something else
+    /// can undo it mid-session -- a DHCP client rewriting
+    /// `/etc/resolv.conf` at a lease renewal -- and the app tells the
+    /// customer their DNS is protected on this word.
+    fn dns_protected(&self) -> bool {
+        self.up().dns_protected
+    }
 
     /// The fast half of teardown: stop the engine and take the routes
     /// out, so traffic is back on the machine's own network within
