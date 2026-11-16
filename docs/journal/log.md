@@ -10021,3 +10021,71 @@ main and left alone: a command enqueued live during replay can overtake
 older queued ones for the same credential (the post-replay re-assert
 repairs it); duplicate acks may flip ACKED/FAILED; a write to an ended
 stream is still recorded SENT (it is replayed later).
+
+## 2026-11-16 — Android 0.2.41: the phone engine fix reaches Android, proven in an emulator
+
+**Status:** done — released as `android-v0.2.41`; the Play upload waits for the owner
+**Touches:** no code. Tag `android-v0.2.41` on `a833bc4c`; `CLAUDE.md` (current versions)
+
+**Why.** A customer who had the iPhone self-drops of 2026-11-12 reported
+drops again. His phone has been on 0.2.41 since 11-15. The servers' own
+`usage_records` (one row per ~30 s of traffic per credential, kept three
+days) show unbroken traffic runs of 3.5 h twice and 5 h 18 min on
+Stealth, and many of 45-58 min; no drop row from him, and across the
+nine iPhones on 0.2.41 (48 connects) one drop row in all, a customer
+choosing another VPN (memory peak 16.4 MiB). So not the old fault. What
+that cannot see: the app reports a drop from its health poll or on
+resume while it still remembers vouching for a tunnel; an end while the
+app process is gone leaves no row.
+
+Looking for the same fault elsewhere found it: **Android never got the
+fix.** `android-v0.2.40` pins xray-core v1.260327.0, the one with the TUN
+panic; main had been 0.2.41 since 11-13 with only the three
+engine/reconnect/diagnostics commits different under `apps/mobile`.
+About 30 Android customers, none on 0.2.41.
+
+**Proof, in an emulator** (AVD android-36 google_apis x86_64 on the
+Windows PC; `debug-android.yml` x86_64 builds of main `9529c98a` and of
+the tag `android-v0.2.40`; a `.test` account given Pro for the run and
+the subscription deleted after; a static linux/amd64 Go probe pushed to
+`/data/local/tmp` that opens TCP and aborts it with RST straight after
+the handshake, sends one DNS query over UDP, or downloads over HTTP):
+
+- **0.2.41, Shadowsocks then Stealth, a Germany exit.** The app's own
+  Connected each time. 2,000 reset connections at 100 a second on each:
+  the tunnel stays, no panic line in logcat. UDP lookups answered through
+  the tunnel before and after (200-980 ms; 12 ms is what the direct path
+  gives), which is the first run of Shadowsocks UDP over XUDP on Android.
+  100 MB in 16.5 s and 16.9 s (about 50 Mbit/s). The servers' usage
+  records show the bytes on both credentials, and `client_attempts` has
+  `android 0.2.41 CONNECT SUCCESS` for both.
+- **0.2.41 held 11.5 minutes on Stealth**: 2,400 more resets, 24 of 24
+  lookups through the tunnel, 120 MB, still Connected, no panic line.
+- **0.2.40, the same reset test**: `panic: Net: Unknown address type.`
+  and SIGABRT in the `:xray` process five seconds in, and again twelve
+  seconds later after the reconnect. The lookup after it answered in
+  12 ms -- outside the tunnel.
+
+**Release.** `release-android.yml` on the tag, 16 minutes; APK 95.7 MB
+and AAB 38.5 MB in the releases repo, sha256 of the AAB checked. The API
+and the website's download button follow by themselves within their
+cache windows (five and ten minutes).
+
+**Traps.**
+- The tag is on `a833bc4c`, not on main's head: the head commit's message
+  carries `[skip ci]`, which would skip the tag's workflow too. The two
+  trees differ only under `website/`.
+- The emulator with `-gpu swiftshader_indirect` crashed twice (qemu
+  APPCRASH c0000005 in generated code) a minute or two after the app's
+  WebView started drawing, and what had been installed since boot was
+  gone. `-gpu host -no-window` held for half an hour.
+- Git Bash rewrites `/sdcard/...` arguments to adb; set
+  `MSYS_NO_PATHCONV=1`, and then give adb `C:/` paths for local files.
+- `uiautomator dump` reads the WebView's text and bounds, so the app can
+  be driven without screenshots.
+
+**Not proven.** A physical Android phone. A restricted network on
+Android. armv7. The Play bundle on a device. WireGuard, OpenVPN and IKEv2
+on 0.2.41 in the emulator (their code did not change; not run). About a
+dozen iPhones are still on builds before 0.2.41 until the App Store
+updates them.
