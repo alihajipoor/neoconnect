@@ -269,6 +269,10 @@ function nx_flag_svg($code)
               . '<rect y=".667" width="3" height=".667" fill="#dd0000"/>'
               . '<rect y="1.334" width="3" height=".666" fill="#ffce00"/>',
 
+        // Red, gold twice as tall, red. The arms are a smudge at 30px.
+        'ES' => '<rect width="3" height="2" fill="#aa151b"/>'
+              . '<rect y=".5" width="3" height="1" fill="#f1bf00"/>',
+
         'SG' => '<rect width="3" height="1" fill="#ed2939"/>'
               . '<rect y="1" width="3" height="1" fill="#fff"/>'
               . '<circle cx=".62" cy=".5" r=".3" fill="#fff"/>'

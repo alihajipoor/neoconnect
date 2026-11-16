@@ -15,7 +15,8 @@
  *  customers -- since changed: France retired, the UK added, Finland and
  *  Singapore moved to replacement servers, the Netherlands and India
  *  added (2026-11-06), India and Singapore retired (2026-11-11), and
- *  France back and Sweden added on new servers (2026-11-11).
+ *  France back and Sweden added on new servers (2026-11-11), and Spain
+ *  added (2026-11-15).
  *
  *  Rules for editing:
  *    - Add a country here ONLY when a node is actually enrolled and
@@ -24,7 +25,7 @@
  *    - Remove one the day it is decommissioned. A stale location is a
  *      refund argument.
  *    - City is optional and only filled in where the repo actually
- *      records it. Three of the seven are known; guessing the others
+ *      records it. Only two are known; guessing the others
  *      would be inventing detail for the sake of a tidier table.
  * ============================================================================
  *
@@ -53,6 +54,12 @@ return array(
             'code' => 'de',
             'country' => array('en' => 'Germany', 'fa' => 'آلمان'),
             'city' => array('en' => 'Frankfurt', 'fa' => 'فرانکفورت'),
+        ),
+
+        array(
+            'code' => 'es',
+            'country' => array('en' => 'Spain', 'fa' => 'اسپانیا'),
+            'city' => null,
         ),
 
         array(

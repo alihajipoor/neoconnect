@@ -296,7 +296,13 @@ configured installer URL where the current release is without following
 the redirect, remembers that answer for at most ten minutes, fetches the
 file once into `dl/<platform>/<tag>/<file>` and redirects the visitor
 there. The bookkeeping (remembered answer, lock, last failure) lives in
-`data/installers/`, which is never served. The copies are deliberately not
+`data/installers/` as `<platform>.php`, `<platform>.lock.php` and
+`<platform>.failed.php`. That folder **is** reachable on the live host
+(nginx ignores `data/.htaccess`), so every state file is `.php`: the
+remembered answer starts with `<?php exit; ?>` and is read by stripping
+it, the lock and the failure marker are empty, and a direct request gets
+an empty page. The first version's `.json`/`.lock`/`.failed` files are
+deleted by the code on its first run. The copies are deliberately not
 under `data/`: `data/.htaccess` and the nginx example deny that folder
 outright, so a copy there would 403 or 404 after the redirect. The file is served by nginx as a static file, so a slow
 download never holds a PHP worker on the shared host. Still no version

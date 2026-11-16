@@ -13,8 +13,16 @@
  * trusts that answer for installer_resolve_ttl seconds, fetches that file
  * ONCE into installer_store_dir (dl/, public), and redirects the visitor to
  * the copy on this site. The bookkeeping (the remembered answer, the lock,
- * the last failure) lives in installer_state_dir (data/installers, never
- * served). The visitor's browser never needs another host. The site still
+ * the last failure) lives in installer_state_dir (data/installers). The
+ * visitor's browser never needs another host.
+ *
+ * THE STATE FOLDER IS REACHABLE ON THE LIVE HOST. data/.htaccess denies it
+ * on Apache, but the live box is nginx, which ignores .htaccess, so any file
+ * there answers a direct request. So every state file is a .php file: the
+ * remembered answer starts with the site's exit guard and is read by
+ * stripping it, and the lock and failure marker are empty. A direct request
+ * executes the file and gets an empty page, whatever the web server's
+ * config. The older .json/.lock/.failed names are deleted on the first run. The site still
  * holds no version number: the answer comes from the same endpoint the
  * in-app updater uses, so a new release appears by itself.
  *
@@ -192,10 +200,40 @@ function nxg_public_url($platform, $tag, $file)
     return nxg_cfg('base_path', '/') . $rel . '/' . $platform . '/' . rawurlencode($tag) . '/' . rawurlencode($file);
 }
 
-/** Write a small file atomically. */
+/** First line of every state file with content: a direct request runs it and gets nothing. */
+define('NXG_GUARD', "<?php exit; ?>
+");
+
+/** A state file's data, or null when it is missing, unguarded or not JSON. */
+function nxg_state_read($path)
+{
+    $raw = is_file($path) ? (string) @file_get_contents($path) : '';
+    if (strncmp($raw, NXG_GUARD, strlen(NXG_GUARD)) !== 0) {
+        return null;
+    }
+    $v = json_decode(substr($raw, strlen(NXG_GUARD)), true);
+    return is_array($v) ? $v : null;
+}
+
+/** Delete the state files of the first version, which a direct request could read. */
+function nxg_state_legacy($state, $platform)
+{
+    foreach (array('.json', '.lock', '.failed') as $ext) {
+        if (is_file($state . '/' . $platform . $ext)) {
+            @unlink($state . '/' . $platform . $ext);
+        }
+    }
+    foreach ((array) @glob($state . '/' . $platform . '.json.tmp-*') as $f) {
+        if (is_string($f) && is_file($f)) {
+            @unlink($f);
+        }
+    }
+}
+
+/** Write a small file atomically. The temporary name ends in .php as well. */
 function nxg_write($path, $data)
 {
-    $tmp = $path . '.tmp-' . bin2hex(random_bytes(4));
+    $tmp = $path . '.tmp-' . bin2hex(random_bytes(4)) . '.php';
     if (@file_put_contents($tmp, $data) === false) {
         return false;
     }
@@ -346,10 +384,11 @@ function nxg_ensure($platform, $upstream, $budget, $verbose)
     }
     $ttl = (int) nxg_cfg('installer_resolve_ttl', 600);
     $ttl = $ttl > 600 ? 600 : ($ttl < 0 ? 0 : $ttl);
-    $cacheFile = $state . '/' . $platform . '.json';
+    $cacheFile = $state . '/' . $platform . '.php';
     $platformDir = $store . '/' . $platform;
+    nxg_state_legacy($state, $platform);
 
-    $cached = is_file($cacheFile) ? json_decode((string) @file_get_contents($cacheFile), true) : null;
+    $cached = nxg_state_read($cacheFile);
     $known = is_array($cached) && isset($cached['at'], $cached['tag'], $cached['file'], $cached['url'], $cached['src'])
         && $cached['src'] === $upstream
         && nxg_safe_name($cached['tag']) === $cached['tag'] && nxg_safe_name($cached['file']) === $cached['file'];
@@ -376,7 +415,7 @@ function nxg_ensure($platform, $upstream, $budget, $verbose)
         }
         $rel['src'] = $upstream;
         $rel['at'] = time();
-        nxg_write($cacheFile, json_encode($rel));
+        nxg_write($cacheFile, NXG_GUARD . json_encode($rel));
         $say('release ' . $rel['tag'] . '/' . $rel['file']);
     }
 
@@ -390,7 +429,7 @@ function nxg_ensure($platform, $upstream, $budget, $verbose)
     if (!is_dir($platformDir) && !@mkdir($platformDir, 0755, true)) {
         return '';
     }
-    $lock = @fopen($state . '/' . $platform . '.lock', 'c');
+    $lock = @fopen($state . '/' . $platform . '.lock.php', 'c');
     if (!$lock) {
         return '';
     }
@@ -415,7 +454,7 @@ function nxg_ensure($platform, $upstream, $budget, $verbose)
     }
 
     clearstatcache(true, $dest);
-    $failFile = $state . '/' . $platform . '.failed';
+    $failFile = $state . '/' . $platform . '.failed.php';
     if (!is_file($dest) && is_file($failFile) && (time() - (int) @filemtime($failFile)) < 300) {
         // A fetch failed in the last five minutes: do not make every visitor
         // wait for the same failure. They get the fallback straight away.

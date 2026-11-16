@@ -25,7 +25,7 @@ defined('NX') || exit;
 function nx_world_anchors()
 {
     return array(
-        'fi' => array(55.53, 11.42), 'fr' => array(50.57, 19.63), 'de' => array(52.09, 18.69),
+        'fi' => array(55.53, 11.42), 'fr' => array(50.57, 19.63), 'de' => array(52.09, 18.69), 'es' => array(49.05, 25.99),
         'tr' => array(57.38, 25.54), 'sg' => array(78.83, 55.93),
         'gb' => array(49.97, 17.66), 'nl' => array(51.16, 17.03), 'se' => array(54.03, 12.01), 'us' => array(31.13, 25.76),
         'ae' => array(64.93, 37.64), 'in' => array(70.67, 35.02),
