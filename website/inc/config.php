@@ -154,15 +154,13 @@ return array(
     // API answers /updates/installer/linux-deb and /updates/installer/
     // linux-rpm with a redirect to the newest linux-v* release's file.
     //
-    // EMPTY UNTIL linux-v0.1.0 IS PUBLISHED, on purpose. Before there is a
-    // release those endpoints have nothing to redirect to, and a button
-    // pointing at them would be a dead one; empty instead shows the Linux
-    // tile as not available yet. On release day, set each to the same
-    // address as android_installer_url with "android" replaced by
-    // "linux-deb" and "linux-rpm". Either one set makes the tile live,
-    // with a button for each format that is set.
-    'linux_deb_installer_url' => '',
-    'linux_rpm_installer_url' => '',
+    // Set since linux-v0.1.0 was published (2026-11-16). They were empty
+    // before it on purpose: without a release those endpoints have
+    // nothing to redirect to, and a button pointing at them would be a
+    // dead one. The same switch still works: blank one and its button
+    // goes; blank both and the Linux tile reads as not available yet.
+    'linux_deb_installer_url' => 'https://connect.neoxify.site/api/updates/installer/linux-deb',
+    'linux_rpm_installer_url' => 'https://connect.neoxify.site/api/updates/installer/linux-rpm',
 
     // ---------------------------------------------------------------
     // Downloads served from this site (get/index.php)
