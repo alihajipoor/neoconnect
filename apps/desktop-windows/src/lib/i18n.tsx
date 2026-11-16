@@ -1682,7 +1682,7 @@ const fa: Record<TranslationKey, string> = {
   "update.androidHint": "در مرورگر دانلود می‌شود. اندروید پیش از نصب از شما اجازه می‌گیرد. تنظیمات و ورود شما حفظ می‌شود.",
   "update.androidDownload": "دانلود",
   "update.androidOpenFailed": "دانلود شروع نشد. دوباره امتحان کنید.",
-  "update.available": "نسخهٔ {version} نئوکسیفای آمده است.",
+  "update.available": "نسخهٔ {version} نئوکسیفای منتشر شده است.",
   "update.getIt": "دانلود",
   "update.openFailed": "صفحهٔ دانلود باز نشد. دوباره امتحان کنید.",
   "update.restarting": "در حال راه‌اندازی دوباره...",
