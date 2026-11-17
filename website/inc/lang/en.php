@@ -901,4 +901,76 @@ return array(
     'route.caption' => 'An illustration of what the app does on its own. When one way to connect is blocked, it moves to another, and it says Connected only after checking that traffic gets through.',
     'home.quote' => 'The app says Connected only after your traffic gets through.',
     'home.quote.by' => 'The rule the app follows',
+
+    // =================================================================
+    // /vpn-app/ -- the Google ads landing page (2026-11-16)
+    //
+    // English only, noindex. Written for the campaign's audience: people
+    // who want a private connection on everyday networks and a simple app.
+    // Every claim below is one this file already makes elsewhere. By rule,
+    // nothing here about network restrictions, getting past them, hiding
+    // where you are, protocols, or logging promises -- the page is checked
+    // for those words by scripts/check-site.php.
+    // =================================================================
+
+    'meta.vpn-app.title' => 'Neoxify: a simple VPN app with a free trial',
+    'meta.vpn-app.description' => 'A simple VPN app for Windows, Android, iPhone and iPad. Your traffic is encrypted between your device and our servers. Free trial, no card needed.',
+    'meta.vpn-app.description.with_linux' => 'A simple VPN app for Windows, Android, iPhone, iPad and Linux. Your traffic is encrypted between your device and our servers. Free trial, no card needed.',
+
+    'vpnapp.hero.kicker' => 'A simple VPN app',
+    'vpnapp.hero.title_1' => 'Your connection,',
+    'vpnapp.hero.title_2' => 'encrypted.',
+    'vpnapp.hero.subtitle' => 'Neoxify encrypts your traffic on your device and keeps it encrypted until it reaches our servers. On public Wi-Fi, at home or at work, whoever runs the network can see that a connection is open, but not what is inside it.',
+    'vpnapp.hero.chip_trial' => ':days-day free trial, no card needed',
+    'vpnapp.hero.chip_apps' => 'Windows, Android, iPhone and iPad',
+    'vpnapp.hero.chip_apps.with_linux' => 'Windows, Android, iPhone, iPad and Linux',
+
+    'vpnapp.app.title' => 'Sign in, then connect',
+    'vpnapp.app.body' => 'Install the app, create an account and confirm your email with the short code we send. Then hit Connect. There is nothing to set up, and no file or link to paste.',
+    'vpnapp.app.point_first' => 'The first time, your device asks for permission to set up the VPN',
+    'vpnapp.app.alt' => 'Screenshot of the Neoxify Android app while connected, with a Disconnect button below a dotted world map.',
+    'vpnapp.app.alt_dark' => 'Screenshot of the Neoxify Android app in dark theme while connected, with a Disconnect button below a dotted world map.',
+    'vpnapp.app.float.1.title' => 'Encrypted',
+    'vpnapp.app.float.1.sub' => 'from your device to our servers',
+    'vpnapp.app.float.2.title' => 'Checks first',
+    'vpnapp.app.float.2.sub' => 'before it says Connected',
+    'vpnapp.app.float.3.title' => 'Nothing to set up',
+    'vpnapp.app.float.3.sub' => 'sign in and connect',
+    'vpnapp.app.float.4.title' => 'Help in the app',
+    'vpnapp.app.float.4.sub' => 'a person replies',
+
+    'vpnapp.security.body' => 'Everything you send is encrypted on your device before it reaches the network, and stays encrypted until it reaches our servers. That is where a VPN\'s protection ends: from our servers, your traffic goes on to the internet.',
+    'vpnapp.security.diagram.alt' => 'Your device connects to our servers over an encrypted connection. From our servers, your traffic goes on to the internet.',
+    'vpnapp.security.logs.title' => 'Honest about what we record',
+    'vpnapp.security.logs.body' => 'Our servers keep connection logs, and we say so. We use them to run the service and fix problems. We don\'t use them to profile you, and we don\'t sell them.',
+
+    'vpnapp.features.eyebrow' => 'In the app',
+    'vpnapp.features.title' => 'The things you will use',
+    'vpnapp.features.body' => 'Your account, your plan, your usage and your support conversations are all in the app.',
+
+    'vpnapp.quote' => 'The app says Connected only after it checks that your traffic reaches the internet.',
+
+    'vpnapp.platforms.eyebrow' => 'Your devices',
+    'vpnapp.platforms.title' => 'On your computer and your phone',
+
+    'vpnapp.faq.eyebrow' => 'Questions',
+    'vpnapp.faq.title' => 'Before you try it',
+    'vpnapp.faq.devices.q' => 'Which devices can I use it on?',
+    'vpnapp.faq.devices.a' => 'Windows, Android, iPhone and iPad. There\'s no Mac app yet. Your plan sets how many devices can be connected at once.',
+    'vpnapp.faq.devices.a.with_linux' => 'Windows, Android, iPhone, iPad and Linux. There\'s no Mac app yet. Your plan sets how many devices can be connected at once.',
+    'vpnapp.faq.trial.q' => 'Is there a free trial?',
+    'vpnapp.faq.trial.a' => 'Yes. New accounts get a :days-day free trial with :data, and you don\'t need a payment method. Create an account in the app, confirm your email and connect.',
+    'vpnapp.faq.protects.q' => 'What does it protect?',
+    'vpnapp.faq.protects.a' => 'Your traffic between your device and our servers. Whoever runs your network, such as your internet provider or a café\'s Wi-Fi, can see that an encrypted connection is open, but not what\'s inside it, such as the sites you visit. A VPN doesn\'t protect your traffic after it leaves our servers.',
+    'vpnapp.faq.records.q' => 'What do you record?',
+    'vpnapp.faq.records.a' => 'Billing records how much data you use, as a number of bytes. Our servers also keep the usual operational logs, and these can include connection records. The privacy page explains what is recorded, why, and how long we keep it.',
+    'vpnapp.faq.pay.q' => 'How do I pay?',
+    'vpnapp.faq.pay.a' => 'By international card or crypto, in the Windows app, in the Android app downloaded from this website, or in your account area on this website. On iPhone and iPad you pay through the App Store. You get an invoice for every card or crypto payment.',
+    'vpnapp.faq.contact.q' => 'How do I reach you?',
+    'vpnapp.faq.contact.a' => 'If you have an account, use support in the app, where we can see your account. Otherwise use the contact form on this website. A person reads every message, and we usually reply within a day.',
+
+    'vpnapp.close.title' => 'Try it before you pay',
+    'vpnapp.close.body' => 'Install the app, create an account and confirm your email. Every new account starts with a free trial.',
+    'vpnapp.close.point3.term' => 'Connection logs are kept.',
+    'vpnapp.close.point3.rest' => 'The privacy page says what and why.',
 );

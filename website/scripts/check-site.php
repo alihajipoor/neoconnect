@@ -51,7 +51,45 @@ $pages = array(
     'reseller' => 'reseller/',
     'privacy' => 'privacy/',
     'delete-account' => 'delete-account/',
+    'vpn-app' => 'vpn-app/',
 );
+
+/* Pages that exist in one language only, and pages that must not be
+ * indexed. vpn-app is the Google ads landing page: English, noindex, kept
+ * out of the navigation and the sitemap (its /fa/ address redirects to the
+ * Persian home page; check-ads.php checks that over HTTP). */
+$oneLocale = array('vpn-app' => 'en');
+$noindexPages = array('vpn-app');
+
+/* What the ads landing page must never say, anywhere in its HTML: text,
+ * meta, alt text, labels, comments. The campaign's ad was disapproved for
+ * "enabling dishonest behavior"; Google judges the landing page too. */
+$adsPages = array('vpn-app');
+$adsForbidden = array(
+    '/\b(un)?block(s|ed|ing|er)?\b/i', '/restrict/i', '/censor/i', '/\bfilter/i',
+    '/bypass|circumvent|get(ting|s)? (around|past|through)|work ?around/i',
+    '/hard to (block|detect|spot)|\b(un)?detect/i', '/stealth|disguis|camoufl|obfusc/i',
+    '/looks? like|ordinary (web|traffic|browsing)|like any other traffic|stand out/i',
+    '/\bhid(e|es|den|ing)\b|appear (to be|in|from)|where you (appear|are)|your location/i',
+    '/(pick|choose|change|select) (a |the |your )?(country|location)/i',
+    '/anonym|untraceable|no[- ]logs?\b|fastest|\bping\b|latency|lag\b|stream/i',
+    '/unrestricted|uncensored|without limits|freedom|abroad|foreign|geo[- ]?/i',
+    '/\bIran|\bIR\b|fa_IR|turkey|t(ü|u)rkiye.*restrict/i',
+    '/protocol|\bports?\b|\brelay|backup route|\btunnel/i',
+    '/wireguard|vless|vmess|\breality\b|shadowsocks|trojan|xray|ikev2|openvpn|hysteria|tuic|\btcp\b|\budp\b/i',
+    '/neoxify\.site|\bnode\b/i',
+);
+
+/** The words a reader (or a reviewer) can see in a page: text, the
+ *  attributes that carry words, and HTML comments. */
+function nxc_words($html)
+{
+    $comments = preg_match_all('/<!--(.*?)-->/s', $html, $cm) ? implode(' ', $cm[1]) : '';
+    $attrs = preg_match_all('/\b(?:content|alt|aria-label|title|placeholder)="([^"]*)"/i', $html, $am) ? implode(' ', $am[1]) : '';
+    $body = preg_replace('#<(style|script)\b[^>]*>.*?</\1>#is', ' ', $html);
+    $text = html_entity_decode(strip_tags($body), ENT_QUOTES, 'UTF-8');
+    return preg_replace('/\s+/', ' ', $text . ' ' . html_entity_decode($attrs, ENT_QUOTES, 'UTF-8') . ' ' . $comments);
+}
 
 /* Where each form must post. Written out literally rather than derived from
  * the site's own nx_form_url(), because a check that asks the code under
@@ -75,7 +113,11 @@ $checked = 0;
 
 foreach ($locales as $locale) {
     foreach ($pages as $page => $segment) {
+        if (isset($oneLocale[$page]) && $oneLocale[$page] !== $locale) {
+            continue;
+        }
         $label = sprintf('[%s/%s]', $locale, $page);
+        $isNoindex = in_array($page, $noindexPages, true);
 
         if ($htmlDir !== null) {
             $file = $htmlDir . '/' . $locale . '-' . $page . '.html';
@@ -146,17 +188,47 @@ foreach ($locales as $locale) {
             $failures[] = $label . ' has ' . $h1 . ' <h1> elements, expected exactly 1';
         }
 
+        // 7a. A noindex page: says so, and claims nothing an indexed page
+        //     would (canonical, alternates, structured data). Then the
+        //     ads page's word rules, and on to the remaining checks.
+        if ($isNoindex) {
+            if (strpos($html, '<meta name="robots" content="noindex') === false) {
+                $failures[] = $label . ' not marked noindex';
+            }
+            foreach (array('<link rel="canonical"', '<link rel="alternate" hreflang=', 'application/ld+json') as $needle) {
+                if (strpos($html, $needle) !== false) {
+                    $failures[] = $label . ' noindex page carries ' . $needle;
+                }
+            }
+            if (in_array($page, $adsPages, true)) {
+                $words = nxc_words($html);
+                foreach ($adsForbidden as $re) {
+                    if (preg_match_all($re, $words, $hit, PREG_OFFSET_CAPTURE)) {
+                        foreach ($hit[0] as $h) {
+                            $failures[] = $label . ' forbidden on the ads page: "' . $h[0] . '" in "...'
+                                . trim(substr($words, max(0, $h[1] - 40), 90)) . '..."';
+                        }
+                    }
+                }
+                if (strpos($html, 'og:image') !== false) {
+                    $failures[] = $label . ' carries the site\'s social card (its text is the home page\'s message)';
+                }
+            }
+        }
+
         // 7. Canonical and both hreflang alternates plus x-default, and the
         //    social card for this locale.
-        if (strpos($html, '<link rel="canonical"') === false) {
+        if ($isNoindex) {
+            // covered above
+        } elseif (strpos($html, '<link rel="canonical"') === false) {
             $failures[] = $label . ' no canonical link';
         }
-        foreach (array('en', 'fa', 'x-default') as $alt) {
+        foreach ($isNoindex ? array() : array('en', 'fa', 'x-default') as $alt) {
             if (strpos($html, 'hreflang="' . $alt . '"') === false) {
                 $failures[] = $label . ' missing hreflang="' . $alt . '"';
             }
         }
-        if (!preg_match('#<meta property="og:image" content="https://[^"]+/og-' . $locale . '-v\d+\.(?:png|jpg)">#', $html)) {
+        if (!$isNoindex && !preg_match('#<meta property="og:image" content="https://[^"]+/og-' . $locale . '-v\d+\.(?:png|jpg)">#', $html)) {
             $failures[] = $label . ' og:image is not this locale\'s social card';
         }
 
@@ -166,8 +238,14 @@ foreach ($locales as $locale) {
             if (json_last_error() !== JSON_ERROR_NONE) {
                 $failures[] = $label . ' invalid JSON-LD: ' . json_last_error_msg();
             }
-        } else {
+        } elseif (!$isNoindex) {
             $failures[] = $label . ' no JSON-LD';
+        }
+
+        // 8b. The ads landing page is reached only from the ads: no other
+        //     page links to it (the navigation, the footer).
+        if (!in_array($page, $adsPages, true) && strpos($html, 'vpn-app') !== false) {
+            $failures[] = $label . ' links to the ads landing page';
         }
 
         // 9. Images: dimensions and an alt decision.
@@ -237,6 +315,20 @@ foreach ($locales as $locale) {
             }
             if (strpos($html, 'name="company_website"') === false) {
                 $failures[] = $label . ' form has no honeypot';
+            }
+        }
+    }
+}
+
+// The sitemap must not list a noindex page.
+if ($htmlDir === null) {
+    $xml = shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($root . '/sitemap.php') . ' 2>&1');
+    if ($xml === null || strpos($xml, '<urlset') === false) {
+        $failures[] = '[sitemap] did not render';
+    } else {
+        foreach ($noindexPages as $page) {
+            if (strpos($xml, '/' . $pages[$page]) !== false) {
+                $failures[] = '[sitemap] lists the noindex page ' . $page;
             }
         }
     }

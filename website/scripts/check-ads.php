@@ -102,7 +102,10 @@ function nxa_csp($headers)
 
 $failures = array();
 $checked = 0;
-$pages = array('', 'features/', 'pricing/', 'faq/', 'download/', 'contact/', 'reseller/', 'privacy/', 'delete-account/');
+$pages = array('', 'features/', 'pricing/', 'faq/', 'download/', 'contact/', 'reseller/', 'privacy/', 'delete-account/', 'vpn-app/');
+// vpn-app, the ads landing page, is English only: /fa/vpn-app/ redirects
+// (checked in 5 below).
+$englishOnly = array('vpn-app/');
 
 // 1. Plain visits and near misses.
 $plain = array(
@@ -115,6 +118,9 @@ $plain = array(
 );
 foreach (array('', 'fa/') as $loc) {
     foreach ($pages as $pg) {
+        if ($loc !== '' && in_array($pg, $englishOnly, true)) {
+            continue;
+        }
         foreach ($plain as $case) {
             list($q, $cookie) = $case;
             if (($q !== '' || $cookie !== '') && $pg !== 'download/' && $pg !== '') {
@@ -169,6 +175,8 @@ $adCases = array(
     array('download/?wbraid=test', ''),
     array('fa/download/?gclid=test', ''),
     array('?gclid=Cj0KCQiA-test_123', ''),
+    array('vpn-app/?gclid=test', ''),
+    array('vpn-app/', 'nx_ad=1'),
     array('pricing/', 'nx_ad=1'),
     array('privacy/', 'nx_ad=1'),
 );
@@ -260,6 +268,41 @@ if (preg_match('/<script>(.*?)<\/script>/s', $body, $m)) {
         $failures[] = '[ad loader] does not parse: ' . implode(' ', $o);
     }
     @unlink($tmp);
+}
+
+// 5. The ads landing page: an ad click lands on it (200, noindex, its
+//    calls to action lead to /download/ where the download event fires),
+//    a visitor whose browser prefers Persian is NOT sent away from it, and
+//    its Persian address redirects to the Persian home page with the
+//    query (and a language choice) carried.
+list($st, $h, $body) = nxa_get($base . '/vpn-app/?gclid=test', '', "Accept-Language: fa\r\n");
+$checked++;
+if (strpos($st, ' 200') === false) {
+    $failures[] = '[vpn-app] a Persian-language ad click did not land on the page: ' . $st;
+}
+if (strpos($body, '<meta name="robots" content="noindex') === false) {
+    $failures[] = '[vpn-app] not marked noindex';
+}
+if (strpos($body, 'href="/download/"') === false || strpos($body, 'href="/pricing/"') === false) {
+    $failures[] = '[vpn-app] the download and plans buttons are missing';
+}
+list($st, $h) = nxa_get($base . '/fa/vpn-app/?gclid=test');
+$checked++;
+$loc = isset($h['location'][0]) ? $h['location'][0] : '';
+if (strpos($st, ' 302') === false || $loc !== '/fa/?gclid=test') {
+    $failures[] = '[fa/vpn-app] expected a 302 to /fa/?gclid=test, got ' . $st . ' ' . $loc;
+}
+list($st, $h) = nxa_get($base . '/fa/vpn-app/?setlang=fa');
+$checked++;
+$loc = isset($h['location'][0]) ? $h['location'][0] : '';
+$sc = isset($h['set-cookie']) ? implode(' | ', $h['set-cookie']) : '';
+if (strpos($st, ' 302') === false || $loc !== '/fa/' || strpos($sc, 'nx_lang=fa') === false) {
+    $failures[] = '[fa/vpn-app] the language switch did not land on /fa/ with the choice recorded: ' . $st . ' ' . $loc . ' ' . $sc;
+}
+// Ad crawlers may fetch it: robots.txt must not disallow it.
+$robots = (string) @file_get_contents($root . '/robots.txt');
+if (preg_match('#^\s*Disallow:\s*/(vpn-app|\s*$)#mi', $robots)) {
+    $failures[] = '[robots] robots.txt disallows the ads landing page';
 }
 
 proc_terminate($server);

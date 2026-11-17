@@ -78,6 +78,10 @@ $NX_ROUTES = array(
     // wrong canonical URL and a language switcher pointing at the
     // homepage.
     'delete-account' => 'delete-account/',
+    // The Google ads landing page (2026-11-16). English only, noindex, not
+    // in the navigation or the sitemap. /fa/vpn-app/ sends the visitor to
+    // the Persian home page (fa/vpn-app/index.php).
+    'vpn-app' => 'vpn-app/',
 );
 
 // Fall back rather than fatal, so a page that forgets to declare itself still

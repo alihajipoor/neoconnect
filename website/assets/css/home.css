@@ -191,3 +191,10 @@ html[lang="fa"] .quote__text{font-weight:800;letter-spacing:0;line-height:1.45}
 .floater{transform:translateZ(70px)}
 @media (prefers-reduced-motion:reduce){.hero__mark,.showcase__scene{transform:none;transition:none}}
 .ways__head .h2,.secure__head .h2{font-size:clamp(34px,4.3vw,60px)}
+/* The ads landing page (vpn-app) shows the two standard plans: kept to
+   two comfortable columns instead of stretching across the page. */
+.plans-pair{max-width:760px;margin-inline:auto}
+/* Phone width: the long platform term ("Windows, Android, iPhone and Linux.")
+   no longer fits on one line, so let the pair wrap instead of pushing the
+   card wider than the screen (seen on the home page too, 2026-11-16). */
+@media (max-width:520px){.close-list div{flex-wrap:wrap;gap:2px 8px}.close-list b{white-space:normal}}

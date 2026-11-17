@@ -33,6 +33,13 @@ defined('NX') || exit;
 
 $nx_plan_data = nx_content('plans');
 $nx_compact = !empty($NX_PLAN_COMPACT);
+/* Two options for the ads landing page (vpn-app): leave out the relay-only
+   plan, and replace the default perk list. Unset everywhere else, so the
+   home and pricing pages render exactly as before. */
+$nx_standard_only = !empty($NX_PLAN_STANDARD_ONLY);
+$nx_default_perks = isset($NX_PLAN_PERKS) && is_array($NX_PLAN_PERKS)
+    ? $NX_PLAN_PERKS
+    : array('all_modes', 'all_locations', 'relay_routes', 'support');
 
 if (empty($nx_plan_data['plans'])) {
     return;
@@ -40,6 +47,9 @@ if (empty($nx_plan_data['plans'])) {
 ?>
 <div class="plans">
   <?php foreach ($nx_plan_data['plans'] as $nx_plan):
+    if ($nx_standard_only && !empty($nx_plan['relay_only'])) {
+        continue;
+    }
     $nx_days = (int) $nx_plan['duration_days'];
     $nx_monthly = $nx_days === 30;
     $nx_best = !empty($nx_plan['highlight']);
@@ -112,7 +122,7 @@ if (empty($nx_plan_data['plans'])) {
            the sell -- that path is what the price buys. */
         $nx_perks = isset($nx_plan['perks']) && is_array($nx_plan['perks'])
             ? $nx_plan['perks']
-            : array('all_modes', 'all_locations', 'relay_routes', 'support');
+            : $nx_default_perks;
 
         foreach ($nx_perks as $nx_perk): ?>
           <li>

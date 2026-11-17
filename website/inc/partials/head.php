@@ -44,7 +44,9 @@ $nx_noindex = !empty($NX_NOINDEX);
 // Inline stylesheet and the loader, and the CSP that names both.
 // ---------------------------------------------------------------------
 $nx_css_modules = array('base', 'blocks');
-if ($nx_page === 'home' && empty($NX_TITLE)) {
+if (($nx_page === 'home' || $nx_page === 'vpn-app') && empty($NX_TITLE)) {
+    // vpn-app (the Google ads landing page) is built from the home page's
+    // sections, so it needs the same module.
     $nx_css_modules[] = 'home';
 }
 if (in_array($nx_page, array('contact', 'reseller', 'delete-account'), true)) {
@@ -108,7 +110,11 @@ $nx_preload_fonts = nx_locale() === 'fa'
 // a real browser -- which shapes Persian correctly, so the Persian pages
 // finally get a Persian card. Absolute URL and no ?v= stamp: scrapers cache
 // by exact URL more or less forever; if the art changes, rename the file.
-$nx_og_image = isset($NX_OG_IMAGE)
+// $NX_OG_IMAGE = false leaves the card out altogether: the ads landing page
+// (vpn-app) does, because the site's card carries the home page's message,
+// not that page's.
+$nx_og_on = !(isset($NX_OG_IMAGE) && $NX_OG_IMAGE === false);
+$nx_og_image = isset($NX_OG_IMAGE) && $NX_OG_IMAGE !== false
     ? $NX_OG_IMAGE
     : $nx_base . 'assets/img/og-' . (nx_locale() === 'fa' ? 'fa' : 'en') . '-v7.jpg';
 $nx_og_image_abs = rtrim(nx_cfg('site_url', ''), '/') . $nx_og_image;
@@ -161,17 +167,25 @@ foreach (array('en', 'fa') as $nx_alt): ?>
 <meta property="og:description" content="<?php echo nx_esc($nx_description); ?>">
 <meta property="og:url" content="<?php echo nx_esc(nx_abs_url($nx_page)); ?>">
 <meta property="og:locale" content="<?php echo nx_locale() === 'fa' ? 'fa_IR' : 'en_US'; ?>">
+<?php if (empty($NX_ONE_LOCALE)): /* a page that exists in one language has no alternate */ ?>
 <meta property="og:locale:alternate" content="<?php echo nx_locale() === 'fa' ? 'en_US' : 'fa_IR'; ?>">
+<?php endif; ?>
+<?php if ($nx_og_on): ?>
 <meta property="og:image" content="<?php echo nx_esc($nx_og_image_abs); ?>">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:type" content="image/jpeg">
 <meta property="og:image:alt" content="<?php echo nx_e('meta.og.image_alt'); ?>">
 <meta name="twitter:card" content="summary_large_image">
+<?php else: ?>
+<meta name="twitter:card" content="summary">
+<?php endif; ?>
 <meta name="twitter:title" content="<?php echo nx_esc($nx_title); ?>">
 <meta name="twitter:description" content="<?php echo nx_esc($nx_description); ?>">
+<?php if ($nx_og_on): ?>
 <meta name="twitter:image" content="<?php echo nx_esc($nx_og_image_abs); ?>">
 <meta name="twitter:image:alt" content="<?php echo nx_e('meta.og.image_alt'); ?>">
+<?php endif; ?>
 <link rel="icon" href="<?php echo nx_esc(nx_asset('img/favicon.svg')); ?>" type="image/svg+xml">
 <link rel="icon" href="<?php echo nx_esc(nx_asset('img/favicon-32.png')); ?>" sizes="32x32" type="image/png">
 <link rel="icon" href="<?php echo nx_esc(nx_asset('img/favicon-192.png')); ?>" sizes="192x192" type="image/png">
