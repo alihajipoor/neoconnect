@@ -10437,3 +10437,42 @@ now records who sent each packet and allows that sender by name.
   tunnel; it says "applies from your next connection" while changes
   apply live; Repair's step details stay English in Persian; a hidden
   32 px overflow in the app frame.
+
+**Released the same day.** Backend first (main `779c9238`, 10:33Z, no
+migration; all eight exits back within three minutes), then the tag
+`linux-v0.2.0` on the tested commit `2b3664df`. The tag sits on the code
+commit and not on the notes commit above it, whose message skips CI.
+
+**Acceptance of the published files, on the guest:**
+
+- The API announces 0.2.0 to 0.1.0 with both packages and their
+  signatures, and answers 204 to 0.2.0. Both packages verify against
+  the updater's key. The website's own copies have the same sha256.
+- Clean installs in debian:12, ubuntu:22.04, fedora:41 and fedora:40
+  containers: dependencies from the distribution alone, helper answers
+  0.2.0.
+- **The real update, with nothing called by hand.** A 0.1.9 build found
+  0.2.0 by itself 23 s after the app started, had it downloaded 2.5 s
+  later and showed the notice. "Restart now": the package was 0.2.0
+  after 2.2 s, the helper restarted once, and the app was back by itself
+  at 4.6 s, signed in. All nine installed files are the published
+  package's, byte for byte.
+- Connected, "Restart now" installs nothing and says "Disconnect before
+  updating." After a disconnect by hand it installs. The app does not
+  reconnect afterwards.
+- The published 0.1.0 shows its own notice with the download button and
+  logs no error for the new fields. 0.2.0 installed over it by hand
+  keeps the sign-in and the settings.
+
+**For the next Linux version, from the acceptance and its sceptic:**
+
+- "Disconnect before updating." stays on screen after disconnecting,
+  and is also what any other failure shows: `updateBlocked` in `App.tsx`
+  is never cleared.
+- One failed try is final for that version, including one that failed
+  only because apt's lock was held, or because the app was reconnecting.
+- Connect is allowed while the package manager runs; the install then
+  restarts the helper under that tunnel.
+- The helper keeps a 20 MB copy of the package after a good install.
+- Never run: the rpm update from inside the app on a real machine, an
+  install interrupted halfway, an install while apt's lock is held.

@@ -236,7 +236,7 @@ Tag prefixes are load-bearing and must not be shared: `desktop-v*`,
 prefix, and a desktop release once hijacked the agent installer's
 download URL precisely because they collided.
 
-Current: desktop `0.9.64`, linux `0.1.0`, mobile `0.2.41`, agent
+Current: desktop `0.9.64`, linux `0.2.0`, mobile `0.2.41`, agent
 `v0.2.12` — each matching its latest released tag.
 
 **The production backend tracks `main`** as of 2026-11-11 (`8b2ca7b4`,
@@ -253,8 +253,9 @@ releasing clients that depend on it.
 
 ## Linux desktop
 
-`apps/desktop-linux`, first released as `linux-v0.1.0` on 2026-11-16.
-Four pieces, and only the interface is shared with Windows:
+`apps/desktop-linux`, first released as `linux-v0.1.0` on 2026-11-16;
+`linux-v0.2.0` followed on 2026-11-17. Four pieces, and only the
+interface is shared with Windows:
 
 | Piece | Where | What it is |
 |---|---|---|
@@ -378,6 +379,14 @@ Traps from 0.2.0:
   accept before a release.
 - **The helper has a private `/tmp`.** A file put there by anyone else
   is "no longer there" to it.
+- **The updater's public key is in the Windows app's
+  `tauri.conf.json`.** The helper's build reads it from there; the Linux
+  `tauri.conf.json` has none.
+- **An update is only proven after it is published.** The download
+  accepts nothing but https with public certificates, so the notice,
+  the download and "Restart now" can run only once production announces
+  the version. Build a lower version in the guest's copy of the tree,
+  install it and let the app find the release by itself.
 
 ## iOS
 
