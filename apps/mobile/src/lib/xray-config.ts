@@ -27,7 +27,74 @@ export const TUN_DNS = "1.1.1.1";
  * the symptom -- some sites fine, some hanging -- is hard to attribute. */
 export const TUN_MTU = 1400;
 
+/** Where the engine's own resolver sends the tunnel's A lookups: DNS over
+ * HTTPS, through the proxy.
+ *
+ * Every lookup the phone makes goes to TUN_DNS on port 53 and is routed to
+ * the DNS outbound (DNS_OUT_TAG), which answers A and AAAA from this
+ * resolver and its cache. Before, each lookup from a new source port was a
+ * UDP flow of its own, and on Stealth a UDP flow is a new connection to the
+ * server -- TCP, REALITY and VLESS before the question was even asked:
+ * 868 ms median on a 182 ms line, measured 2026-11-17 on the emulator.
+ *
+ * HTTPS rather than the desktop's `tcp://` (engines/xray.rs,
+ * TUNNEL_RESOLVERS) because xray-core's TCP name server dials a new
+ * connection for every query (app/dns/nameserver_tcp.go, `sendQuery`),
+ * which through the proxy is the same per-lookup server handshake again.
+ * The DoH name server keeps one HTTP/2 connection and sends every query
+ * down it (nameserver_doh.go, an http2.Transport with keep-alive pings).
+ * By address, so finding the resolver needs no lookup of its own; both
+ * certificates name their address. Both are asked at once
+ * (`enableParallelQuery`) and the first answer wins: a connection left
+ * stalled by a switch from Wi-Fi to mobile data then costs nothing, where
+ * asking in turn would cost every lookup the 4 s timeout until the stalled
+ * one is noticed. Never a direct lookup: that would leave outside the
+ * tunnel, and is answered falsely on the networks this exists for. */
+export const ENGINE_RESOLVERS = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"];
+
+/** The outbound every lookup the tunnel carries -- port 53 -- is routed to.
+ * The same tag as the desktop's. */
+const DNS_OUT_TAG = "dns-out";
+
+/** The local refusal: anything routed here is closed on the phone without
+ * dialling anything. */
+const BLOCK_TAG = "block";
+
+/** The flow the server issues for Vision (generate-credentials.ts). */
+const VISION = "xtls-rprx-vision";
+
+/** What a Vision connection (Stealth, and VLESS+TLS over TCP) does with
+ * QUIC -- UDP to port 443.
+ *
+ * xray-core's VLESS outbound refuses UDP/443 under plain Vision
+ * (proxy/vless/outbound/outbound.go: "XTLS rejected UDP/443 traffic"), and
+ * it does so after it has already dialled the server: a wasted REALITY
+ * handshake per attempt, and silence for the app, which then waits out its
+ * own QUIC timeout before falling back to TCP. Measured on 0.2.41.
+ *
+ * "carry": the client asks for `xtls-rprx-vision-udp443`, a client-only
+ * spelling. The outbound trims the suffix before anything is sent
+ * (`requestAddons.Flow[:16]`), so the server sees the plain Vision flow it
+ * issued, and the UDP travels as XUDP inside the VLESS connection exactly
+ * as every other UDP flow on Vision already does. A 26.3.27 server's VLESS
+ * inbound takes that mux command under Vision (proxy/vless/inbound, read
+ * at v1.260327.0); the nodes' routing has no UDP/443 rule.
+ *
+ * "drop-locally": a routing rule refuses UDP/443 on the phone before
+ * anything is dialled, so the app falls back to TCP at once. The
+ * alternative for a tester to flip to if carrying QUIC misbehaves. */
+export type VisionQuic = "carry" | "drop-locally";
+export const VISION_QUIC: VisionQuic = "carry";
+
 type Json = Record<string, unknown>;
+
+/** The flow to send. Only the exact Vision flow is changed, and only when
+ * carrying QUIC: anything else -- empty over WebSocket, or a future flow --
+ * passes through as issued. */
+function clientFlow(issued: string | undefined, quic: VisionQuic): string {
+  const flow = issued ?? "";
+  return flow === VISION && quic === "carry" ? `${VISION}-udp443` : flow;
+}
 
 /** The one short ID a client sends, out of the list the server holds.
  *
@@ -61,7 +128,7 @@ function shortIdFrom(params: Record<string, unknown>): string | null {
   return null;
 }
 
-function realityOutbound(user: ProtocolUser, params: Record<string, unknown>): Json {
+function realityOutbound(user: ProtocolUser, params: Record<string, unknown>, quic: VisionQuic): Json {
   return {
     tag: "proxy",
     protocol: "vless",
@@ -71,7 +138,7 @@ function realityOutbound(user: ProtocolUser, params: Record<string, unknown>): J
           address: user.connection.host,
           port: user.connection.port,
           users: [
-            { id: user.credentials.uuid, encryption: "none", flow: user.credentials.flow ?? "" },
+            { id: user.credentials.uuid, encryption: "none", flow: clientFlow(user.credentials.flow, quic) },
           ],
         },
       ],
@@ -125,7 +192,7 @@ function tlsStream(params: Record<string, unknown>, transport: string): Json {
   return settings;
 }
 
-function vlessTlsOutbound(user: ProtocolUser, params: Record<string, unknown>, transport: string): Json {
+function vlessTlsOutbound(user: ProtocolUser, params: Record<string, unknown>, transport: string, quic: VisionQuic): Json {
   return {
     tag: "proxy",
     protocol: "vless",
@@ -138,8 +205,9 @@ function vlessTlsOutbound(user: ProtocolUser, params: Record<string, unknown>, t
             // Empty over WebSocket: XTLS Vision needs a TLS record
             // stream to splice into and there is none inside a
             // WebSocket. The server clears it at generation, so this
-            // simply passes through whatever was issued.
-            { id: user.credentials.uuid, encryption: "none", flow: user.credentials.flow ?? "" },
+            // simply passes through whatever was issued. Over TCP it is
+            // Vision, and QUIC is handled as on Stealth (VISION_QUIC).
+            { id: user.credentials.uuid, encryption: "none", flow: clientFlow(user.credentials.flow, quic) },
           ],
         },
       ],
@@ -236,7 +304,7 @@ export function isXrayProtocol(protocol: string): boolean {
  * nothing, which is far harder to diagnose than a refusal naming the
  * field that was absent.
  */
-export function buildXrayConfig(user: ProtocolUser): string {
+export function buildXrayConfig(user: ProtocolUser, quic: VisionQuic = VISION_QUIC): string {
   const params = (user.connection.publicParams ?? {}) as Record<string, unknown>;
   // Defaulted for nodes registered before the column existed, which were
   // all plain TCP.
@@ -256,11 +324,11 @@ export function buildXrayConfig(user: ProtocolUser): string {
       ) {
         throw new Error("This server is missing its REALITY parameters");
       }
-      outbound = realityOutbound(user, params);
+      outbound = realityOutbound(user, params, quic);
       break;
     case "XRAY_VLESS_TLS":
       if (!params.serverName) throw new Error("This server is missing its TLS server name");
-      outbound = vlessTlsOutbound(user, params, transport);
+      outbound = vlessTlsOutbound(user, params, transport, quic);
       break;
     case "XRAY_TROJAN":
       if (!params.serverName) throw new Error("This server is missing its TLS server name");
@@ -279,6 +347,28 @@ export function buildXrayConfig(user: ProtocolUser): string {
       throw new Error(`${user.protocol} is not an Xray protocol`);
   }
 
+  const rules: Json[] = [
+    // The tunnel's lookups, to the engine's resolver (ENGINE_RESOLVERS).
+    // First, so a lookup sent to an IPv6 resolver is answered rather than
+    // refused by the next rule. Matched on `tun-in`: the resolver's own
+    // connections carry the DNS app's tag instead, match no rule, and so
+    // take the first outbound -- the proxy. One that matched here would
+    // loop back into the DNS outbound.
+    { type: "field", inboundTag: ["tun-in"], port: "53", outboundTag: DNS_OUT_TAG },
+    // No IPv6, closed on the phone. The nodes leave over IPv4 only and
+    // refuse IPv6 (`block-ipv6-egress` in the node template), but only
+    // after the phone's own netstack has completed the handshake and the
+    // server has been dialled: "connected, then dead" a round trip later.
+    // Here it is closed before anything is dialled. Lookups no longer
+    // return IPv6 addresses (queryStrategy below), so this catches only
+    // literals. iOS keeps its IPv6 default route, which is what stops
+    // IPv6 leaving outside the tunnel.
+    { type: "field", ip: ["::/0"], outboundTag: BLOCK_TAG },
+  ];
+  if (quic === "drop-locally" && outbound.protocol === "vless" && user.credentials.flow === VISION) {
+    rules.push({ type: "field", inboundTag: ["tun-in"], network: "udp", port: "443", outboundTag: BLOCK_TAG });
+  }
+
   return JSON.stringify({
     log: { loglevel: "warning" },
     // The bytes sent and received through the server, which the engine
@@ -289,6 +379,14 @@ export function buildXrayConfig(user: ProtocolUser): string {
     // config (counters_test.go there builds these two).
     stats: {},
     policy: { system: { statsOutboundUplink: true, statsOutboundDownlink: true } },
+    // The engine's resolver: app/dns, registered in plugins/vpn/xray.
+    // IPv4 only, so an AAAA question gets an empty answer and apps stop
+    // trying IPv6 the nodes would refuse anyway. The cache is xray-core's
+    // own, with its defaults: entries live for their TTL and are swept
+    // every 5 minutes, no stale answers kept (`serveStale` off). It has no
+    // entry cap to set; at a few hundred bytes a name it stays far below
+    // the iPhone extension's memory limit.
+    dns: { servers: ENGINE_RESOLVERS, queryStrategy: "UseIPv4", enableParallelQuery: true },
     inbounds: [
       {
         tag: "tun-in",
@@ -300,6 +398,37 @@ export function buildXrayConfig(user: ProtocolUser): string {
         settings: { name: "neoxify", MTU: TUN_MTU },
       },
     ],
-    outbounds: [outbound],
+    // The proxy stays first: it is where anything no rule names goes,
+    // the resolver's own connections included.
+    outbounds: [
+      outbound,
+      {
+        tag: DNS_OUT_TAG,
+        protocol: "dns",
+        settings: {
+          // Whatever is passed on goes over TCP, wherever it was sent.
+          rewriteNetwork: "tcp",
+          rules: [
+            // A and AAAA from the engine's resolver and its cache.
+            { action: "hijack", qType: "1,28" },
+            // SVCB and HTTPS records: an empty answer, which is what any
+            // resolver says for a name without one, and clients then use
+            // the A answer. Android and iOS ask for HTTPS records beside
+            // ordinary lookups, and passing each on would be a new
+            // connection through the proxy -- the per-lookup handshake
+            // this change exists to remove. What is lost is the hint
+            // (HTTP/3, ECH) those records carry, nothing a page needs.
+            { action: "return", qType: "64,65" },
+            // Anything else -- SRV, TXT, MX -- as it is, through the
+            // proxy, rather than the empty answer this outbound gives
+            // by default. The desktop does the same.
+            { action: "direct" },
+          ],
+        },
+        proxySettings: { tag: "proxy" },
+      },
+      { tag: BLOCK_TAG, protocol: "blackhole" },
+    ],
+    routing: { domainStrategy: "AsIs", rules },
   });
 }

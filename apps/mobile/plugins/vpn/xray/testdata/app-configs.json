@@ -10,6 +10,14 @@
         "statsOutboundDownlink": true
       }
     },
+    "dns": {
+      "servers": [
+        "https://1.1.1.1/dns-query",
+        "https://8.8.8.8/dns-query"
+      ],
+      "queryStrategy": "UseIPv4",
+      "enableParallelQuery": true
+    },
     "inbounds": [
       {
         "tag": "tun-in",
@@ -34,7 +42,7 @@
                 {
                   "id": "UUID",
                   "encryption": "none",
-                  "flow": "xtls-rprx-vision"
+                  "flow": "xtls-rprx-vision-udp443"
                 }
               ]
             }
@@ -50,8 +58,55 @@
             "shortId": "e341f2050d3761d4"
           }
         }
+      },
+      {
+        "tag": "dns-out",
+        "protocol": "dns",
+        "settings": {
+          "rewriteNetwork": "tcp",
+          "rules": [
+            {
+              "action": "hijack",
+              "qType": "1,28"
+            },
+            {
+              "action": "return",
+              "qType": "64,65"
+            },
+            {
+              "action": "direct"
+            }
+          ]
+        },
+        "proxySettings": {
+          "tag": "proxy"
+        }
+      },
+      {
+        "tag": "block",
+        "protocol": "blackhole"
       }
-    ]
+    ],
+    "routing": {
+      "domainStrategy": "AsIs",
+      "rules": [
+        {
+          "type": "field",
+          "inboundTag": [
+            "tun-in"
+          ],
+          "port": "53",
+          "outboundTag": "dns-out"
+        },
+        {
+          "type": "field",
+          "ip": [
+            "::/0"
+          ],
+          "outboundTag": "block"
+        }
+      ]
+    }
   },
   "vless-tls-tcp": {
     "log": {
@@ -63,6 +118,14 @@
         "statsOutboundUplink": true,
         "statsOutboundDownlink": true
       }
+    },
+    "dns": {
+      "servers": [
+        "https://1.1.1.1/dns-query",
+        "https://8.8.8.8/dns-query"
+      ],
+      "queryStrategy": "UseIPv4",
+      "enableParallelQuery": true
     },
     "inbounds": [
       {
@@ -88,7 +151,7 @@
                 {
                   "id": "UUID",
                   "encryption": "none",
-                  "flow": "xtls-rprx-vision"
+                  "flow": "xtls-rprx-vision-udp443"
                 }
               ]
             }
@@ -106,8 +169,55 @@
             ]
           }
         }
+      },
+      {
+        "tag": "dns-out",
+        "protocol": "dns",
+        "settings": {
+          "rewriteNetwork": "tcp",
+          "rules": [
+            {
+              "action": "hijack",
+              "qType": "1,28"
+            },
+            {
+              "action": "return",
+              "qType": "64,65"
+            },
+            {
+              "action": "direct"
+            }
+          ]
+        },
+        "proxySettings": {
+          "tag": "proxy"
+        }
+      },
+      {
+        "tag": "block",
+        "protocol": "blackhole"
       }
-    ]
+    ],
+    "routing": {
+      "domainStrategy": "AsIs",
+      "rules": [
+        {
+          "type": "field",
+          "inboundTag": [
+            "tun-in"
+          ],
+          "port": "53",
+          "outboundTag": "dns-out"
+        },
+        {
+          "type": "field",
+          "ip": [
+            "::/0"
+          ],
+          "outboundTag": "block"
+        }
+      ]
+    }
   },
   "vless-tls-ws": {
     "log": {
@@ -119,6 +229,14 @@
         "statsOutboundUplink": true,
         "statsOutboundDownlink": true
       }
+    },
+    "dns": {
+      "servers": [
+        "https://1.1.1.1/dns-query",
+        "https://8.8.8.8/dns-query"
+      ],
+      "queryStrategy": "UseIPv4",
+      "enableParallelQuery": true
     },
     "inbounds": [
       {
@@ -166,8 +284,55 @@
             "host": "neoxify.test"
           }
         }
+      },
+      {
+        "tag": "dns-out",
+        "protocol": "dns",
+        "settings": {
+          "rewriteNetwork": "tcp",
+          "rules": [
+            {
+              "action": "hijack",
+              "qType": "1,28"
+            },
+            {
+              "action": "return",
+              "qType": "64,65"
+            },
+            {
+              "action": "direct"
+            }
+          ]
+        },
+        "proxySettings": {
+          "tag": "proxy"
+        }
+      },
+      {
+        "tag": "block",
+        "protocol": "blackhole"
       }
-    ]
+    ],
+    "routing": {
+      "domainStrategy": "AsIs",
+      "rules": [
+        {
+          "type": "field",
+          "inboundTag": [
+            "tun-in"
+          ],
+          "port": "53",
+          "outboundTag": "dns-out"
+        },
+        {
+          "type": "field",
+          "ip": [
+            "::/0"
+          ],
+          "outboundTag": "block"
+        }
+      ]
+    }
   },
   "trojan": {
     "log": {
@@ -179,6 +344,14 @@
         "statsOutboundUplink": true,
         "statsOutboundDownlink": true
       }
+    },
+    "dns": {
+      "servers": [
+        "https://1.1.1.1/dns-query",
+        "https://8.8.8.8/dns-query"
+      ],
+      "queryStrategy": "UseIPv4",
+      "enableParallelQuery": true
     },
     "inbounds": [
       {
@@ -216,8 +389,55 @@
             ]
           }
         }
+      },
+      {
+        "tag": "dns-out",
+        "protocol": "dns",
+        "settings": {
+          "rewriteNetwork": "tcp",
+          "rules": [
+            {
+              "action": "hijack",
+              "qType": "1,28"
+            },
+            {
+              "action": "return",
+              "qType": "64,65"
+            },
+            {
+              "action": "direct"
+            }
+          ]
+        },
+        "proxySettings": {
+          "tag": "proxy"
+        }
+      },
+      {
+        "tag": "block",
+        "protocol": "blackhole"
       }
-    ]
+    ],
+    "routing": {
+      "domainStrategy": "AsIs",
+      "rules": [
+        {
+          "type": "field",
+          "inboundTag": [
+            "tun-in"
+          ],
+          "port": "53",
+          "outboundTag": "dns-out"
+        },
+        {
+          "type": "field",
+          "ip": [
+            "::/0"
+          ],
+          "outboundTag": "block"
+        }
+      ]
+    }
   },
   "shadowsocks": {
     "log": {
@@ -229,6 +449,14 @@
         "statsOutboundUplink": true,
         "statsOutboundDownlink": true
       }
+    },
+    "dns": {
+      "servers": [
+        "https://1.1.1.1/dns-query",
+        "https://8.8.8.8/dns-query"
+      ],
+      "queryStrategy": "UseIPv4",
+      "enableParallelQuery": true
     },
     "inbounds": [
       {
@@ -261,7 +489,54 @@
           "xudpConcurrency": 16,
           "xudpProxyUDP443": "allow"
         }
+      },
+      {
+        "tag": "dns-out",
+        "protocol": "dns",
+        "settings": {
+          "rewriteNetwork": "tcp",
+          "rules": [
+            {
+              "action": "hijack",
+              "qType": "1,28"
+            },
+            {
+              "action": "return",
+              "qType": "64,65"
+            },
+            {
+              "action": "direct"
+            }
+          ]
+        },
+        "proxySettings": {
+          "tag": "proxy"
+        }
+      },
+      {
+        "tag": "block",
+        "protocol": "blackhole"
       }
-    ]
+    ],
+    "routing": {
+      "domainStrategy": "AsIs",
+      "rules": [
+        {
+          "type": "field",
+          "inboundTag": [
+            "tun-in"
+          ],
+          "port": "53",
+          "outboundTag": "dns-out"
+        },
+        {
+          "type": "field",
+          "ip": [
+            "::/0"
+          ],
+          "outboundTag": "block"
+        }
+      ]
+    }
   }
 }

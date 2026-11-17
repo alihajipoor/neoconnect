@@ -49,6 +49,21 @@ import (
 	// together.
 	_ "github.com/xtls/xray-core/app/policy"
 	_ "github.com/xtls/xray-core/app/stats"
+	// The tunnel's lookups and the rules that steer them (xray-config.ts:
+	// "dns", "routing", and the "dns" and "blackhole" outbounds). The
+	// resolver is app/dns, whose DNS-over-HTTPS client is part of that
+	// package; proxy/dns answers port 53 from it; app/router holds the
+	// rules sending port 53 there and IPv6 to proxy/blackhole. All four
+	// are already linked in through infra/conf/serial, which imports them
+	// for their config types, so naming them changes nothing in the
+	// binary; it is here so that dropping that import some day cannot
+	// silently take them away. Absent any one, core.New refuses the app's
+	// config and every Xray connect fails -- app_configs_test.go builds
+	// the real configs.
+	_ "github.com/xtls/xray-core/app/dns"
+	_ "github.com/xtls/xray-core/app/router"
+	_ "github.com/xtls/xray-core/proxy/blackhole"
+	_ "github.com/xtls/xray-core/proxy/dns"
 	_ "github.com/xtls/xray-core/proxy/freedom"
 	// Shadowsocks 2022. The whole package, not a .../outbound
 	// subpackage: unlike VLESS and VMess this one keeps client and

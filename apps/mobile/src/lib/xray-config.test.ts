@@ -146,6 +146,117 @@ describe("traffic counters", () => {
     const config = JSON.parse(buildXrayConfig(user("XRAY_VLESS_REALITY", REALITY_PARAMS, { uuid: "u-1", flow: "xtls-rprx-vision" })));
     expect(config.stats).toEqual({});
     expect(config.policy).toEqual({ system: { statsOutboundUplink: true, statsOutboundDownlink: true } });
-    expect(config.outbounds.map((o: { tag: string }) => o.tag)).toEqual(["proxy"]);
+    expect(config.outbounds.map((o: { tag: string }) => o.tag)).toEqual(["proxy", "dns-out", "block"]);
+  });
+});
+
+const ALL_PROTOCOLS = [
+  ["XRAY_VLESS_REALITY", REALITY_PARAMS, { uuid: "u-1", flow: "xtls-rprx-vision" }],
+  ["XRAY_VLESS_TLS", { serverName: "example.com" }, { uuid: "u-1", flow: "xtls-rprx-vision" }],
+  ["XRAY_TROJAN", { serverName: "example.com" }, { password: "p" }],
+  ["SHADOWSOCKS", { method: "2022-blake3-aes-256-gcm", serverKey: "server-key" }, { userKey: "user-key" }],
+] as const;
+
+describe("lookups inside the engine", () => {
+  // Every lookup from a new source port used to be a UDP flow of its own,
+  // and on Stealth a new connection to the server: 868 ms a lookup.
+  it("sends the tunnel's port 53 to the DNS outbound, on every protocol", () => {
+    for (const [protocol, params, credentials] of ALL_PROTOCOLS) {
+      const config = JSON.parse(buildXrayConfig(user(protocol, params, credentials)));
+      expect(config.routing.rules[0], protocol).toEqual({
+        type: "field",
+        inboundTag: ["tun-in"],
+        port: "53",
+        outboundTag: "dns-out",
+      });
+      // The proxy stays first, so the resolver's own connections -- which
+      // no rule names -- go through it and never directly.
+      expect(config.outbounds[0].tag, protocol).toBe("proxy");
+    }
+  });
+
+  // DoH keeps one connection for every query; the TCP name server dials a
+  // new one per query, which through the proxy is the handshake again.
+  // By address, and never "localhost" or a "+local" scheme, which would
+  // leave outside the tunnel.
+  it("resolves over DNS-over-HTTPS by address, IPv4 answers only", () => {
+    const config = JSON.parse(buildXrayConfig(user(...ALL_PROTOCOLS[0])));
+    expect(config.dns.queryStrategy).toBe("UseIPv4");
+    expect(config.dns.servers.length).toBeGreaterThan(0);
+    for (const server of config.dns.servers) {
+      expect(server).toMatch(/^https:\/\/\d+\.\d+\.\d+\.\d+\/dns-query$/);
+    }
+    expect(config.dns.enableParallelQuery).toBe(true);
+    // No serveStale: no expired answers kept in the iPhone's 50 MB.
+    expect(config.dns.serveStale).toBeUndefined();
+  });
+
+  it("answers A and AAAA itself, empties HTTPS records, passes the rest on through the proxy", () => {
+    const config = JSON.parse(buildXrayConfig(user(...ALL_PROTOCOLS[0])));
+    const dnsOut = config.outbounds.find((o: { tag: string }) => o.tag === "dns-out");
+    expect(dnsOut.protocol).toBe("dns");
+    expect(dnsOut.settings.rewriteNetwork).toBe("tcp");
+    expect(dnsOut.settings.rules).toEqual([
+      { action: "hijack", qType: "1,28" },
+      { action: "return", qType: "64,65" },
+      { action: "direct" },
+    ]);
+    // Passed-on queries leave through the proxy, never from the phone.
+    expect(dnsOut.proxySettings).toEqual({ tag: "proxy" });
+  });
+});
+
+describe("IPv6", () => {
+  it("closes an IPv6 destination on the phone, after the lookup rule", () => {
+    for (const [protocol, params, credentials] of ALL_PROTOCOLS) {
+      const config = JSON.parse(buildXrayConfig(user(protocol, params, credentials)));
+      expect(config.routing.rules[1], protocol).toEqual({ type: "field", ip: ["::/0"], outboundTag: "block" });
+      const block = config.outbounds.find((o: { tag: string }) => o.tag === "block");
+      expect(block.protocol).toBe("blackhole");
+    }
+  });
+});
+
+describe("QUIC on Vision", () => {
+  const flowOf = (config: { outbounds: { settings: { vnext: { users: { flow: string }[] }[] } }[] }) =>
+    config.outbounds[0].settings.vnext[0].users[0].flow;
+
+  // Plain Vision refuses UDP/443 after dialling the server: a wasted
+  // handshake and silence. The suffix is client-only; the outbound trims
+  // it before anything is sent.
+  it("carries QUIC by default with the client-only udp443 flow", () => {
+    for (const protocol of ["XRAY_VLESS_REALITY", "XRAY_VLESS_TLS"] as const) {
+      const params = protocol === "XRAY_VLESS_REALITY" ? REALITY_PARAMS : { serverName: "example.com" };
+      const config = JSON.parse(buildXrayConfig(user(protocol, params, { uuid: "u-1", flow: "xtls-rprx-vision" })));
+      expect(flowOf(config), protocol).toBe("xtls-rprx-vision-udp443");
+      expect(config.routing.rules.some((r: { port?: string }) => r.port === "443"), protocol).toBe(false);
+    }
+  });
+
+  it("can instead refuse QUIC locally, keeping the issued flow", () => {
+    const config = JSON.parse(
+      buildXrayConfig(user("XRAY_VLESS_REALITY", REALITY_PARAMS, { uuid: "u-1", flow: "xtls-rprx-vision" }), "drop-locally"),
+    );
+    expect(flowOf(config)).toBe("xtls-rprx-vision");
+    expect(config.routing.rules).toContainEqual({
+      type: "field",
+      inboundTag: ["tun-in"],
+      network: "udp",
+      port: "443",
+      outboundTag: "block",
+    });
+  });
+
+  // WebSocket has no Vision; Shadowsocks carries QUIC already. Neither
+  // gets the flow nor the rule, whichever way the constant is set.
+  it("leaves every other flow and protocol alone", () => {
+    for (const quic of ["carry", "drop-locally"] as const) {
+      const ws = user("XRAY_VLESS_TLS", { serverName: "example.com", path: "/ws" }, { uuid: "u-1", flow: "" });
+      const wsConfig = JSON.parse(buildXrayConfig({ ...ws, connection: { ...ws.connection, transport: "WS" } } as ProtocolUser, quic));
+      expect(flowOf(wsConfig), quic).toBe("");
+      for (const config of [wsConfig, JSON.parse(buildXrayConfig(user(...ALL_PROTOCOLS[3]), quic))]) {
+        expect(config.routing.rules.some((r: { port?: string }) => r.port === "443"), quic).toBe(false);
+      }
+    }
   });
 });
