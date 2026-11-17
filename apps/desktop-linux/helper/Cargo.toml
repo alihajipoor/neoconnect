@@ -1,6 +1,6 @@
 [package]
 name = "neoxify-helper"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [[bin]]
@@ -11,6 +11,7 @@ path = "src/main.rs"
 neoconnect-ipc = { workspace = true }
 neoxify-tunnel = { path = "../tunnel" }
 neoxify-netguard = { path = "../netguard" }
+neoxify-linux-wire = { path = "../wire" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }

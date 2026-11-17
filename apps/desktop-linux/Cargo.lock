@@ -57,10 +57,11 @@ dependencies = [
 
 [[package]]
 name = "neoxify-helper"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "neoconnect-ipc",
+ "neoxify-linux-wire",
  "neoxify-netguard",
  "neoxify-tunnel",
  "serde",
@@ -69,15 +70,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "neoxify-linux-wire"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "neoxify-netguard"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "neoxify-tunnel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neoconnect-ipc",
  "serde",

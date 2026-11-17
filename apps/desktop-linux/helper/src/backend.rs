@@ -41,7 +41,7 @@ impl Backend for System {
         dirs: &Dirs,
         limits: &Limits,
     ) -> Result<Box<dyn Tunnel>, Problem> {
-        neoxify_tunnel::connect(profile, exits, known_nodes, dirs, limits)
+        neoxify_tunnel::connect(profile, exits, known_nodes, &neoxify_tunnel::Shape::Full, dirs, limits)
     }
 
     fn way_out(&self, profile: &ConnectProfile) -> Result<(), Problem> {

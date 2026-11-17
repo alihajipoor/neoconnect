@@ -57,7 +57,7 @@ fn main() {
 
     let limits = Limits { deadline: Instant::now() + Duration::from_secs(60), cancel: Arc::new(AtomicBool::new(false)) };
     let started = Instant::now();
-    let mut tunnel = match connect(&profile, &exits, &known_nodes, &dirs, &limits) {
+    let mut tunnel = match connect(&profile, &exits, &known_nodes, &neoxify_tunnel::Shape::Full, &dirs, &limits) {
         Ok(t) => t,
         Err(problem) => {
             println!("connect failed after {:?}: {problem}", started.elapsed());

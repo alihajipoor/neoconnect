@@ -26,11 +26,13 @@ mod cleanup;
 mod cmd;
 mod dns;
 mod files;
+mod ikev2;
 mod ledger;
 mod link;
 mod openvpn;
 mod process;
 mod routes;
+mod split;
 mod wireguard;
 mod xray;
 
@@ -74,6 +76,59 @@ pub struct Transport {
     pub ip: Ipv4Addr,
     pub port: u16,
     pub proto: Proto,
+}
+
+/// How much of the machine's traffic the tunnel takes.
+///
+/// `Full` is the ordinary connection. The other two are Custom mode,
+/// which on Linux sorts programs by control group: the programs named
+/// here (and everything they start) are moved into a group of ours, and
+/// the kernel routes that group's packets one way and everything else's
+/// the other. Each entry is an app identity that has passed
+/// [`valid_app`]; in practice the full path of a program.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Shape {
+    /// Everything goes through the tunnel.
+    #[default]
+    Full,
+    /// Only the named apps go through the tunnel; everything else
+    /// leaves the machine's own way. Lookups go through the tunnel
+    /// whoever makes them, as on Windows.
+    OnlySelected(Vec<String>),
+    /// Everything goes through the tunnel except the named apps.
+    AllExcept(Vec<String>),
+}
+
+impl Shape {
+    pub fn is_split(&self) -> bool {
+        !matches!(self, Shape::Full)
+    }
+}
+
+/// Custom mode as the machine shows it now.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SplitState {
+    /// The sorting is really in the kernel (the rules and the routing
+    /// table were read back), not merely asked for.
+    pub active: bool,
+    /// What is wrong, as a plain English sentence and the kind the app
+    /// sorts it into, or `None`.
+    pub problem: Option<(String, neoconnect_ipc::SplitTunnelProblemCode)>,
+    /// Apps that were already running when they were chosen: their open
+    /// connections stay where they were until the app is restarted.
+    /// Bare file names, as Windows reports them.
+    pub restart_needed: Vec<String>,
+}
+
+/// One running program a customer could choose for Custom mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Running {
+    pub pid: u32,
+    /// The app identity to send back in a [`Shape`]: what [`valid_app`]
+    /// accepts and what the sorting matches on.
+    pub app: String,
+    /// The program's own short name (`comm`), for a list.
+    pub name: String,
 }
 
 /// What came up.
@@ -147,6 +202,37 @@ pub trait Tunnel: Send {
         self.up().dns_protected
     }
 
+    /// The shape in force. An engine that cannot do Custom mode only
+    /// ever reports `Full`.
+    fn shape(&self) -> Shape {
+        Shape::Full
+    }
+
+    /// Change the shape without dropping the session: the engine stays
+    /// up and only the routes, rules and sorted programs change. On an
+    /// error the earlier shape is still in force.
+    fn reshape(&mut self, shape: &Shape, limits: &Limits) -> Result<(), Problem> {
+        let _ = limits;
+        if shape.is_split() {
+            return Err(Problem::Failed("Custom mode is not available with this protocol on Linux".into()));
+        }
+        Ok(())
+    }
+
+    /// Custom mode as the kernel shows it, or `None` when the shape is
+    /// `Full`.
+    fn split(&self) -> Option<SplitState> {
+        None
+    }
+
+    /// Does a connection made on the tunnel interface itself reach the
+    /// internet? This is how Custom mode is checked, where the app's own
+    /// traffic may not be in the tunnel at all. Never dials outside it.
+    fn probe(&self, limits: &Limits) -> Result<(), String> {
+        let _ = limits;
+        Err("this tunnel cannot be probed".into())
+    }
+
     /// The fast half of teardown: stop the engine and take the routes
     /// out, so traffic is back on the machine's own network within
     /// milliseconds. Must not wait on anything slow. Safe to call twice.
@@ -163,14 +249,19 @@ pub trait Tunnel: Send {
 ///
 /// `exits` are extra Xray exits to run beside the main one (empty for
 /// every other protocol); `known_nodes` are server addresses whose stale
-/// host routes may be purged before connecting.
+/// host routes may be purged before connecting; `shape` says how much of
+/// the machine's traffic the tunnel is to take.
 pub fn connect(
     profile: &ConnectProfile,
     exits: &[ExitProfile],
     known_nodes: &[String],
+    shape: &Shape,
     dirs: &Dirs,
     limits: &Limits,
 ) -> Result<Box<dyn Tunnel>, Problem> {
+    if shape.is_split() {
+        return Err(Problem::Failed("Custom mode is not available on Linux yet".into()));
+    }
     match profile {
         ConnectProfile::XrayVlessReality(_)
         | ConnectProfile::XrayVlessTls(_)
@@ -178,8 +269,31 @@ pub fn connect(
         | ConnectProfile::Shadowsocks(_) => xray::connect(profile, exits, known_nodes, dirs, limits),
         ConnectProfile::Wireguard(_) => wireguard::connect(profile, known_nodes, dirs, limits),
         ConnectProfile::Openvpn(_) => openvpn::connect(profile, known_nodes, dirs, limits),
-        ConnectProfile::Ikev2(_) => Err(Problem::Failed("IKEv2 is not available on Linux yet".into())),
+        ConnectProfile::Ikev2(_) => ikev2::connect(profile, known_nodes, dirs, limits),
     }
+}
+
+/// Is this app identity one the sorting can act on? Checked on every
+/// identity in a request before anything uses it, because it is matched
+/// against what root reads from `/proc` and written into nothing else.
+pub fn valid_app(app: &str) -> Result<(), String> {
+    split::valid_app(app)
+}
+
+/// The running programs of one user that could be chosen for Custom
+/// mode, one entry per process. The app turns these into names and
+/// icons; this side only says what is running.
+pub fn running_processes(uid: u32) -> Vec<Running> {
+    split::running(uid)
+}
+
+/// Put a process and everything it has started into the control group
+/// whose sockets the reconnect hold lets through, and return the group's
+/// path relative to the cgroup root (what `netguard::HoldPlan::app_group`
+/// takes). The helper calls this for the app itself when a hold is
+/// wanted. Programs started later by the app inherit the group.
+pub fn adopt_app(pid: u32) -> Result<String, String> {
+    split::adopt_app(pid)
 }
 
 /// Is there a way out to the internet for this profile's server right

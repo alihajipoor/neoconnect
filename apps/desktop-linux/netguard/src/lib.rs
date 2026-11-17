@@ -205,6 +205,81 @@ pub fn lan_prefixes(exclude_ifaces: &[&str]) -> Vec<Cidr4> {
     }
 }
 
+// ---------------------------------------------------------------------
+// The reconnect hold ("block the internet while reconnecting").
+//
+// Between a tunnel that dropped and the next one coming up, the customer
+// who asked for it gets no internet at all rather than their own address
+// on the wire. On Linux that is the same table with different contents:
+// the helper swaps the confinement for the hold in one transaction when a
+// tunnel drops, and swaps it back with `apply` when the next one is up,
+// so there is never a moment with no rules. `remove` lifts either.
+// ---------------------------------------------------------------------
+
+/// What may pass while the internet is held shut. Everything not named
+/// here is refused, both families, both directions.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HoldPlan {
+    /// Our own tunnel interfaces by name, whether or not they exist yet,
+    /// so a tunnel that comes up under the hold carries at once.
+    pub tunnel_ifaces: Vec<String>,
+    /// Servers a reconnect may dial, any port, TCP and UDP. This is how
+    /// the engines get out: the helper names every server the app told
+    /// it about plus the one being dialled.
+    pub servers: Vec<Ipv4Addr>,
+    /// WireGuard's mark, when a WireGuard tunnel may come up under the
+    /// hold. `None` writes no mark rule.
+    pub engine_fwmark: Option<u32>,
+    /// A control group, as a path relative to the cgroup root (for
+    /// example `neoxify.app`), whose sockets pass anywhere. It holds the
+    /// app itself, which has to reach the service to sign in again and
+    /// find the next server. The group must exist when the plan is
+    /// applied. `None` writes no rule.
+    pub app_group: Option<String>,
+    /// The machine's own resolvers: port 53 passes to these and nowhere
+    /// else. See [`machine_resolvers`].
+    pub resolvers: Vec<std::net::IpAddr>,
+    /// The resolvers could not be read, so port 53 passes to anywhere.
+    /// The app tells the customer, so this is reported back in [`Held`].
+    pub dns_anywhere: bool,
+    /// On-link private prefixes that stay reachable (see [`lan_prefixes`]).
+    pub lan: Vec<Cidr4>,
+}
+
+/// What the kernel holds after [`apply_hold`], read back, not assumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Held {
+    pub dns_anywhere: bool,
+}
+
+/// The complete nft script for a hold: pure, no I/O. Loading it replaces
+/// any earlier table of ours in the same transaction.
+pub fn hold_ruleset(plan: &HoldPlan) -> String {
+    let _ = plan;
+    String::new()
+}
+
+/// Put the hold in force, replacing whatever of ours was there, and say
+/// what the kernel now holds. An error means nothing is held: the caller
+/// reports that and fails open.
+pub fn apply_hold(plan: &HoldPlan) -> Result<Held, Error> {
+    let _ = plan;
+    Err(Error::Refused("the hold is not built yet".into()))
+}
+
+/// The hold as the kernel shows it now: `None` when the table is absent
+/// or is not a hold.
+pub fn hold_in_force() -> Result<Option<Held>, Error> {
+    Ok(None)
+}
+
+/// The resolvers this machine sends its lookups to, loopback stubs left
+/// out (with systemd-resolved, the upstream servers it uses; otherwise
+/// what `/etc/resolv.conf` names). Empty when they cannot be read.
+pub fn machine_resolvers() -> Vec<std::net::IpAddr> {
+    Vec::new()
+}
+
 /// nft from the system's own directories only. The helper runs as root,
 /// and a `PATH` lookup would run whatever `nft` comes first in it.
 fn nft() -> Result<&'static Path, Error> {

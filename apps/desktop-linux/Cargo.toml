@@ -10,7 +10,7 @@
 # never stop the daemon from building.
 [workspace]
 resolver = "2"
-members = ["helper", "tunnel", "netguard"]
+members = ["helper", "tunnel", "netguard", "wire"]
 exclude = ["src-tauri"]
 
 [workspace.dependencies]
