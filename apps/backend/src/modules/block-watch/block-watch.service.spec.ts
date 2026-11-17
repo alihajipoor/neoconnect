@@ -5,6 +5,7 @@ import { createServer, type Server } from "node:net";
 import { HELD_FOR_BLOCK_WATCH } from "./block-watch.mode";
 import {
   BlockWatchService,
+  byteWindowEnds,
   firstDayOf,
   MAX_PAGE_ATTEMPTS,
   PAGES_PER_HOUR,
@@ -57,14 +58,16 @@ interface World {
   routes: Row[];
   checks: Row[];
   subscriptions: Row[];
-  /** usage: [nodeId, subscriptionId, reportedAt ms, bytesUp] */
-  usage: [string, string, number, number][];
+  /** usage: [nodeId, subscriptionId, reportedAt ms, bytesUp, bytesDown?] */
+  usage: [string, string, number, number, number?][];
   /** usage_hourly: [nodeId, subscriptionId, hourStart ms, bytesUp] */
   hourly?: [string, string, number, number][];
   incidents: Row[];
   alerts: Row[];
   /** inside_probe_checks rows. */
   inside?: Row[];
+  /** block_watch_notices rows. */
+  notices?: Row[];
 }
 
 /** latestDialsSql, as Postgres answers it: per customer, network and
@@ -103,7 +106,7 @@ function latestDials(world: World, sql: { values: unknown[] }): Row[] {
 function fakePrisma(world: World) {
   let seq = 0;
   const withNode = (i: Row) => ({ ...i, node: { ...world.nodes.find((n) => n.id === i.nodeId) } });
-  const groups = (rows: [string, string, number, number][], field: string, { where, having }: Row) => {
+  const groups = (rows: [string, string, number, number, number?][], field: string, { where, having }: Row) => {
     const sums = new Map<string, number>();
     for (const [nodeId, subscriptionId, at, up] of rows) {
       if (!matches({ nodeId, subscriptionId, [field]: new Date(at) }, where)) continue;
@@ -115,6 +118,15 @@ function fakePrisma(world: World) {
       .map(([key, up]) => ({ nodeId: key.split("|")[0], subscriptionId: key.split("|")[1], _sum: { bytesUp: BigInt(up) } }));
   };
   const usageGroups = (args: Row) => groups(world.usage, "reportedAt", args);
+  const byteGroups = (rows: [string, string, number, number, number?][], { where }: Row) => {
+    const sums = new Map<string, [number, number]>();
+    for (const [nodeId, subscriptionId, at, up, down] of rows) {
+      if (!matches({ nodeId, subscriptionId, reportedAt: new Date(at) }, where)) continue;
+      const held = sums.get(nodeId) ?? [0, 0];
+      sums.set(nodeId, [held[0] + up, held[1] + (down ?? 0)]);
+    }
+    return [...sums].map(([nodeId, [up, down]]) => ({ nodeId, _sum: { bytesUp: BigInt(up), bytesDown: BigInt(down) } }));
+  };
   return {
     node: {
       findMany: jest.fn(async ({ where }: Row) => world.nodes.filter((n) => matches(n, where))),
@@ -143,6 +155,9 @@ function fakePrisma(world: World) {
           pagedAt: null,
           pageError: null,
           pageAttempts: 0,
+          insideNoticedAt: null,
+          insideNoticeError: null,
+          insideNoticeAttempts: 0,
           remindedAt: null,
           recoveryNotifiedAt: null,
           digestedAt: null,
@@ -201,12 +216,46 @@ function fakePrisma(world: World) {
     },
     insideProbeCheck: {
       findMany: jest.fn(async ({ where }: Row) => (world.inside ?? []).filter((r) => matches(r, where)).map(withNode)),
+      groupBy: jest.fn(async ({ where }: Row) => {
+        const latest = new Map<string, number>();
+        for (const r of (world.inside ?? []).filter((x) => matches(x, where))) {
+          latest.set(r.vantage, Math.max(latest.get(r.vantage) ?? 0, r.checkedAt.getTime()));
+        }
+        return [...latest].map(([vantage, at]) => ({ vantage, _max: { checkedAt: new Date(at) } }));
+      }),
+    },
+    blockWatchNotice: {
+      findMany: jest.fn(async ({ where }: Row) =>
+        (world.notices ?? [])
+          .filter((n) => matches(n, where))
+          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+          .map((n) => ({ ...n })),
+      ),
+      create: jest.fn(async ({ data }: Row) => {
+        const row = { id: `notice-${++seq}`, vantage: null, lastRoundAt: null, error: null, ...data };
+        (world.notices ??= []).push(row);
+        return row;
+      }),
     },
     nodeReachabilityAlert: {
       findMany: jest.fn(async ({ where }: Row) => world.alerts.filter((a) => matches(a, where)).map(withNode)),
     },
-    usageRecord: { groupBy: jest.fn(async (args: Row) => usageGroups(args)) },
-    usageHourly: { groupBy: jest.fn(async (args: Row) => groups(world.hourly ?? [], "hourStart", args)) },
+    usageRecord: {
+      groupBy: jest.fn(async (args: Row) =>
+        // By node alone: the byte totals (block-watch.service loadBytes).
+        args.by.length === 1 ? byteGroups(world.usage, args) : usageGroups(args),
+      ),
+    },
+    usageHourly: {
+      groupBy: jest.fn(async (args: Row) =>
+        args.by.length === 1
+          ? byteGroups(
+              (world.hourly ?? []).map(([n, sub, at, up]) => [n, sub, at, up] as [string, string, number, number]),
+              { where: { ...args.where, reportedAt: args.where.hourStart, hourStart: undefined } },
+            )
+          : groups(world.hourly ?? [], "hourStart", args),
+      ),
+    },
   };
 }
 
@@ -822,7 +871,7 @@ describe("BlockWatchService", () => {
       expect(alerts()[0].text).not.toContain("192.0.2.");
     });
 
-    it("is only a suspicion while the outside check still connects", async () => {
+    it("is only a suspicion while the outside check still connects, told once as an early notice, not a block page", async () => {
       const { service, world, alerts } = build("notify", {
         nodes,
         inside: insideRows(T0, T0 - 3 * HOUR),
@@ -830,8 +879,316 @@ describe("BlockWatchService", () => {
       });
       await service.runCycle(new Date(T0));
       expect(world.incidents[0].evidenceJson.current).toBe("SUSPECT");
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0].subject).toBe("[Neoxify] Early warning, not a block verdict: finland-9 fails from every inside box reporting");
+      expect(alerts()[0].subject).not.toContain("likely blocked");
+      expect(world.incidents[0].insideNoticedAt).toEqual(new Date(T0));
+      // Not again while it stays open.
+      world.inside = insideRows(T0 + 30 * MIN, T0 - 3 * HOUR);
+      await service.runCycle(new Date(T0 + 30 * MIN));
+      expect(alerts()).toHaveLength(1);
+    });
+
+    /** Rows for "connects but moves nothing": box-a moves data to both
+     * servers until `lostFrom`, then only to n2; box-b keeps moving data
+     * to both unless `bothLose`. */
+    function emptyRows(now: number, lostFrom: number, bothLose = false): Row[] {
+      const rows: Row[] = [];
+      for (let at = now - 2 * DAY; at <= now - 5 * MIN; at += 30 * MIN) {
+        for (const vantage of ["box-a", "box-b"]) {
+          const lost = at >= lostFrom && (vantage === "box-a" || bothLose);
+          const moved = lost ? 0 : 262_144;
+          rows.push({ nodeId: "n1", vantage, connectMs: 90, downBytes: moved, upBytes: moved, checkedAt: new Date(at) });
+          rows.push({ nodeId: "n2", vantage, connectMs: 85, downBytes: 262_144, upBytes: 262_144, checkedAt: new Date(at) });
+        }
+      }
+      return rows;
+    }
+    /** n1's own usage: `usual` MB up a day for a week, then `today` MB in
+     * the last 24 hours. */
+    function usageOf(now: number, usual: number, today: number): [string, string, number, number, number][] {
+      const MB = 1024 * 1024;
+      const rows: [string, string, number, number, number][] = [];
+      for (let day = 1; day <= 7; day += 1) rows.push(["n1", "sub-x", now - day * DAY - 6 * HOUR, usual * MB, usual * 30 * MB]);
+      rows.push(["n1", "sub-x", now - 6 * HOUR, today * MB, today * 30 * MB]);
+      return rows;
+    }
+
+    it("sends one partial notice when one box connects but moves nothing, with the traffic and the app reports beside it", async () => {
+      const MB = 1024 * 1024;
+      const attempts = [
+        ...reports(ASN_A, 1, true, T0 - 3 * HOUR, "ok"),
+        ...reports(ASN_B, 2, false, T0 - 2 * HOUR, "bad"),
+      ];
+      const { service, world, alerts } = build("notify", {
+        nodes,
+        inside: emptyRows(T0, T0 - 2 * HOUR - 10 * MIN),
+        checks: reachableChecks("n1", T0),
+        usage: usageOf(T0, 1500, 1200),
+        attempts,
+      });
+      await service.runCycle(new Date(T0));
+      const incident = world.incidents[0];
+      expect(incident.evidenceJson.current).toBe("SUSPECT");
+      expect(incident.firedFamilies).toEqual(["inside"]);
+      const inside = incident.evidenceJson.families.find((x: Row) => x.family === "inside");
+      expect(inside.scope).toMatchObject({ kind: "partial", lost: ["box-a"], working: ["box-b"] });
+      expect(incident.evidenceJson.reports24h).toEqual({ through: 1, failed: 2 });
+      expect(alerts()).toHaveLength(1);
+      const [notice] = alerts();
+      expect(notice.subject).toBe("[Neoxify] Partial, not a block verdict: finland-9 fails from some of our inside boxes, not all");
+      expect(notice.text).toContain("from 1 of 2 inside networks (box-a); still moves data from box-b");
+      expect(notice.text).toContain("Server's own traffic, last 24 h: 1.2 GB up and 35.2 GB down; usually 1.5 GB up and 43.9 GB down a day");
+      expect(notice.text).toContain("Customers' apps across the country, last 24 h: 1 customer got data through it, 2 customers did not");
+      expect(notice.text).toContain("This is not a block verdict");
+      // A partial notice offers nothing to answer, least of all Retire.
+      expect(notice.text).not.toMatch(/Retire|Replace/);
+      expect(notice.text).not.toContain("192.0.2.");
+      expect(notice.text).not.toMatch(/ok-|bad-/);
+      void MB;
+      // Not again while open, the reading unchanged.
+      world.inside = emptyRows(T0 + 30 * MIN, T0 - 2 * HOUR - 10 * MIN);
+      await service.runCycle(new Date(T0 + 30 * MIN));
+      expect(alerts()).toHaveLength(1);
+    });
+
+    it("pages a block once the server's own traffic collapses beside it, and does not send the notice again", async () => {
+      const { service, world, alerts } = build("notify", {
+        nodes,
+        inside: emptyRows(T0, T0 - 2 * HOUR - 10 * MIN),
+        checks: reachableChecks("n1", T0),
+        usage: usageOf(T0, 1500, 1200),
+      });
+      await service.runCycle(new Date(T0));
+      expect(alerts()).toHaveLength(1);
+      const later = T0 + 12 * HOUR;
+      world.inside = emptyRows(later, T0 - 2 * HOUR - 10 * MIN);
+      world.checks = reachableChecks("n1", later);
+      world.usage = usageOf(later, 1500, 9);
+      await service.runCycle(new Date(later));
+      expect(world.incidents[0].evidenceJson.current).toBe("LIKELY_BLOCKED");
+      expect(world.incidents[0].firedFamilies).toEqual(["inside", "bytes"]);
+      expect(alerts()).toHaveLength(2);
+      expect(alerts()[1].subject).toBe("[Neoxify] finland-9 is likely blocked from IR");
+      expect(alerts()[1].text).toContain("and the server's own traffic has collapsed");
+      expect(alerts()[1].text).toContain("from 1 of 2 inside networks (box-a)");
+    });
+
+    it("never raises anything on the server's own bytes alone", async () => {
+      const { service, world, alerts } = build("notify", {
+        nodes,
+        inside: emptyRows(T0, T0 + DAY),
+        checks: reachableChecks("n1", T0),
+        usage: usageOf(T0, 1500, 9),
+      });
+      await service.runCycle(new Date(T0));
+      expect(world.incidents).toHaveLength(0);
       expect(alerts()).toHaveLength(0);
     });
+
+    it("keeps a refused connection's page as before: with the outside check failing it is a block page, no early notice", async () => {
+      const { service, alerts } = build("notify", {
+        nodes,
+        inside: insideRows(T0, T0 - 2 * HOUR),
+        checks: unreachableChecks("n1", T0),
+      });
+      await service.runCycle(new Date(T0));
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0].subject).toBe("[Neoxify] finland-9 is likely blocked from IR");
+    });
+
+    it("sends no early notice for a suspicion raised by other signals alone", async () => {
+      const { service, world, alerts } = build("notify", { ...blocked(T0), nodes });
+      await service.runCycle(new Date(T0));
+      expect(world.incidents[0].evidenceJson.current).toBe("SUSPECT");
+      expect(alerts()).toHaveLength(0);
+    });
+
+    it("sends no early notice in digest mode", async () => {
+      const { service, alerts } = build("digest", {
+        nodes,
+        inside: emptyRows(T0, T0 - 2 * HOUR - 10 * MIN),
+        checks: reachableChecks("n1", T0),
+      });
+      await service.runCycle(new Date(T0));
+      expect(alerts()).toHaveLength(0);
+    });
+
+    it("tells once that a box went silent, once that it is back, and not again after a restart", async () => {
+      // box-b's last round is 2.5 h before T0; box-a keeps reporting.
+      const rows = insideRows(T0, T0 + DAY).filter((r) => r.vantage === "box-a" || r.checkedAt.getTime() <= T0 - 150 * MIN);
+      const first = build("notify", { nodes, inside: rows });
+      await first.service.runCycle(new Date(T0));
+      const silent = first.alerts().filter((p) => p.subject.includes("stopped reporting"));
+      expect(silent).toHaveLength(1);
+      expect(silent[0].subject).toBe("[Neoxify] Inside box box-b stopped reporting");
+      expect(silent[0].text).toContain("Inside box box-b has not reported since");
+      expect(silent[0].text).toContain("inside evidence now comes from box-a only");
+      // The digest of the same cycle says it too.
+      expect(first.digests()[0].text).toContain("Inside box box-b has not reported since");
+      expect(first.world.notices!.filter((n) => n.kind === "box_silent")).toHaveLength(1);
+
+      await first.service.runCycle(new Date(T0 + 30 * MIN));
+      // A new service on the same database: a backend restart.
+      const restarted = build("notify", { nodes, inside: rows, notices: first.world.notices });
+      await restarted.service.runCycle(new Date(T0 + 60 * MIN));
+      const said = [...first.alerts(), ...restarted.alerts()].filter((p) => p.subject.includes("stopped reporting"));
+      expect(said).toHaveLength(1);
+
+      // box-b reports again.
+      restarted.world.inside = insideRows(T0 + 90 * MIN, T0 + DAY);
+      await restarted.service.runCycle(new Date(T0 + 90 * MIN));
+      await restarted.service.runCycle(new Date(T0 + 120 * MIN));
+      const back = restarted.alerts().filter((p) => p.subject.includes("reports again"));
+      expect(back).toHaveLength(1);
+      expect(back[0].subject).toBe("[Neoxify] Inside box box-b reports again");
+    });
+
+    /** Both boxes report healthily; box-b's rows only at or before `until`
+     * and from `from` on. */
+    const flapRows = (now: number, until: number, from = Number.POSITIVE_INFINITY) =>
+      insideRows(now, now + DAY).filter((r) => r.vantage === "box-a" || r.checkedAt.getTime() <= until || r.checkedAt.getTime() >= from);
+    const said = (pages: { subject: string }[], what: string) => pages.filter((p) => p.subject.includes(what)).length;
+
+    it("does not flap: back only after steady rounds, and no new silence within hours of a back", async () => {
+      const { service, world, alerts } = build("notify", { nodes, inside: flapRows(T0, T0 - 150 * MIN) });
+      await service.runCycle(new Date(T0));
+      expect(said(alerts(), "stopped reporting")).toBe(1);
+      // One round comes through: not yet back.
+      world.inside = [
+        ...flapRows(T0 + 30 * MIN, T0 - 150 * MIN),
+        { nodeId: "n1", vantage: "box-b", connectMs: 90, checkedAt: new Date(T0 + 25 * MIN) },
+        { nodeId: "n2", vantage: "box-b", connectMs: 85, checkedAt: new Date(T0 + 25 * MIN) },
+      ];
+      await service.runCycle(new Date(T0 + 30 * MIN));
+      expect(said(alerts(), "reports again")).toBe(0);
+      // Steady again.
+      world.inside = insideRows(T0 + 3 * HOUR, T0 + 4 * DAY);
+      await service.runCycle(new Date(T0 + 3 * HOUR));
+      expect(said(alerts(), "reports again")).toBe(1);
+      // Silent again within 12 h of the back: the digest's, not a message.
+      world.inside = flapRows(T0 + 6 * HOUR, T0 + 3 * HOUR - 5 * MIN);
+      await service.runCycle(new Date(T0 + 6 * HOUR));
+      expect(said(alerts(), "stopped reporting")).toBe(1);
+      // Still silent once those hours are over: told.
+      world.inside = flapRows(T0 + 16 * HOUR, T0 + 3 * HOUR - 5 * MIN);
+      await service.runCycle(new Date(T0 + 16 * HOUR));
+      expect(said(alerts(), "stopped reporting")).toBe(2);
+    });
+
+    it("tells a later silence even after an earlier one never got through", async () => {
+      const { service, world, alerts, setDelivered } = build("notify", { nodes, inside: flapRows(T0, T0 - 150 * MIN) });
+      setDelivered(false);
+      for (let k = 0; k < 4; k += 1) {
+        world.inside = flapRows(T0 + k * HOUR, T0 - 150 * MIN);
+        await service.runCycle(new Date(T0 + k * HOUR));
+      }
+      expect(said(alerts(), "stopped reporting")).toBe(3);
+      setDelivered(true);
+      // Back for a while (never told back: its silence was never told).
+      world.inside = insideRows(T0 + 5 * HOUR, T0 + 4 * DAY);
+      await service.runCycle(new Date(T0 + 5 * HOUR));
+      expect(said(alerts(), "reports again")).toBe(0);
+      // A new silence, with a new last round: told.
+      world.inside = flapRows(T0 + 8 * HOUR, T0 + 5 * HOUR - 5 * MIN);
+      await service.runCycle(new Date(T0 + 8 * HOUR));
+      expect(said(alerts(), "stopped reporting")).toBe(4);
+    });
+
+    it("stops listing a box silent for good after a week, and says until when", async () => {
+      const { service, world, digests } = build("notify", { nodes, inside: flapRows(T0, T0 - 150 * MIN) });
+      await service.runCycle(new Date(T0));
+      expect(digests()[0].text).toContain("listed here until 2026-10-26");
+      // Gone for good: no rows from either box any more.
+      world.inside = [];
+      await service.runCycle(new Date(T0 + 3 * DAY));
+      expect(digests()).toHaveLength(2);
+      expect(digests()[1].text).toContain("Inside box box-b has not reported since");
+      await service.runCycle(new Date(T0 + 8 * DAY));
+      expect(digests()).toHaveLength(2);
+    });
+
+    it("never pages a block on a byte collapse that comes days after one box lost the server", async () => {
+      const lostFrom = T0 - 2 * HOUR - 10 * MIN;
+      const { service, world, alerts } = build("notify", {
+        nodes,
+        inside: emptyRows(T0, lostFrom),
+        checks: reachableChecks("n1", T0),
+        usage: usageOf(T0, 1500, 1200),
+      });
+      await service.runCycle(new Date(T0));
+      expect(world.incidents[0].evidenceJson.current).toBe("SUSPECT");
+      // Three days on, a quiet day. box-a's rounds from before its loss have
+      // left the rows read; the incident's record still says it was a mover.
+      const later = T0 + 3 * DAY;
+      world.inside = emptyRows(later, lostFrom);
+      world.checks = reachableChecks("n1", later);
+      world.usage = usageOf(later, 1500, 9);
+      await service.runCycle(new Date(later));
+      const incident = world.incidents[0];
+      expect(incident.status).toBe("OPEN");
+      expect(incident.evidenceJson.current).toBe("SUSPECT");
+      expect(incident.evidenceJson.families.find((x: Row) => x.family === "inside").firing).toBe(true);
+      expect(incident.firedFamilies).toEqual(["inside"]);
+      expect(alerts().filter((p) => p.subject.includes("likely blocked"))).toHaveLength(0);
+    });
+
+    it("closes a one-box data loss after a day in which the server's own traffic stayed up", async () => {
+      const lostFrom = T0 - 2 * HOUR - 10 * MIN;
+      const { service, world } = build("notify", {
+        nodes,
+        inside: emptyRows(T0, lostFrom),
+        checks: reachableChecks("n1", T0),
+        usage: usageOf(T0, 1500, 1200),
+      });
+      await service.runCycle(new Date(T0));
+      expect(world.incidents[0].status).toBe("OPEN");
+      // Under a day since the loss began (T0 - 2 h 10 min): held open.
+      for (const later of [T0 + 12 * HOUR, T0 + 21 * HOUR]) {
+        world.inside = emptyRows(later, lostFrom);
+        world.checks = reachableChecks("n1", later);
+        world.usage = usageOf(later, 1500, 1200);
+        await service.runCycle(new Date(later));
+      }
+      expect(world.incidents[0].status).toBe("OPEN");
+      for (const later of [T0 + 22 * HOUR, T0 + 22.5 * HOUR]) {
+        world.inside = emptyRows(later, lostFrom);
+        world.checks = reachableChecks("n1", later);
+        world.usage = usageOf(later, 1500, 1200);
+        await service.runCycle(new Date(later));
+      }
+      const incident = world.incidents[0];
+      expect(incident.status).toBe("CLEARED");
+      expect(incident.evidenceJson.families.find((x: Row) => x.family === "inside").summary).toContain(
+        "read as that one network's change, not a block",
+      );
+    });
+  });
+
+  it("names the outage in the cycle's summary, for the log line", async () => {
+    const { service } = build("record", {
+      ...blocked(T0),
+      nodes: [{ id: "n1", name: "germany-1", status: "OFFLINE", publicIp: "192.0.2.10", realityDestReachable: true }],
+    });
+    const [summary] = await service.runCycle(new Date(T0));
+    expect(summary).toMatchObject({ outageKind: "agent offline", verdict: null });
+    const dest = build("record", {
+      ...blocked(T0),
+      nodes: [{ id: "n1", name: "germany-1", status: "ONLINE", publicIp: "192.0.2.10", realityDestReachable: false }],
+    });
+    expect((await dest.service.runCycle(new Date(T0)))[0].outageKind).toBe("camouflage destination unreachable");
+    const port = build("record", blocked(T0));
+    port.service.tcpReachable = jest.fn(async () => false);
+    expect((await port.service.runCycle(new Date(T0)))[0].outageKind).toBe("port unreachable from the panel host");
+  });
+
+  it("records whether each digest reached anybody, and why not", async () => {
+    const { service, world, setDelivered } = build("notify", blocked(T0));
+    setDelivered(false);
+    await service.runCycle(new Date(T0));
+    expect(world.notices).toEqual([
+      expect.objectContaining({ kind: "digest", delivered: false, error: "could not mail o@x.test" }),
+    ]);
   });
 
   it("does not read the app reports before the network table has loaded, and so does not page a restart", async () => {
@@ -1008,6 +1365,18 @@ describe("trafficSince", () => {
     const result = trafficSince(counts, T0, 0, DEFAULT_TUNING, 6);
     expect(result.baseline.slice(0, 2)).toEqual([10, 10]);
     expect(result.beforeIncident).toBe(true);
+  });
+});
+
+describe("byteWindowEnds", () => {
+  it("compares the last day with the days before it, or, during an incident, with the days ending when it opened", () => {
+    expect(byteWindowEnds(T0, null).slice(0, 3)).toEqual([T0, T0 - DAY, T0 - 2 * DAY]);
+    // uk-1: opened five hours before; the day just before it opened counts,
+    // and the days stay put as the incident goes on.
+    const opened = T0 - 5 * HOUR;
+    expect(byteWindowEnds(T0, opened).slice(0, 3)).toEqual([T0, opened, opened - DAY]);
+    expect(byteWindowEnds(T0 + 30 * HOUR, opened).slice(1)).toEqual(byteWindowEnds(T0, opened).slice(1));
+    expect(byteWindowEnds(T0, opened)).toHaveLength(1 + 7);
   });
 });
 
