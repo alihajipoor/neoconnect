@@ -132,7 +132,9 @@ export class SweepsProcessor extends WorkerHost {
         const flagged = results.filter((r) => r.verdict || r.outage);
         if (flagged.length) {
           this.logger.warn(
-            `block watch: ${flagged.map((r) => `${r.nodeName}=${r.verdict ?? "outage"}[${r.firing.join("+")}]`).join(", ")}`,
+            // Which outage, said: on 2026-11-17 a bare "outage" could not be traced
+            // back to the agent, the camouflage check or the port check.
+            `block watch: ${flagged.map((r) => `${r.nodeName}=${r.verdict ?? `outage(${r.outageKind ?? "unknown"})`}[${r.firing.join("+")}]`).join(", ")}`,
           );
         }
         break;

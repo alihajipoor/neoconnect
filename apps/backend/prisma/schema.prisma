@@ -2221,6 +2221,13 @@ model BlockIncident {
   recoveryNotifiedAt DateTime?
   digestedAt         DateTime?
 
+  /// The one early notice for an incident our boxes inside the country
+  /// raised while it is still only a suspicion (notify mode): set once it
+  /// reached somebody, so it is never sent again for this incident.
+  insideNoticedAt      DateTime?
+  insideNoticeError    String?
+  insideNoticeAttempts Int       @default(0)
+
   /// The owner's answers. "Keep" stops pages and reminders for this
   /// incident; a snooze holds them until the time given.
   keptAt       DateTime?
@@ -2233,6 +2240,28 @@ model BlockIncident {
   @@index([nodeId, status])
   @@index([status, openedAt])
   @@map("block_incidents")
+}
+
+/// What the block watch told the owner outside an incident: an inside
+/// box that stopped reporting or came back, and each daily digest, with
+/// whether it reached somebody. Kept in the database so a backend restart
+/// does not tell the same thing twice, and so a later question ("was the
+/// digest delivered?") can be answered from the record.
+model BlockWatchNotice {
+  id          String    @id @default(uuid())
+  /// "box_silent", "box_back" or "digest".
+  kind        String
+  /// The inside box, for box_silent and box_back.
+  vantage     String?
+  /// The box's last round when it was told silent.
+  lastRoundAt DateTime?
+  delivered   Boolean
+  error       String?
+  createdAt   DateTime  @default(now())
+
+  @@index([kind, createdAt])
+  @@index([vantage, createdAt])
+  @@map("block_watch_notices")
 }
 
 /// A data check against one node from a box inside the watched country

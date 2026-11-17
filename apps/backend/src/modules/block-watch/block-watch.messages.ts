@@ -1,6 +1,6 @@
 import type { Page } from "../alerting/pager.service";
 import { opsTime } from "../email/templates";
-import type { BlockType, FamilyResult } from "./block-signals";
+import { formatBytes, type BlockType, type FamilyResult } from "./block-signals";
 
 /** What a page says. English: it goes to the owner. Never an address --
  * the webhook may be a chat channel -- only the server's name. */
@@ -26,6 +26,9 @@ export interface StoredEvidence {
    * so on its way to clearing), or the incident is held for want of
    * evidence either way. Null while anything fires. */
   clearing?: string | null;
+  /** Over the last day, customers in the country whose apps dialled the
+   * server: how many got data through it, how many did not. Counts only. */
+  reports24h?: { through: number; failed: number };
 }
 
 const TYPE_WORDS: Record<BlockType, string> = {
@@ -44,6 +47,9 @@ const WHAT_TO_DO =
   "Check the server yourself, then answer under Block watch: Replace (once it has its new address), Retire, " +
   "Keep (it is fine, stop reminding me) or Snooze.";
 const UNCHANGED = "Nothing has been changed automatically.";
+/** An early notice offers no Replace or Retire: it is one signal, and the
+ * server may well be carrying its customers (netherlands-1, 2026-11-14). */
+const NOTICE_TO_DO = "Check the server from inside if you can; there is nothing to answer yet. Nothing has been changed automatically.";
 const PANEL = { path: "/block-watch", label: "Open Block watch" };
 
 function hoursSince(from: Date, now: Date): number {
@@ -61,9 +67,13 @@ function evidenceLines(e: StoredEvidence): string {
 /** Said in so many words when our own boxes inside the country raised
  * it: that is the check the owner can repeat himself. Never an address. */
 function insideNote(e: StoredEvidence): string {
-  return e.families.some((f) => f.family === "inside" && f.firing)
-    ? "Raised by our own boxes inside the country: they could not open a connection to this server, while in the same checks they still reached the other servers."
-    : "";
+  const inside = e.families.find((f) => f.family === "inside" && f.firing);
+  if (!inside) return "";
+  const what =
+    inside.lostTcp === false
+      ? "they connect to this server but no data moves, while in the same checks they still moved data to other servers"
+      : "they could not open a connection to this server, while in the same checks they still reached the other servers";
+  return `Raised by our own boxes inside the country: ${what}${inside.scope ? ` (${inside.scope.text})` : ""}.`;
 }
 
 /** What the latest evaluation reads, for a message about an incident
@@ -114,6 +124,137 @@ export function likelyBlockedPage(i: IncidentView, now: Date): Page {
       body: `Evidence:\n${evidenceLines(i.evidence)}`,
       panel: PANEL,
       note: UNCHANGED,
+    },
+  };
+}
+
+/** The server's own traffic over the last day against its usual day, in
+ * words, from the stored bytes reading. */
+function trafficLine(e: StoredEvidence): string {
+  const b = e.families.find((f) => f.family === "bytes")?.bytes;
+  if (!b) return "Server's own traffic: not read";
+  const usual =
+    b.usualUp === null
+      ? "no earlier day to compare with"
+      : `usually ${formatBytes(b.usualUp)} up and ${formatBytes(b.usualDown ?? 0)} down a day`;
+  return `Server's own traffic, last 24 h: ${formatBytes(b.up)} up and ${formatBytes(b.down)} down; ${usual}` + (b.collapsed ? " -- collapsed" : "");
+}
+
+/** What customers' apps reported on the server over the last day, in words. */
+function reportsLine(e: StoredEvidence): string {
+  const r = e.reports24h;
+  if (!r) return "Customers' apps, last 24 h: not read";
+  if (!r.through && !r.failed) return "Customers' apps, last 24 h: nobody in the country dialled it";
+  const n = (k: number) => `${k} customer${k === 1 ? "" : "s"}`;
+  return `Customers' apps across the country, last 24 h: ${n(r.through)} got data through it, ${n(r.failed)} did not`;
+}
+
+/** The one early notice for an incident our boxes inside the country
+ * raised while it is still a suspicion. Worded so it cannot be taken for
+ * a block page: it says "not a block verdict" in the subject, and says
+ * "partial" when only some boxes lost the server. The server's own traffic
+ * and the apps' reports go beside it, because one box alone cannot tell a
+ * block from its own network's change (netherlands-1 lost data from one
+ * box on 2026-11-14 while its customers kept using it). Sent once per
+ * incident; a block page follows if it becomes likely. */
+export function insideNoticePage(i: IncidentView, now: Date): Page {
+  const where = i.evidence.country.toUpperCase();
+  const inside = i.evidence.families.find((f) => f.family === "inside");
+  const scope = inside?.scope;
+  const partial = scope?.partial === true;
+  const label = partial ? "Partial" : "Early warning";
+  const headline =
+    scope?.kind === "partial"
+      ? `${i.nodeName} fails from some of our inside boxes, not all`
+      : scope?.kind === "some"
+        ? `${i.nodeName} fails from ${scope.lost.length} of our ${scope.reporting.length} inside boxes; the others cannot tell`
+        : scope?.kind === "only"
+          ? `${i.nodeName} fails from the only inside box reporting`
+          : scope?.kind === "all"
+            ? `${i.nodeName} fails from every inside box reporting`
+            : `${i.nodeName} fails from our inside boxes`;
+  const scopeText = scope?.text ?? "from our inside boxes";
+  const lines = [`- ${inside?.summary ?? "Our boxes inside the country lost it"}`, `- ${trafficLine(i.evidence)}`, `- ${reportsLine(i.evidence)}`];
+  const verdictNote =
+    "This is not a block verdict and nothing is paged as one: it is one signal so far. If a second signal agrees " +
+    "(the server's own traffic collapsing, the outside check failing), a block page follows. This notice is not sent again for this incident.";
+  return {
+    subject: `[Neoxify] ${label}, not a block verdict: ${headline}`,
+    webhook: `[inside] ${label.toLowerCase()}, not a block verdict -- ${i.nodeName} ${scopeText}. ${trafficLine(i.evidence)}. ${reportsLine(i.evidence)}.`,
+    context: { event: "block_inside_notice", node: i.nodeName },
+    text:
+      `${label}: ${i.nodeName} stopped working ${scopeText}, seen from ${where}, first seen ${i.openedAt.toISOString()} ` +
+      `(about ${hoursSince(i.openedAt, now)} h ago).\n\n${lines.join("\n")}\n\n${verdictNote}\n\n${NOTICE_TO_DO}`,
+    mail: {
+      severity: "warning",
+      chip: label,
+      facts: [
+        { label: "What", value: `${label}, not a block verdict: ${scopeText}` },
+        { label: "Where", value: `${i.nodeName}, seen from ${where}` },
+        { label: "Since", value: `${opsTime(i.openedAt)} (about ${hoursSince(i.openedAt, now)} h ago)` },
+        { label: "Traffic", value: trafficLine(i.evidence) },
+        { label: "App reports", value: reportsLine(i.evidence) },
+        { label: "How sure", value: verdictNote },
+        { label: "What to do", value: NOTICE_TO_DO },
+      ],
+      body: lines.join("\n"),
+      panel: PANEL,
+      note: UNCHANGED,
+    },
+  };
+}
+
+/** Inside boxes that stopped reporting: told once, when first seen. */
+export function boxesSilentPage(boxes: { vantage: string; lastAt: Date }[], reporting: string[], now: Date): Page {
+  const names = boxes.map((b) => b.vantage);
+  const from = reporting.length ? `inside evidence now comes from ${reporting.join(" and ")} only` : "no inside box is reporting now";
+  const each = boxes.map((b) => `inside box ${b.vantage} has not reported since ${b.lastAt.toISOString()}`).join("; ");
+  return {
+    subject: `[Neoxify] Inside box ${names.join(" and ")} stopped reporting`,
+    webhook: `[inside] ${each}; ${from}`,
+    context: { event: "inside_box_silent", vantages: names },
+    text:
+      `${each[0].toUpperCase()}${each.slice(1)}; ${from}.\n\n` +
+      "Until it reports again, the block watch reads servers from the other boxes alone, and says so in each server's evidence. " +
+      `This is told once; another message follows when it reports again. (${now.toISOString()})`,
+    mail: {
+      severity: "warning",
+      chip: "Inside box silent",
+      facts: [
+        { label: "What", value: `${each[0].toUpperCase()}${each.slice(1)}` },
+        { label: "Evidence now", value: `${from[0].toUpperCase()}${from.slice(1)}` },
+        { label: "As of", value: opsTime(now) },
+        { label: "What to do", value: "Check the box and the panel host's collector. Nothing about any server has changed." },
+      ],
+      body: "",
+      panel: PANEL,
+      note: UNCHANGED,
+    },
+  };
+}
+
+/** Inside boxes that report again after a silence that was told. */
+export function boxesBackPage(boxes: { vantage: string; lastAt: Date | null }[], reporting: string[], now: Date): Page {
+  const names = boxes.map((b) => b.vantage);
+  const each = boxes
+    .map((b) => `inside box ${b.vantage} reports again${b.lastAt ? ` (silent since ${b.lastAt.toISOString()})` : ""}`)
+    .join("; ");
+  return {
+    subject: `[Neoxify] Inside box ${names.join(" and ")} reports again`,
+    webhook: `[inside] ${each}; inside evidence comes from ${reporting.join(" and ")}`,
+    context: { event: "inside_box_back", vantages: names },
+    text: `${each[0].toUpperCase()}${each.slice(1)}; inside evidence comes from ${reporting.join(" and ")} again. (${now.toISOString()})`,
+    mail: {
+      severity: "info",
+      chip: "Resolved",
+      facts: [
+        { label: "What", value: `${each[0].toUpperCase()}${each.slice(1)}` },
+        { label: "Evidence now", value: `From ${reporting.join(" and ")}` },
+        { label: "As of", value: opsTime(now) },
+        { label: "What to do", value: "Nothing." },
+      ],
+      body: "",
+      panel: PANEL,
     },
   };
 }
@@ -289,6 +430,8 @@ export interface DigestParts {
   /** Nodes that failed the data check from a box inside the country on at
    * least half of the last day's checks (inside-probe.ts). */
   inside?: string[];
+  /** Inside boxes that stopped reporting, one line each. */
+  silentBoxes?: string[];
   calibrating: boolean;
   country: string;
 }
@@ -325,6 +468,9 @@ export function digestPage(parts: DigestParts, now: Date): Page {
       "From inside the country, the last 24 hours (256 KB down and up through each server's address):\n\n" +
         parts.inside.join("\n"),
     );
+  }
+  if (parts.silentBoxes?.length) {
+    sections.push(`Inside boxes not reporting:\n\n${parts.silentBoxes.join("\n")}`);
   }
   if (heldProbeAlerts.length) {
     sections.push(

@@ -17,18 +17,23 @@ import { NetworkIdentityService } from "../network-identity/network-identity.ser
 import {
   assess,
   baselineDays,
+  bytesFamily,
+  bytesMayCount,
   clientFamily,
   DAY,
   DEFAULT_TUNING,
   FAMILIES,
+  INSIDE_SILENT_AFTER_MS,
   insideFamily,
   parseTuning,
   probeFamily,
   recoveredFamilies,
+  settleOneNetwork,
   trafficFamily,
   unknownClientFamily,
   type Assessment,
   type BlockTuning,
+  type ByteTotals,
   type Family,
   type FamilyResult,
   type InsideCheck,
@@ -38,15 +43,18 @@ import {
 } from "./block-signals";
 import { HELD_FOR_BLOCK_WATCH, parseBlockWatchMode, type BlockWatchMode } from "./block-watch.mode";
 import {
+  boxesBackPage,
+  boxesSilentPage,
   digestPage,
   groupedPage,
+  insideNoticePage,
   likelyBlockedPage,
   recoveriesPage,
   remindersPage,
   type IncidentView,
   type StoredEvidence,
 } from "./block-watch.messages";
-import { upstreamGroups } from "../data-retention/usage-reads";
+import { reachesRollUp, upstreamGroups } from "../data-retention/usage-reads";
 
 export { parseBlockWatchMode, type BlockWatchMode } from "./block-watch.mode";
 
@@ -79,11 +87,52 @@ const NOT_RETIRED = { node: { status: { not: NodeStatus.DISABLED } } } as const;
 
 export type BlockAction = "replaced" | "retired" | "keep" | "snooze";
 
+export type OutageKind = "agent offline" | "camouflage destination unreachable" | "port unreachable from the panel host";
+
 export interface CycleSummary {
   nodeName: string;
   verdict: BlockVerdict | null;
   outage: string | null;
+  /** Which outage, in a few words, for the hourly log line. */
+  outageKind: OutageKind | null;
   firing: Family[];
+}
+
+/** An inside box with rows in the last day but none in this long is
+ * silent: four missed rounds, never a single late one. */
+export const BOX_SILENT_AFTER_MS = INSIDE_SILENT_AFTER_MS;
+/** A box told silent is told back only once it has reported this many
+ * rounds within BOX_SILENT_AFTER_MS: one round from a flapping link is not
+ * a box that is back. */
+export const BOX_BACK_ROUNDS = 3;
+/** After a box was told back, it is not told silent again for this long;
+ * the digest carries a silence in between. A box on a flapping link would
+ * otherwise send a silent and a back message every few hours. */
+export const BOX_QUIET_AFTER_BACK_MS = 12 * 3_600_000;
+/** A box told silent is listed in the digest for this long at most, then
+ * dropped (its line says until when), so a box retired for good does not
+ * send a digest every day forever. */
+export const BOX_FORGET_AFTER_MS = 7 * 86_400_000;
+
+/** An inside box that stopped reporting, as the digest and messages say it. */
+export interface SilentBox {
+  vantage: string;
+  lastAt: Date;
+}
+
+interface BoxesNow {
+  silent: SilentBox[];
+  reporting: string[];
+  /** Reporting, and steadily: BOX_BACK_ROUNDS rounds lately. */
+  steady: string[];
+}
+
+interface BoxNoticeRow {
+  kind: string;
+  vantage: string | null;
+  lastRoundAt: Date | null;
+  delivered: boolean;
+  createdAt: Date;
 }
 
 /** Whether a TCP connection to host:port opens from here -- the server
@@ -122,7 +171,8 @@ const FAMILY_WORDS: Record<Family, string> = {
   client: "networks that had failed carry again in the app reports",
   traffic: "traffic is back near usual",
   probe: "the probes connect again",
-  inside: "our boxes inside the country connect to it again",
+  inside: "our boxes inside the country move data to it again",
+  bytes: "the server's own traffic is back near usual",
 };
 
 /**
@@ -255,7 +305,15 @@ export class BlockWatchService {
       this.loadInside(t, watched, tuning),
     ]);
     const traffic = await this.loadTraffic(t, watched, tuning);
-    const carried = await this.loadCarriedBefore(t, watched, dials, tuning);
+    const bytes = await this.loadBytes(t, watched, tuning);
+    // The dials are read over a day at least, for the early notice's
+    // "what customers' apps reported"; the client family keeps its own
+    // window, and so does the "carried before" it asks about.
+    const recentStart = t - tuning.recentWindow;
+    const recentDials = new Map(
+      [...dials].map(([nodeId, list]) => [nodeId, list.filter((d) => d.arrived >= recentStart)] as const),
+    );
+    const carried = await this.loadCarriedBefore(t, watched, recentDials, tuning);
 
     const summaries: CycleSummary[] = [];
     for (const w of watched) {
@@ -273,14 +331,28 @@ export class BlockWatchService {
           tuning,
         );
         const probe = probeFamily(checks.get(node.id) ?? [], t, w.floor, tuning);
-        const insideResult = insideFamily(inside, node.id, t, w.floor, tuning);
-        const results = [client, trafficResult, probe, insideResult];
+        const previousSince = w.open ? sinceOf(w.open.evidenceJson) : {};
+        const knownMovers =
+          evidenceOf(w.open)?.families?.find((f) => f.family === "inside" && f.firing)?.scope?.lost ?? [];
+        const rawInside = insideFamily(inside, node.id, t, w.floor, tuning, knownMovers);
+        const byteTotals = bytesSince(bytes.get(node.id), t, w.floor, tuning, w.anchor ?? undefined);
+        const insideSince = previousSince.inside ?? rawInside.onset ?? t;
+        const insideResult = settleOneNetwork(rawInside, bytesFamily(byteTotals, false, tuning), insideSince, t);
+        const bytesResult = bytesFamily(
+          byteTotals,
+          bytesMayCount(insideResult, insideSince, previousSince.bytes, t),
+          tuning,
+        );
+        const results = [client, trafficResult, probe, insideResult, bytesResult];
 
         let outage: string | null = null;
+        let outageKind: OutageKind | null = null;
         if (node.status !== NodeStatus.ONLINE) {
           outage = "its agent is offline (no heartbeat) -- an outage, not a block";
+          outageKind = "agent offline";
         } else if (node.realityDestReachable === false) {
           outage = "it reports its camouflage destination unreachable -- a fault on the server, not a block";
+          outageKind = "camouflage destination unreachable";
         } else if (
           results.some((f) => f.firing) &&
           !(await this.tcpReachable(node.publicIp, this.port, CONTROL_TIMEOUT_MS))
@@ -289,6 +361,7 @@ export class BlockWatchService {
           // server or engine -- a crashed engine on a heartbeating agent
           // fails every report and empties the traffic just as a block does.
           outage = "its port does not answer from abroad either -- the server or its engine is down, not blocked";
+          outageKind = "port unreachable from the panel host";
         }
 
         const assessment = assess({
@@ -296,8 +369,9 @@ export class BlockWatchService {
           traffic: trafficResult,
           probe,
           inside: insideResult,
+          bytes: bytesResult,
           outage,
-          previousSince: w.open ? sinceOf(w.open.evidenceJson) : {},
+          previousSince,
           now: t,
           tuning,
         });
@@ -314,12 +388,14 @@ export class BlockWatchService {
           thinResidential: assessment.thinResidential,
           country: this.country,
           clearing: null,
+          reports24h: reportsOverDay(dials.get(node.id) ?? [], t),
         };
         await this.reconcile(w, assessment, results, evidence, now, tuning);
         summaries.push({
           nodeName: node.name,
           verdict: assessment.verdict,
           outage: assessment.outage,
+          outageKind: assessment.outage ? outageKind : null,
           firing: results.filter((f) => f.firing).map((f) => f.family),
         });
       } catch (err) {
@@ -328,8 +404,12 @@ export class BlockWatchService {
       }
     }
 
-    if (mode === "notify") await this.page(now);
-    if (mode === "notify" || mode === "digest") await this.digest(mode, now);
+    const boxes = await this.silentBoxes(t);
+    if (mode === "notify") {
+      await this.page(now);
+      await this.tellBoxes(boxes, now);
+    }
+    if (mode === "notify" || mode === "digest") await this.digest(mode, now, boxes);
     this.lastCycleAt = now;
     return summaries;
   }
@@ -471,6 +551,42 @@ export class BlockWatchService {
       }
     }
 
+    // The early notice: an incident our inside boxes raised that is still
+    // only a suspicion. Once per incident, and never for one whose block
+    // page went or is due (that page says more).
+    const notices = (
+      await this.prisma.blockIncident.findMany({
+        where: {
+          status: BlockIncidentStatus.OPEN,
+          country: this.country,
+          pagedAt: null,
+          insideNoticedAt: null,
+          insideNoticeAttempts: { lt: MAX_PAGE_ATTEMPTS },
+          ...NOT_RETIRED,
+        },
+        include,
+        orderBy: { openedAt: "asc" },
+      })
+    ).filter((i) => {
+      const e = evidenceOf(i);
+      return !quiet(i) && e?.current === BlockVerdict.SUSPECT && e.families.some((f) => f.family === "inside" && f.firing);
+    });
+    // From the budget above what is kept for new block pages: several
+    // notices in one hour must not hold back a block page found later in it.
+    for (const incident of notices) {
+      if (!this.takeSpare(t)) break;
+      const delivery = await this.pager.page(insideNoticePage(view(incident), now));
+      if (delivery.error) this.logger.warn(`Block-watch early notice for ${incident.node.name}: ${delivery.error}`);
+      await this.prisma.blockIncident.update({
+        where: { id: incident.id },
+        data: {
+          ...(delivery.delivered ? { insideNoticedAt: now } : {}),
+          insideNoticeError: delivery.error ?? (delivery.delivered ? null : "it reached nobody"),
+          insideNoticeAttempts: incident.insideNoticeAttempts + 1,
+        },
+      });
+    }
+
     const stale = (
       await this.prisma.blockIncident.findMany({
         where: {
@@ -524,6 +640,120 @@ export class BlockWatchService {
     }
   }
 
+  /** The inside boxes that stopped reporting: rows in the last day but
+   * none in BOX_SILENT_AFTER_MS, and any told silent earlier that has not
+   * reported since (past the day, up to BOX_FORGET_AFTER_MS). The boxes
+   * that are reporting, and of those the ones reporting steadily
+   * (BOX_BACK_ROUNDS rounds within BOX_SILENT_AFTER_MS). */
+  private async silentBoxes(t: number): Promise<BoxesNow> {
+    const latest = await this.prisma.insideProbeCheck.groupBy({
+      by: ["vantage"],
+      where: { checkedAt: { gte: new Date(t - DAY) } },
+      _max: { checkedAt: true },
+    });
+    const recent = await this.prisma.insideProbeCheck.findMany({
+      where: { checkedAt: { gte: new Date(t - BOX_SILENT_AFTER_MS) } },
+      select: { vantage: true, checkedAt: true },
+    });
+    const rounds = new Map<string, Set<number>>();
+    for (const r of recent) {
+      if (r.checkedAt.getTime() > t) continue;
+      rounds.set(r.vantage, (rounds.get(r.vantage) ?? new Set<number>()).add(r.checkedAt.getTime()));
+    }
+    const silent: SilentBox[] = [];
+    const reporting: string[] = [];
+    for (const row of latest) {
+      const at = row._max.checkedAt;
+      if (!at) continue;
+      if (t - at.getTime() > BOX_SILENT_AFTER_MS) silent.push({ vantage: row.vantage, lastAt: at });
+      else reporting.push(row.vantage);
+    }
+    for (const [vantage, state] of await this.boxNotices()) {
+      if (state.told?.kind !== "box_silent" || latest.some((r) => r.vantage === vantage)) continue;
+      const lastAt = state.told.lastRoundAt ?? state.told.createdAt;
+      if (t - lastAt.getTime() > BOX_FORGET_AFTER_MS) continue;
+      silent.push({ vantage, lastAt });
+    }
+    silent.sort((a, b) => a.vantage.localeCompare(b.vantage));
+    reporting.sort();
+    const steady = reporting.filter((v) => (rounds.get(v)?.size ?? 0) >= BOX_BACK_ROUNDS);
+    return { silent, reporting, steady };
+  }
+
+  /** Per box, the latest silent or back notice that reached somebody, and
+   * the tries since then that did not. */
+  private async boxNotices(): Promise<Map<string, { told: BoxNoticeRow | null; failedRows: BoxNoticeRow[] }>> {
+    const rows: BoxNoticeRow[] = await this.prisma.blockWatchNotice.findMany({
+      where: { kind: { in: ["box_silent", "box_back"] } },
+      orderBy: { createdAt: "desc" },
+      take: 500,
+      select: { kind: true, vantage: true, lastRoundAt: true, delivered: true, createdAt: true },
+    });
+    const out = new Map<string, { told: BoxNoticeRow | null; failedRows: BoxNoticeRow[] }>();
+    for (const row of rows) {
+      if (!row.vantage) continue;
+      const state = out.get(row.vantage) ?? { told: null, failedRows: [] };
+      if (!state.told) {
+        if (row.delivered) state.told = row;
+        else state.failedRows.push(row);
+      }
+      out.set(row.vantage, state);
+    }
+    return out;
+  }
+
+  /** Tells the owner once when an inside box goes silent, and once when
+   * it reports again steadily. What was told is kept in the database, so a
+   * restart does not tell it twice; one that reached nobody is tried again
+   * a few times for that silence, and the digest carries it either way. A
+   * box told back is not told silent again for BOX_QUIET_AFTER_BACK_MS. */
+  private async tellBoxes(boxes: BoxesNow, now: Date): Promise<void> {
+    const t = now.getTime();
+    const told = await this.boxNotices();
+    // Tries that reached nobody count against this silence only (the same
+    // last round), so a channel broken during one silence never mutes the
+    // next one.
+    const tries = (vantage: string, kind: "box_silent" | "box_back", lastAt: Date | null) =>
+      (told.get(vantage)?.failedRows ?? []).filter(
+        (r) => r.kind === kind && (r.lastRoundAt?.getTime() ?? null) === (lastAt?.getTime() ?? null),
+      ).length;
+    const newlySilent = boxes.silent.filter((b) => {
+      const last = told.get(b.vantage)?.told;
+      if (last?.kind === "box_silent") return false;
+      if (last?.kind === "box_back" && t - last.createdAt.getTime() < BOX_QUIET_AFTER_BACK_MS) return false;
+      return tries(b.vantage, "box_silent", b.lastAt) < MAX_PAGE_ATTEMPTS;
+    });
+    const back = boxes.steady
+      .map((vantage) => ({ vantage, last: told.get(vantage)?.told }))
+      .filter(({ vantage, last }) => last?.kind === "box_silent" && tries(vantage, "box_back", last.lastRoundAt) < MAX_PAGE_ATTEMPTS)
+      .map(({ vantage, last }) => ({ vantage, lastAt: last?.lastRoundAt ?? null }));
+    const record = async (kind: "box_silent" | "box_back", list: { vantage: string; lastAt: Date | null }[], delivery: PageDelivery) => {
+      for (const b of list) {
+        await this.prisma.blockWatchNotice.create({
+          data: {
+            kind,
+            vantage: b.vantage,
+            lastRoundAt: b.lastAt,
+            delivered: delivery.delivered,
+            error: delivery.error ?? (delivery.delivered ? null : "it reached nobody"),
+            createdAt: now,
+          },
+        });
+      }
+    };
+    // From the budget above what is kept for new block pages.
+    if (newlySilent.length && this.takeSpare(t)) {
+      const delivery = await this.pager.page(boxesSilentPage(newlySilent, boxes.reporting, now));
+      if (delivery.error) this.logger.warn(`Block-watch silent-box notice: ${delivery.error}`);
+      await record("box_silent", newlySilent, delivery);
+    }
+    if (back.length && this.takeSpare(t)) {
+      const delivery = await this.pager.page(boxesBackPage(back, boxes.reporting, now));
+      if (delivery.error) this.logger.warn(`Block-watch box-back notice: ${delivery.error}`);
+      await record("box_back", back, delivery);
+    }
+  }
+
   /** One page from the budget above what is kept for new likely blocks. */
   private takeSpare(t: number): boolean {
     return this.budget.left(t) > RESERVED_FOR_NEW && this.budget.take(t);
@@ -547,7 +777,7 @@ export class BlockWatchService {
    * mode it carries the suspects (likely blocks were paged), pages that
    * reached nobody, incidents that came back, and reachability alerts held
    * for an open incident; in digest mode, everything open. */
-  private async digest(mode: BlockWatchMode, now: Date): Promise<void> {
+  private async digest(mode: BlockWatchMode, now: Date, boxes: BoxesNow = { silent: [], reporting: [], steady: [] }): Promise<void> {
     const t = now.getTime();
     const stored = (
       await this.prisma.blockIncident.aggregate({ where: { country: this.country }, _max: { digestedAt: true } })
@@ -617,7 +847,8 @@ export class BlockWatchService {
       !undelivered.length &&
       !reopened.length &&
       !heldProbeAlerts.length &&
-      !inside.length
+      !inside.length &&
+      !boxes.silent.length
     )
       return;
 
@@ -630,6 +861,7 @@ export class BlockWatchService {
           reopened: reopened.map(view),
           heldProbeAlerts,
           inside,
+          silentBoxes: boxes.silent.map((b) => silentLine(b, boxes.reporting)),
           calibrating: mode === "digest",
           country: this.country,
         },
@@ -637,6 +869,16 @@ export class BlockWatchService {
       ),
     );
     if (delivery.error) this.logger.warn(`Block-watch digest: ${delivery.error}`);
+    // Whether it reached anybody, kept: on 2026-11-17 nobody could say
+    // whether the previous evening's digest had arrived.
+    await this.prisma.blockWatchNotice.create({
+      data: {
+        kind: "digest",
+        delivered: delivery.delivered,
+        error: delivery.error ?? (delivery.delivered ? null : "it reached nobody"),
+        createdAt: now,
+      },
+    });
     this.lastDigestAt = now;
     await this.prisma.blockIncident.updateMany({
       where: { id: { in: [...allOpen, ...cleared].map((i) => i.id) } },
@@ -746,7 +988,7 @@ export class BlockWatchService {
    * are done in the database (latestDialsSql), so the volume of anyone's
    * reports changes nothing. */
   private async loadDials(now: number, tuning: BlockTuning): Promise<Map<string, NodeDial[]>> {
-    const since = now - tuning.recentWindow;
+    const since = now - Math.max(tuning.recentWindow, DAY);
     const networks = await this.prisma.clientAttempt.groupBy({
       by: ["asn"],
       where: {
@@ -878,6 +1120,52 @@ export class BlockWatchService {
     }));
   }
 
+  /** Each server's own upstream and downstream bytes per 24-hour window
+   * (byteWindowEnds): the last 24 hours (day 0) and the earlier days it is
+   * compared against -- for one with an incident, the days ending when it
+   * opened. One grouped query per distinct window; past the days of detail
+   * kept, the rolled-up hours are added (data-retention). */
+  private async loadBytes(now: number, watched: Watched[], tuning: BlockTuning): Promise<Map<string, DayBytes>> {
+    // Servers by window end, with the index each window has for each.
+    const byEnd = new Map<number, { nodeId: string; day: number }[]>();
+    for (const w of watched) {
+      byteWindowEnds(now, w.anchor, tuning).forEach((end, day) =>
+        byEnd.set(end, [...(byEnd.get(end) ?? []), { nodeId: w.node.id, day }]),
+      );
+    }
+    const out = new Map<string, DayBytes>();
+    for (const [end, wanted] of byEnd) {
+      const nodeIds = [...new Set(wanted.map((x) => x.nodeId))];
+      const add = (nodeId: string, up: bigint | number | null, down: bigint | number | null) => {
+        for (const { day } of wanted.filter((x) => x.nodeId === nodeId)) {
+          const totals = out.get(nodeId) ?? new Map<number, { up: number; down: number }>();
+          const held = totals.get(day) ?? { up: 0, down: 0 };
+          totals.set(day, { up: held.up + Number(up ?? 0), down: held.down + Number(down ?? 0) });
+          out.set(nodeId, totals);
+        }
+      };
+      const start = end - DAY;
+      const raw = await this.prisma.usageRecord.groupBy({
+        by: ["nodeId"],
+        where: { nodeId: { in: nodeIds }, reportedAt: { gte: new Date(start), lt: new Date(end) } },
+        _sum: { bytesUp: true, bytesDown: true },
+      });
+      for (const g of raw) add(g.nodeId, g._sum.bytesUp, g._sum.bytesDown);
+      if (reachesRollUp(start, now)) {
+        const hourly = await this.prisma.usageHourly.groupBy({
+          by: ["nodeId"],
+          where: {
+            nodeId: { in: nodeIds },
+            hourStart: { gte: new Date(start - 30 * 60_000), lt: new Date(end - 30 * 60_000) },
+          },
+          _sum: { bytesUp: true, bytesDown: true },
+        });
+        for (const g of hourly) add(g.nodeId, g._sum.bytesUp, g._sum.bytesDown);
+      }
+    }
+    return out;
+  }
+
   /** People who sent at least a little upstream through each server, in
    * the last window (day 0) and in the same window on the earlier days
    * each server is compared against -- for one with an incident, the days
@@ -919,6 +1207,65 @@ export class BlockWatchService {
     }
     return byNode;
   }
+}
+
+/** The server's own upstream and downstream bytes over a day, by the
+ * window's index in byteWindowEnds: 0 is the last 24 hours. */
+export type DayBytes = Map<number, { up: number; down: number }>;
+
+/** Where each 24-hour byte window ends: now (the last day), then the
+ * earlier days compared against. Without an incident, the days before
+ * this one. With one, the days ending when it opened, fixed there: the
+ * comparison neither slides as the incident goes on (a sliding one flipped
+ * uk-1 from likely back to suspect on 2026-11-16) nor leaves out the day
+ * just before it opened, as the traffic family's margin would. */
+export function byteWindowEnds(now: number, anchor: number | null, tuning: BlockTuning = DEFAULT_TUNING): number[] {
+  const ends = [now];
+  const last = anchor === null ? now - DAY : Math.min(anchor, now);
+  for (let day = 0; day < baselineDays(tuning); day += 1) ends.push(last - day * DAY);
+  return ends;
+}
+
+/** A server's byte totals: the last day, and the earlier days compared
+ * against (byteWindowEnds; `anchor` set while an incident is open). Left
+ * out as not comparable: days that start before `floor`, and days with no
+ * usage at all -- a server not yet in service, which would otherwise read
+ * as a usual day of nothing. */
+export function bytesSince(
+  totals: DayBytes | undefined,
+  now: number,
+  floor: number,
+  tuning: BlockTuning = DEFAULT_TUNING,
+  anchor?: number,
+): ByteTotals {
+  const ends = byteWindowEnds(now, anchor ?? null, tuning);
+  const baseline: ({ up: number; down: number } | null)[] = [];
+  for (let day = 1; day < ends.length; day += 1) {
+    baseline.push(ends[day] - DAY < floor ? null : (totals?.get(day) ?? null));
+  }
+  return { current: totals?.get(0) ?? { up: 0, down: 0 }, baseline, beforeIncident: anchor !== undefined };
+}
+
+/** Over the last day, of the customers in the country whose apps dialled
+ * this server: how many got data through on some route into it, and how
+ * many got nothing on any. Counts only, never who. */
+export function reportsOverDay(dials: NodeDial[], now: number): { through: number; failed: number } {
+  const byCustomer = new Map<string, boolean>();
+  for (const d of dials) {
+    if (d.arrived < now - DAY || d.arrived > now) continue;
+    byCustomer.set(d.customerId, (byCustomer.get(d.customerId) ?? false) || d.carried);
+  }
+  const through = [...byCustomer.values()].filter(Boolean).length;
+  return { through, failed: byCustomer.size - through };
+}
+
+/** The digest's line for a box that stopped reporting. */
+export function silentLine(b: SilentBox, reporting: string[]): string {
+  return (
+    `Inside box ${b.vantage} has not reported since ${b.lastAt.toISOString()}; ` +
+    (reporting.length ? `inside evidence now comes from ${reporting.join(" and ")} only` : "no inside box is reporting now") +
+    `; listed here until ${new Date(b.lastAt.getTime() + BOX_FORGET_AFTER_MS).toISOString().slice(0, 10)} unless it reports again`
+  );
 }
 
 /** The first earlier day to compare against while an incident that
@@ -971,8 +1318,8 @@ function union<T>(a: readonly T[], b: readonly T[]): T[] {
   return [...new Set([...a, ...b])];
 }
 
-function evidenceOf(i: BlockIncident): StoredEvidence | null {
-  return (i.evidenceJson as unknown as StoredEvidence | null) ?? null;
+function evidenceOf(i: BlockIncident | undefined): StoredEvidence | null {
+  return (i?.evidenceJson as unknown as StoredEvidence | null) ?? null;
 }
 
 function view(i: BlockIncident & { node: { name: string } }): IncidentView {
