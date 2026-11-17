@@ -379,14 +379,14 @@ return array(
     'download.linux.requirements' => 'A 64-bit computer with Ubuntu 22.04 or newer, Debian 12 or newer, or Fedora 40 or newer',
     'download.linux.button_deb' => 'Ubuntu, Debian, Mint (.deb)',
     'download.linux.button_rpm' => 'Fedora (.rpm)',
-    'download.linux.beta' => 'This is our first Linux version, so it may still have rough edges. If something doesn\'t work, please tell us.',
+    'download.linux.beta' => 'The Linux app is new, so it may still have rough edges. If something doesn\'t work, please tell us.',
     'download.linux.soon' => 'The Linux app is being built. The download will appear here the day it\'s ready.',
     'download.linux.steps.title' => 'Installing on Linux',
     'download.linux.steps.intro' => 'Download the file for your system. Then open a terminal in the folder it was saved to, usually Downloads, and run one command.',
     'download.linux.steps.deb' => 'On Ubuntu, Debian or Mint:',
     'download.linux.steps.rpm' => 'On Fedora:',
     'download.linux.steps.after' => 'It asks for your password because it also installs a small background service that sets up the VPN. Then open Neoxify from your apps menu, sign in and connect.',
-    'download.autoupdate.linux' => 'On Linux, the app tells you when a new version is out, but it doesn\'t install it by itself. Download the new file from this page and install it the same way. Your account and settings stay.',
+    'download.autoupdate.linux' => 'On Linux, the app tells you when a new version is ready and installs it when you press Restart now. If you still have the very first version (0.1.0), download the new file from this page once and install it the same way. Your account and settings stay.',
 
     // -----------------------------------------------------------------
     // Contact
