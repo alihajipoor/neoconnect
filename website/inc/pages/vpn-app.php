@@ -23,6 +23,15 @@
  *     port or server host name. Every claim is one en.php already makes.
  *   - The calls to action are the home page's: /download/ and /pricing/.
  *     The ads tag's download event fires on /download/ as for any visit.
+ *   - A PHONE goes straight to its store from the first and the last button
+ *     (2026-11-17). Most of the campaign's clicks come from Android phones,
+ *     and measured from the server log two in three left within ten
+ *     seconds, with the download page still a second step away. The ads tag
+ *     counts a store link as a download wherever it is (ads.js matches the
+ *     address), so nothing else changes. The button under the list of
+ *     devices keeps /download/ for everyone, which is how a phone still
+ *     reaches the other downloads. A desktop, an iPad that says it is a
+ *     Mac, and anything unrecognised keep /download/ everywhere.
  */
 
 defined('NX') || exit;
@@ -32,6 +41,20 @@ $NX_OG_IMAGE = false;
 $NX_ONE_LOCALE = true;
 
 $nx_has_windows = nx_windows_available();
+
+// Where the first and the last button lead, and what they say. '' for the
+// label means "the page's usual wording".
+$nx_cta_url = nx_url('download');
+$nx_cta_label = '';
+$nx_ua = strtolower(isset($_SERVER['HTTP_USER_AGENT']) ? (string) $_SERVER['HTTP_USER_AGENT'] : '');
+if (strpos($nx_ua, 'android') !== false && nx_android_play_url() !== '') {
+    $nx_cta_url = nx_android_play_url();
+    $nx_cta_label = 'download.android.play';
+} elseif (preg_match('/iphone|ipad|ipod/', $nx_ua) && nx_ios_available()) {
+    $nx_cta_url = nx_ios_store_url();
+    $nx_cta_label = 'download.ios.button';
+}
+$nx_cta_rel = $nx_cta_label !== '' ? ' rel="noopener"' : '';
 $nx_trial_days = nx_num((int) nx_cfg('free_trial_days', 7));
 $nx_trial_data = nx_format_data(nx_cfg('free_trial_gb', 10));
 
@@ -69,10 +92,12 @@ require NX_INC . '/partials/head.php';
     <p class="lede"><?php echo nx_e('vpnapp.hero.subtitle'); ?></p>
 
     <div class="hero__actions">
-      <a class="btn btn--primary btn--lg btn--magnet" href="<?php echo nx_esc(nx_url('download')); ?>">
-        <span><?php echo $nx_has_windows
-            ? nx_e('home.hero.cta_primary')
-            : nx_e('home.hero.cta_primary_soon'); ?></span>
+      <a class="btn btn--primary btn--lg btn--magnet" href="<?php echo nx_esc($nx_cta_url); ?>"<?php echo $nx_cta_rel; ?>>
+        <span><?php echo $nx_cta_label !== ''
+            ? nx_e($nx_cta_label)
+            : ($nx_has_windows
+                ? nx_e('home.hero.cta_primary')
+                : nx_e('home.hero.cta_primary_soon')); ?></span>
         <span class="icon-arrow"><?php echo nx_icon('arrow-right'); ?></span>
       </a>
       <a class="btn btn--ghost btn--lg" href="<?php echo nx_esc(nx_url('pricing')); ?>"><?php echo nx_e('home.hero.cta_secondary'); ?></a>
@@ -346,8 +371,8 @@ require NX_INC . '/partials/head.php';
         </div>
       </div>
       <div class="close__actions">
-        <a class="btn btn--primary btn--lg btn--magnet" href="<?php echo nx_esc(nx_url('download')); ?>">
-          <span><?php echo nx_e('home.cta.button'); ?></span>
+        <a class="btn btn--primary btn--lg btn--magnet" href="<?php echo nx_esc($nx_cta_url); ?>"<?php echo $nx_cta_rel; ?>>
+          <span><?php echo nx_e($nx_cta_label !== '' ? $nx_cta_label : 'home.cta.button'); ?></span>
           <span class="icon-arrow"><?php echo nx_icon('arrow-right'); ?></span>
         </a>
         <a class="btn btn--ghost btn--lg" href="<?php echo nx_esc(nx_url('pricing')); ?>"><?php echo nx_e('home.hero.cta_secondary'); ?></a>

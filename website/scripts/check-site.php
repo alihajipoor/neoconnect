@@ -320,6 +320,49 @@ foreach ($locales as $locale) {
     }
 }
 
+// The ads landing page sends a phone straight to its store, and nobody else.
+// The store link is what the ads tag counts as a download, so a phone whose
+// button quietly went back to /download/ would also stop being counted
+// there; and a desktop sent to a phone store would have nothing to install.
+if ($htmlDir === null) {
+    $adsEntry = $root . '/vpn-app/index.php';
+    $play = 'href="https://play.google.com/store/apps/details';
+    $appStore = 'href="https://apps.apple.com/';
+    $adsVisitors = array(
+        'android' => array('Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36', 2, 0),
+        'iphone' => array('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1', 0, 2),
+        'windows' => array('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36', 0, 0),
+        'ipad-as-mac' => array('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15', 0, 0),
+        'no-agent' => array('', 0, 0),
+    );
+    foreach ($adsVisitors as $who => $want) {
+        putenv('HTTP_USER_AGENT' . ($want[0] === '' ? '' : '=' . $want[0]));
+        $html = (string) shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($adsEntry) . ' 2>&1');
+        $label = '[en/vpn-app as ' . $who . ']';
+        if (strpos($html, '</html>') === false) {
+            $failures[] = $label . ' did not render';
+            continue;
+        }
+        $gotPlay = substr_count($html, $play);
+        $gotStore = substr_count($html, $appStore);
+        if ($gotPlay !== $want[1] || $gotStore !== $want[2]) {
+            $failures[] = $label . ' store buttons: Google Play ' . $gotPlay . ' (want ' . $want[1]
+                . '), App Store ' . $gotStore . ' (want ' . $want[2] . ')';
+        }
+        // Everyone keeps a way to the full download page.
+        if (!preg_match('#<a class="btn btn--primary btn--lg" href="[^"]*/download/"#', $html)) {
+            $failures[] = $label . ' the button under the list of devices no longer leads to the download page';
+        }
+        $words = nxc_words($html);
+        foreach ($adsForbidden as $re) {
+            if (preg_match($re, $words, $hit)) {
+                $failures[] = $label . ' forbidden on the ads page: "' . $hit[0] . '"';
+            }
+        }
+    }
+    putenv('HTTP_USER_AGENT');
+}
+
 // The sitemap must not list a noindex page.
 if ($htmlDir === null) {
     $xml = shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($root . '/sitemap.php') . ' 2>&1');
