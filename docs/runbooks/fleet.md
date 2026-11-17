@@ -243,6 +243,11 @@ does not work under Git Bash, and Windows' `ssh.exe` has none.
   exchange and does not look like OpenSSH on the wire, and those paths
   cross the restricted network. The panel host and the exits do lose the
   post-quantum exchange on the helper.
+- It reads the effective configuration from `ssh -G` and leaves the
+  call to `ssh` when that sets anything it does not do itself (a proxy,
+  a forward, `SendEnv`, a terminal). Debian and Ubuntu ship an
+  `ssh_config` with `SendEnv` in it, so run from such a machine every
+  call goes over plain `ssh`. Git Bash on the Windows PC has none.
 - `FLEET_SSH=ssh` runs everything the old way, one connection per call.
   The tool also does that by itself when the helper cannot start, when
   its library is missing or the wrong version, or when it dies.

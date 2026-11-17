@@ -10214,3 +10214,138 @@ The in-app "new version" notice end to end (there is no newer version
 yet; the API answers correctly for an older one). Trojan, VLESS TLS and
 OpenVPN through the real desktop session (they passed through the same
 app under a virtual display).
+
+## 2026-11-17 — Google disapproved the ad; a separate page for ads
+
+**What happened.** The search ad was disapproved under "Enabling
+dishonest behavior". Google names no sentence. Its policy judges the
+page the ad lands on as well as the ad, and the ad landed on the home
+page, which talks about networks that hold VPNs back and about traffic
+that looks ordinary. That is the honest description of the product for
+the people it was built for, and it is exactly what that policy reads as
+evasion.
+
+**What was done.** The home page was left alone. The ad now lands on
+`/vpn-app/`, an English page that says only what an ad may say: the
+connection is encrypted, the apps, the free trial, the two standard
+plans. It is `noindex`, not in the navigation or the sitemap, carries no
+structured data and no social card, and `/fa/vpn-app/` redirects to the
+Persian home page. Live since 03:35Z; the site's own checks
+(`website/scripts/check-site.php`, `check-ads.php`) cover it.
+
+**Traps.**
+- A text asset keeps its old policy label when it is reused word for
+  word. Two headlines carried "Disapproved" onto the new ad until they
+  were reworded.
+- The appeal form asks for a confirmation in the account holder's name.
+  It was cancelled, not sent: that is the owner's to give.
+- After the change the ad read "Eligible", and three hours later
+  "Eligible (Limited), Free desktop software". That policy covers free
+  trials of paid desktop software too, and speaks of a certification the
+  advertiser applies for. Not applied for: also a declaration in the
+  owner's name.
+
+**Not proven.** That the ad is being shown. No impressions had been
+counted when this was written. The sitelinks still point at pages with
+the old wording and may be disapproved one by one.
+
+## 2026-11-17 — uk-1 went unreported for three days
+
+**What happened.** The owner found uk-1 held, by hand, and the block
+watch had said nothing. From the sign-in box, uk-1 has connected and
+moved no data either way since 2026-11-14 20:08Z. Its own traffic went
+from 55 GB on the 13th to 2.4 GB, 104 MB, 15 MB and then nothing.
+Customers' traffic had begun to fall about three hours before the box
+lost it. The other inside box, ir2, still moved data to uk-1 until ir2
+itself went dark on the 16th at 22:07Z. So this is a hold on some
+networks, not on all of them.
+
+**Why the watch was silent.** Five things, stacked:
+- The inside family counted only refused connections. A connect that
+  moves nothing was read as "works". That is the commonest way a server
+  is held here.
+- One box still working vetoed the other.
+- The traffic family needs five senders in a two-hour slice and never
+  looks at bytes. uk-1 had one to three.
+- The app-report family is per network, two failing customers each.
+  uk-1 had one customer on each of four networks.
+- A box that stops reporting simply dropped out of the count, and a
+  SUSPECT was never sent to anyone.
+
+**What changed** (`docs/block-watch.md`; main `79480ecc`, one additive
+migration, live 04:52Z):
+- For a box that moved data to another of its usual servers in the same
+  round, connect-but-nothing counts as lost.
+- One box is enough. How far the loss reaches is stored and said:
+  "partial" only when another box still moves data.
+- An incident raised by the inside boxes sends one early notice, once.
+- A fifth family, the server's own bytes over 24 hours against the seven
+  days before the incident. It never raises an incident by itself. It
+  confirms an inside loss: within 48 hours of the loss, or when every
+  reporting box lost the server.
+- A one-box, data-only loss that lasts 24 hours while the server's bytes
+  stay normal is settled as that network's change. netherlands-1 lost
+  data from the same box in the same minute as uk-1, and its customers
+  kept using it.
+- A box that goes silent is told once, and once more when it is back.
+
+**Proof.** A replay of production's rows from 10-27 to 11-17
+(`BLOCK_WATCH_REPLAY=<rows.tsv>` runs `block-watch.replay.spec.ts`): the
+three real blocks fire as they did; uk-1 gets a partial notice on 11-14
+at 22:01Z and a block page on 11-15 at 14:01Z; netherlands-1 gets a
+notice that then clears. Live, the first cycle at 05:01Z opened uk-1 as
+SUSPECT with the early notice recorded as sent, and recorded the
+"ir2 is silent" notice as delivered.
+
+**What that first live cycle did not do.** It did not call uk-1
+blocked. The loss was 57 hours old when the watch first saw it, past the
+48 hours inside which the bytes may confirm, and with ir2 silent the
+scope is "only one box reporting", not "every box". That is the rule
+working as written on a deploy that came late; it was left as it is.
+
+**Not proven.** A real customer's path from inside. That the two
+notices reached the inbox: the mail service accepted them, and the
+mailbox could not be read from here.
+
+## 2026-11-17 — Where the fleet tool's half hour goes
+
+**What happened.** The owner asked why adding a server takes half an
+hour when it was meant to be a five-minute script. It is one command.
+The Spain run, straight through, took 1814 s, and its run log says
+where: about 62% was SSH handshakes (some 480 connections at 2.2 to
+2.6 s, about 4 s to the inside boxes), about 500 s was real work (the
+installer alone is five minutes), about 100 s was fixed sleeps.
+
+**What was built** (`docs/runbooks/fleet.md`, *Time* and *One kept
+connection per host*): a helper that holds one connection per host for
+the run; a reboot step that proves the reboot instead of waiting it out;
+polls that ask more often under the same ceilings; a few things side by
+side inside one step. The order of the steps did not change. Running
+whole steps side by side was looked at and refused: the sceptic found
+five wrong dependencies and seven proofs it would have weakened.
+
+**Traps.**
+- OpenSSH's connection sharing fails under Git Bash
+  ("mux_client_request_session: read from master failed"), Windows'
+  `ssh.exe` has none, and this PC has no WSL.
+- The first version of the helper retried on a timeout. The server may
+  already have started the command, so it could run twice; `rput` could
+  empty a file after reporting success. Now a quiet connection is checked
+  with a keepalive before it is used, and nothing is retried after a
+  command may have gone out.
+- The reboot step had always accepted the old boot's answer. That was
+  there before any of this.
+- The helper's SSH library has no post-quantum key exchange and does not
+  look like OpenSSH on the wire, so the inside boxes stay on plain ssh.
+- The helper's tests passed 25 of 25 here and failed 21 on CI. Ubuntu's
+  `ssh_config` sets `SendEnv`, which the helper leaves to ssh by design,
+  so on CI every call went over plain ssh and the suite compared ssh
+  with ssh (one test then waited ten minutes for a reply plain ssh never
+  times out on). The suite now reads an empty `ssh_config` of its own.
+  Found with a three-line job on a `debug/**` branch, which `ci.yml`
+  does not run on: two minutes a round instead of sixteen.
+
+**Not proven.** Any real add or reboot on this code. The estimate is 15
+to 17 minutes, from the measured per-call times and the Spain log. Five
+minutes is not reachable without dropping a proof. Quote the measured
+time after the next real add.
