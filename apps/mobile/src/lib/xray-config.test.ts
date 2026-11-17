@@ -175,18 +175,23 @@ describe("lookups inside the engine", () => {
     }
   });
 
-  // DoH keeps one connection for every query; the TCP name server dials a
-  // new one per query, which through the proxy is the handshake again.
-  // By address, and never "localhost" or a "+local" scheme, which would
-  // leave outside the tunnel.
-  it("resolves over DNS-over-HTTPS by address, IPv4 answers only", () => {
+  // DoH keeps one connection for every query, so it is first. A dead
+  // kept-open connection must not cost a lookup: it gets 2 s, then the
+  // same lookup moves on to a TCP server, which dials fresh every time.
+  // In turn, not at once. By address, and never "localhost" or a "+local"
+  // scheme, which would leave outside the tunnel.
+  it("asks DoH first with a short timeout, then a fresh TCP server, in turn, IPv4 answers only", () => {
     const config = JSON.parse(buildXrayConfig(user(...ALL_PROTOCOLS[0])));
     expect(config.dns.queryStrategy).toBe("UseIPv4");
-    expect(config.dns.servers.length).toBeGreaterThan(0);
+    expect(config.dns.enableParallelQuery).toBe(false);
+    expect(config.dns.servers).toEqual([
+      { address: "https://1.1.1.1/dns-query", timeoutMs: 2000 },
+      "tcp://8.8.8.8:53",
+    ]);
     for (const server of config.dns.servers) {
-      expect(server).toMatch(/^https:\/\/\d+\.\d+\.\d+\.\d+\/dns-query$/);
+      const address = typeof server === "string" ? server : server.address;
+      expect(address).toMatch(/^(https|tcp):\/\/\d+\.\d+\.\d+\.\d+[:/]/);
     }
-    expect(config.dns.enableParallelQuery).toBe(true);
     // No serveStale: no expired answers kept in the iPhone's 50 MB.
     expect(config.dns.serveStale).toBeUndefined();
   });
@@ -221,30 +226,44 @@ describe("QUIC on Vision", () => {
   const flowOf = (config: { outbounds: { settings: { vnext: { users: { flow: string }[] }[] } }[] }) =>
     config.outbounds[0].settings.vnext[0].users[0].flow;
 
+  const DROP_RULE = { type: "field", inboundTag: ["tun-in"], network: "udp", port: "443", outboundTag: "block" };
+  const VISION_PROTOCOLS = [
+    ["XRAY_VLESS_REALITY", REALITY_PARAMS],
+    ["XRAY_VLESS_TLS", { serverName: "example.com" }],
+  ] as const;
+
   // Plain Vision refuses UDP/443 after dialling the server: a wasted
-  // handshake and silence. The suffix is client-only; the outbound trims
-  // it before anything is sent.
-  it("carries QUIC by default with the client-only udp443 flow", () => {
-    for (const protocol of ["XRAY_VLESS_REALITY", "XRAY_VLESS_TLS"] as const) {
-      const params = protocol === "XRAY_VLESS_REALITY" ? REALITY_PARAMS : { serverName: "example.com" };
+  // handshake and silence. By default the phone refuses it first, without
+  // dialling, and sends the flow as issued: the app sees what it saw
+  // before, minus the wasted dial.
+  it("by default refuses QUIC on the phone and keeps the issued flow", () => {
+    for (const [protocol, params] of VISION_PROTOCOLS) {
       const config = JSON.parse(buildXrayConfig(user(protocol, params, { uuid: "u-1", flow: "xtls-rprx-vision" })));
+      expect(flowOf(config), protocol).toBe("xtls-rprx-vision");
+      expect(config.routing.rules, protocol).toContainEqual(DROP_RULE);
+      // After the lookup and IPv6 rules, which keep their places.
+      expect(config.routing.rules[2], protocol).toEqual(DROP_RULE);
+    }
+  });
+
+  // Still selectable. The suffix is client-only; the outbound trims it
+  // before anything is sent.
+  it("can instead carry QUIC with the client-only udp443 flow", () => {
+    for (const [protocol, params] of VISION_PROTOCOLS) {
+      const config = JSON.parse(
+        buildXrayConfig(user(protocol, params, { uuid: "u-1", flow: "xtls-rprx-vision" }), "carry"),
+      );
       expect(flowOf(config), protocol).toBe("xtls-rprx-vision-udp443");
       expect(config.routing.rules.some((r: { port?: string }) => r.port === "443"), protocol).toBe(false);
     }
   });
 
-  it("can instead refuse QUIC locally, keeping the issued flow", () => {
-    const config = JSON.parse(
-      buildXrayConfig(user("XRAY_VLESS_REALITY", REALITY_PARAMS, { uuid: "u-1", flow: "xtls-rprx-vision" }), "drop-locally"),
-    );
-    expect(flowOf(config)).toBe("xtls-rprx-vision");
-    expect(config.routing.rules).toContainEqual({
-      type: "field",
-      inboundTag: ["tun-in"],
-      network: "udp",
-      port: "443",
-      outboundTag: "block",
-    });
+  it("adds the refusal to no protocol without Vision", () => {
+    for (const [protocol, params, credentials] of ALL_PROTOCOLS.slice(2)) {
+      const config = JSON.parse(buildXrayConfig(user(protocol, params, credentials)));
+      expect(config.routing.rules, protocol).not.toContainEqual(DROP_RULE);
+      expect(config.routing.rules.length, protocol).toBe(2);
+    }
   });
 
   // WebSocket has no Vision; Shadowsocks carries QUIC already. Neither

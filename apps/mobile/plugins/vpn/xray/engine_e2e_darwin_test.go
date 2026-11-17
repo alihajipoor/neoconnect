@@ -763,13 +763,13 @@ func TestEngineTransports(t *testing.T) {
 			down := downloadFor(t, e, 32<<20)
 			up := uploadFor(t, e, 32<<20, 0)
 
-			// Port 443, which is QUIC's: on Vision it is carried only
-			// with the client's udp443 flow (VISION_QUIC in
-			// xray-config.ts). This was port 53 until lookups moved into
-			// the engine; port 53 now goes to the DNS outbound, which
-			// answers DNS through a public resolver and drops anything
-			// else, so it cannot be echoed by a local service.
-			uc, err := gonet.DialUDP(e.stack, nil, &tcpip.FullAddress{NIC: 1, Addr: e2eTarget, Port: 443}, ipv4.ProtocolNumber)
+			// An ordinary UDP port. This was port 53 until lookups moved
+			// into the engine; port 53 now goes to the DNS outbound,
+			// which answers DNS through a public resolver and drops
+			// anything else, and UDP/443 is refused on Vision by default
+			// (VISION_QUIC in xray-config.ts), so neither can be echoed
+			// by a local service.
+			uc, err := gonet.DialUDP(e.stack, nil, &tcpip.FullAddress{NIC: 1, Addr: e2eTarget, Port: 5000}, ipv4.ProtocolNumber)
 			if err != nil {
 				t.Fatal(err)
 			}

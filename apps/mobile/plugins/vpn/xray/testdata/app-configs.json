@@ -12,11 +12,14 @@
     },
     "dns": {
       "servers": [
-        "https://1.1.1.1/dns-query",
-        "https://8.8.8.8/dns-query"
+        {
+          "address": "https://1.1.1.1/dns-query",
+          "timeoutMs": 2000
+        },
+        "tcp://8.8.8.8:53"
       ],
       "queryStrategy": "UseIPv4",
-      "enableParallelQuery": true
+      "enableParallelQuery": false
     },
     "inbounds": [
       {
@@ -42,7 +45,7 @@
                 {
                   "id": "UUID",
                   "encryption": "none",
-                  "flow": "xtls-rprx-vision-udp443"
+                  "flow": "xtls-rprx-vision"
                 }
               ]
             }
@@ -104,6 +107,15 @@
             "::/0"
           ],
           "outboundTag": "block"
+        },
+        {
+          "type": "field",
+          "inboundTag": [
+            "tun-in"
+          ],
+          "network": "udp",
+          "port": "443",
+          "outboundTag": "block"
         }
       ]
     }
@@ -121,11 +133,14 @@
     },
     "dns": {
       "servers": [
-        "https://1.1.1.1/dns-query",
-        "https://8.8.8.8/dns-query"
+        {
+          "address": "https://1.1.1.1/dns-query",
+          "timeoutMs": 2000
+        },
+        "tcp://8.8.8.8:53"
       ],
       "queryStrategy": "UseIPv4",
-      "enableParallelQuery": true
+      "enableParallelQuery": false
     },
     "inbounds": [
       {
@@ -151,7 +166,7 @@
                 {
                   "id": "UUID",
                   "encryption": "none",
-                  "flow": "xtls-rprx-vision-udp443"
+                  "flow": "xtls-rprx-vision"
                 }
               ]
             }
@@ -215,6 +230,15 @@
             "::/0"
           ],
           "outboundTag": "block"
+        },
+        {
+          "type": "field",
+          "inboundTag": [
+            "tun-in"
+          ],
+          "network": "udp",
+          "port": "443",
+          "outboundTag": "block"
         }
       ]
     }
@@ -232,11 +256,14 @@
     },
     "dns": {
       "servers": [
-        "https://1.1.1.1/dns-query",
-        "https://8.8.8.8/dns-query"
+        {
+          "address": "https://1.1.1.1/dns-query",
+          "timeoutMs": 2000
+        },
+        "tcp://8.8.8.8:53"
       ],
       "queryStrategy": "UseIPv4",
-      "enableParallelQuery": true
+      "enableParallelQuery": false
     },
     "inbounds": [
       {
@@ -347,11 +374,14 @@
     },
     "dns": {
       "servers": [
-        "https://1.1.1.1/dns-query",
-        "https://8.8.8.8/dns-query"
+        {
+          "address": "https://1.1.1.1/dns-query",
+          "timeoutMs": 2000
+        },
+        "tcp://8.8.8.8:53"
       ],
       "queryStrategy": "UseIPv4",
-      "enableParallelQuery": true
+      "enableParallelQuery": false
     },
     "inbounds": [
       {
@@ -452,11 +482,14 @@
     },
     "dns": {
       "servers": [
-        "https://1.1.1.1/dns-query",
-        "https://8.8.8.8/dns-query"
+        {
+          "address": "https://1.1.1.1/dns-query",
+          "timeoutMs": 2000
+        },
+        "tcp://8.8.8.8:53"
       ],
       "queryStrategy": "UseIPv4",
-      "enableParallelQuery": true
+      "enableParallelQuery": false
     },
     "inbounds": [
       {

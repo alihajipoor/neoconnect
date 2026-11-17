@@ -43,14 +43,30 @@ export const TUN_MTU = 1400;
  * which through the proxy is the same per-lookup server handshake again.
  * The DoH name server keeps one HTTP/2 connection and sends every query
  * down it (nameserver_doh.go, an http2.Transport with keep-alive pings).
- * By address, so finding the resolver needs no lookup of its own; both
- * certificates name their address. Both are asked at once
- * (`enableParallelQuery`) and the first answer wins: a connection left
- * stalled by a switch from Wi-Fi to mobile data then costs nothing, where
- * asking in turn would cost every lookup the 4 s timeout until the stalled
- * one is noticed. Never a direct lookup: that would leave outside the
- * tunnel, and is answered falsely on the networks this exists for. */
-export const ENGINE_RESOLVERS = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"];
+ * By address, so finding the resolver needs no lookup of its own.
+ *
+ * A dead kept-open connection must not cost a lookup. After a switch
+ * between Wi-Fi and mobile data the kept HTTP/2 connection can be dead
+ * without knowing it -- it is noticed only after 45 s idle, and a query in
+ * flight on it is not retried -- and the emulator measured a first lookup
+ * of 0.9-1.1 s after a switch, and one in three with no reply at all. So
+ * the servers are asked in turn, not at once, and the DoH one gets 2 s
+ * (`timeoutMs`, per server: app/dns/nameserver.go) before the lookup moves
+ * on, within the same lookup, to a TCP server. That one dials a fresh
+ * connection for every query, so it cannot be left holding a dead one; it
+ * is slower (a server handshake), which is why it is second. Both go
+ * through the proxy: the DNS app's connections carry its own tag, match
+ * no routing rule, and take the first outbound. Asked in turn because
+ * xray-core's parallel race answers early only on addresses, so an
+ * NXDOMAIN with one server unreachable could go unanswered.
+ *
+ * Never a direct lookup ("localhost" or a "+local" scheme): that would
+ * leave outside the tunnel, and is answered falsely on the networks this
+ * exists for. */
+export const ENGINE_RESOLVERS: (string | { address: string; timeoutMs: number })[] = [
+  { address: "https://1.1.1.1/dns-query", timeoutMs: 2000 },
+  "tcp://8.8.8.8:53",
+];
 
 /** The outbound every lookup the tunnel carries -- port 53 -- is routed to.
  * The same tag as the desktop's. */
@@ -80,11 +96,17 @@ const VISION = "xtls-rprx-vision";
  * inbound takes that mux command under Vision (proxy/vless/inbound, read
  * at v1.260327.0); the nodes' routing has no UDP/443 rule.
  *
- * "drop-locally": a routing rule refuses UDP/443 on the phone before
- * anything is dialled, so the app falls back to TCP at once. The
- * alternative for a tester to flip to if carrying QUIC misbehaves. */
+ * Carrying works (measured on the emulator: answered, 0.86-0.92 s per new
+ * flow), but it changes what apps get, and on a throttled line all QUIC
+ * would ride one TCP stream with an effect nobody has measured.
+ *
+ * "drop-locally", the default: a routing rule refuses UDP/443 on the phone
+ * before anything is dialled. The app gets what it gets today -- no QUIC,
+ * so it uses TCP -- without the wasted server dial per attempt; the flow
+ * is sent as issued. Shadowsocks carries QUIC already, so the two can be
+ * compared in the field before carrying is chosen here too. */
 export type VisionQuic = "carry" | "drop-locally";
-export const VISION_QUIC: VisionQuic = "carry";
+export const VISION_QUIC: VisionQuic = "drop-locally";
 
 type Json = Record<string, unknown>;
 
@@ -386,7 +408,7 @@ export function buildXrayConfig(user: ProtocolUser, quic: VisionQuic = VISION_QU
     // every 5 minutes, no stale answers kept (`serveStale` off). It has no
     // entry cap to set; at a few hundred bytes a name it stays far below
     // the iPhone extension's memory limit.
-    dns: { servers: ENGINE_RESOLVERS, queryStrategy: "UseIPv4", enableParallelQuery: true },
+    dns: { servers: ENGINE_RESOLVERS, queryStrategy: "UseIPv4", enableParallelQuery: false },
     inbounds: [
       {
         tag: "tun-in",
