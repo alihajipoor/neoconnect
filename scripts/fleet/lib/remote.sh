@@ -234,6 +234,8 @@ transport_step_begin() {
   transport_count "$RUN_DIR/ssh-calls" TRANSPORT_C0
   transport_count "$RUN_DIR/ssh-conns" TRANSPORT_N0
 }
+# TRANSPORT_NOTE is read by engine.sh, for the step's "took" line.
+# shellcheck disable=SC2034
 transport_step_end() {
   local n c
   TRANSPORT_NOTE=""
