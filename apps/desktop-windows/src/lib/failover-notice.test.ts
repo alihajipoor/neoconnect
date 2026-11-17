@@ -171,3 +171,32 @@ describe("the protocol in the failover line", () => {
     expect(html("fa")).toBe("الان از <bdi>Stealth</bdi> استفاده می‌شود");
   });
 });
+
+describe("Built-in skipped on Linux because strongSwan is not installed", () => {
+  // The helper's words when charon-cmd is absent (tunnel/src/ikev2.rs, MISSING).
+  const HELPER_MISSING =
+    "strongSwan for Built-in (IKEv2) (the packages charon-cmd, libcharon-extra-plugins and libcharon-extauth-plugins on Debian and Ubuntu; strongswan and strongswan-libipsec on Fedora) is missing from the install";
+
+  it("says what to install and where the connection is, and blames no server", async () => {
+    const { setDesktopPlatform } = await import("./desktop-platform");
+    setDesktopPlatform("linux");
+    try {
+      const classified = classifyConnectionError(HELPER_MISSING);
+      expect(classified.messageKey).toBe("err.engineMissingStrongswan");
+      const failed: FailedRung[] = [{ routeId: "fi", fate: rungFate(classified.kind), strongswanMissing: true }];
+      expect(line("en", failed, false)).toBe(
+        "Built-in needs strongSwan, which isn't installed on this computer. Now using Stealth",
+      );
+      expect(line("fa", failed, false)).toContain("strongSwan");
+      expect(line("en", failed, false)).not.toContain("Couldn't reach");
+    } finally {
+      setDesktopPlatform("windows");
+    }
+  });
+
+  it("leaves a notice without the flag exactly as before", () => {
+    const notice = failoverNotice({ label: "Stealth", fromRegion: null, toRegion: "de-germany", shownRouteId: "fi", failed: [{ routeId: "fi", fate: "notDialled" }] });
+    expect("strongswanMissing" in notice).toBe(false);
+    expect(failoverText(notice).key).toBe("dash.nowUsing");
+  });
+});

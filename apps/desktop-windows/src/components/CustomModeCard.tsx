@@ -68,6 +68,12 @@ export function CustomModeCard() {
   const catalogue = supportsGameCatalogue();
   const [settings, setSettings] = useState<SplitTunnelSettings | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /** Linux only: an OpenVPN session refused to switch Custom mode on or off
+   * in place. Kept apart from `notice` because that line sits inside the
+   * part of the card shown only while the mode is on, so turning the mode
+   * OFF -- one of the two switches that needs a reconnect -- showed nothing,
+   * while the live tunnel stayed in Custom mode (seen in the VM). */
+  const [reconnectNotice, setReconnectNotice] = useState<string | null>(null);
   /**
    * A game from the catalogue that matched nothing running, kept until
    * something makes it stale.
@@ -239,6 +245,9 @@ export function CustomModeCard() {
       // Naming one here would be guessing, and the service reports a
       // preference it cannot compare as unknown, which is true.
       await pushSplitTunnel(next);
+      // Accepted, so the live tunnel now matches the screen again (for
+      // example, switched back before reconnecting).
+      if (isLinux()) setReconnectNotice(null);
     } catch (error) {
       // The service may not be running yet; connect re-sends anyway.
       // On Linux an OpenVPN session cannot switch Custom mode on or off in
@@ -246,7 +255,7 @@ export function CustomModeCard() {
       // the live tunnel keeps the old one. Said, so the switch does not
       // show a state the connection is not in.
       if (isLinux() && String(error).includes("needs a reconnect")) {
-        setNotice(t("settings.customAppliesOnReconnect"));
+        setReconnectNotice(t("settings.customAppliesOnReconnect"));
       }
     }
     // The selection just changed, so which programs the service can
@@ -1102,6 +1111,13 @@ export function CustomModeCard() {
             </>
           ) : null}
         </div>
+      ) : null}
+      {/* Outside the block above, so it shows whichever way the switch now
+          stands. Only ever set on Linux. */}
+      {reconnectNotice ? (
+        <p className="rounded-md border border-[color-mix(in_oklab,var(--warn)_35%,transparent)] bg-[var(--warn-tint)] px-3 py-2 text-xs text-[var(--warn-ink)]">
+          {reconnectNotice}
+        </p>
       ) : null}
     </Card>
   );

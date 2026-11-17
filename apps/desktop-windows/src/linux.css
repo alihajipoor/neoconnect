@@ -1,0 +1,16 @@
+/* The Linux app's stylesheet: globals.css, plus where Tailwind looks for the
+   classes the screens use. Only apps/desktop-linux/src/main.tsx imports it;
+   the Windows app never loads it.
+
+   Tailwind 4 finds class names by scanning the folder the build runs from.
+   The Linux build runs from apps/desktop-linux, while the screens live here,
+   so through 0.2.0's first builds none of their utility classes were
+   generated: everything styled only by Tailwind classes (the Custom mode
+   card, the running-apps list) rendered as bare stacked text in the real
+   window. The line below adds this folder to the scan.
+
+   The file sits here, next to theme.css, and not in the Linux app, because
+   the fonts' url()s in theme.css are resolved against the entry stylesheet's
+   folder; from apps/desktop-linux they pointed at nothing. */
+@import "./globals.css";
+@source "./";

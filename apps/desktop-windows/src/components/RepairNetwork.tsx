@@ -239,7 +239,11 @@ function Result({ report }: { report: RepairReport }) {
         : "repair.resultProblems"
       : indeterminate.length > 0
         ? linux
-          ? "repair.resultUnverifiedLinux"
+          ? // Linux reports a program still in Custom mode's group as
+            // unknown, and that check did finish; say what it found.
+            indeterminate.every((step) => step.id === "groups")
+            ? "repair.resultGroupsLinux"
+            : "repair.resultUnverifiedLinux"
           : "repair.resultUnverified"
         : anythingFixed(report)
           ? "repair.resultFixed"

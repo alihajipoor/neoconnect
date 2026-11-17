@@ -385,7 +385,13 @@ same_as_baseline() {
     fi
     sleep 0.5
   done
-  echo "differs from before the connect in:$parts"
+  # What differed, for whoever looks next: root's alone, as a part can
+  # name a server.
+  for f in $parts; do
+    { echo "== $f ($(date +%T))"; diff "$WORK/baseline/$f" "$d/$f"; } >> /root/nx-proof-differences.txt 2>&1
+  done
+  chmod 600 /root/nx-proof-differences.txt 2>/dev/null
+  echo "differs from before the connect in:$parts (kept in /root/nx-proof-differences.txt)"
 }
 
 # The network works without a tunnel: a page over the machine's own route.
@@ -955,6 +961,16 @@ stream_start() {
 }
 stream_stop() {
   pkill -TERM -u nx -f 'python3 -I - stream' 2>/dev/null
+  # Once in this stage the stream outlived its TERM and the script waited
+  # on it for four minutes, long enough for the helper's silence limit to
+  # take the tunnel down under a stream the capture then counted as a
+  # leak. So it is asked again, then killed, and never waited on for ever.
+  local i
+  for i in $(seq 1 50); do kill -0 "$STREAM_PID" 2>/dev/null || break; [ "$i" = 20 ] && pkill -TERM -u nx -f 'python3 -I - stream' 2>/dev/null; sleep 0.1; done
+  if kill -0 "$STREAM_PID" 2>/dev/null; then
+    echo "INFO the stream did not stop when asked; killed"
+    pkill -KILL -u nx -f 'python3 -I - stream' 2>/dev/null
+  fi
   wait "$STREAM_PID" 2>/dev/null
   read -r STREAM_ROUNDS STREAM_GAP < "$WORK/stream.out" 2>/dev/null
 }

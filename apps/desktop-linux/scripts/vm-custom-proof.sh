@@ -214,11 +214,71 @@ capture_start() {
 }
 capture_stop() { sleep 1; kill "$CAP_PID" 2>/dev/null; wait "$CAP_PID" 2>/dev/null; }
 
+# Who sent what leaves the uplink, for the everything-except check: a table
+# of this script's own on the output hook, after Custom mode's re-routing
+# chain (socket matches are refused on postrouting), so the interface it
+# sees is the final one. It only counts and logs; it never drops.
+#
+# One sender is allowed by name: NetworkManager's connectivity check of the
+# uplink (plain HTTP, port 80). NetworkManager binds that socket to the
+# device, and a socket bound to a device is routed out of it whatever the
+# policy rules say; Custom mode has no machine-wide table to refuse it, by
+# contract (Windows confines nothing in Custom mode either). That holds for
+# any program that binds to the uplink, an ordinary user's included (the
+# kernel allows it unprivileged since 5.7), and in both modes: a known gap,
+# not something this check excuses for anyone but NetworkManager's own
+# check. It was the one stray that failed this check
+# in the fix stage (10 and 11 packets, about one run in ten): it comes on
+# NetworkManager's own five-minute timer, so the check now asks for one
+# itself, to prove the allowance every run rather than by luck. Its flows
+# are named by their local ports; everything else on the uplink is logged
+# with its user and counted by control group.
+ACCT=nx_custom_proof
+acct_start() {
+  nft delete table inet "$ACCT" 2>/dev/null
+  nft -f - <<EOF
+table inet $ACCT {
+  set nm { type inet_service; }
+  chain out {
+    type filter hook output priority 300; policy accept;
+    oifname != "$UPLINK" accept
+    ip daddr $1 accept
+    meta nfproto != ipv4 accept
+    udp dport { 67, 68 } accept
+    tcp sport 22 ip daddr $LANNET accept
+    ip daddr 224.0.0.0/4 accept
+    socket cgroupv2 level 1 "neoxify.split" accept
+    socket cgroupv2 level 2 "system.slice/NetworkManager.service" tcp dport 80 add @nm { tcp sport } counter accept comment "nm"
+    tcp dport 80 tcp sport @nm counter accept comment "nm-late"
+    socket cgroupv2 level 1 "user.slice" counter comment "user.slice"
+    socket cgroupv2 level 1 "system.slice" counter comment "system.slice"
+    meta skuid 0 counter comment "root"
+    counter comment "any"
+    log prefix "nx-custom-stray: " flags skuid
+  }
+}
+EOF
+}
+acct_counts() { nft list chain inet "$ACCT" out 2>/dev/null | grep -o 'packets [0-9]* bytes [0-9]* comment "[a-z.-]*"' | awk '{gsub(/"/,"",$6); printf "%s %s, ", $6, $2}'; }
+# A tcpdump filter that leaves out NetworkManager's check flows.
+acct_nm_filter() {
+  local p f=""
+  for p in $(nft -j list set inet "$ACCT" nm 2>/dev/null | python3 -I -c 'import json,sys
+for o in json.load(sys.stdin).get("nftables", []):
+    for e in (o.get("set") or {}).get("elem", []): print(e)' 2>/dev/null); do
+    f="$f and not (tcp port 80 and port $p)"
+  done
+  echo "$f"
+}
+acct_nm_ports() { nft -j list set inet "$ACCT" nm 2>/dev/null | python3 -I -c 'import json,sys
+print(sum(len((o.get("set") or {}).get("elem", [])) for o in json.load(sys.stdin).get("nftables", [])))' 2>/dev/null || echo 0; }
+acct_stop() { nft delete table inet "$ACCT" 2>/dev/null; }
+
 arm_deadman() {
   systemctl stop "$DEADMAN.timer" "$DEADMAN.service" >/dev/null 2>&1
   systemctl reset-failed "$DEADMAN.timer" "$DEADMAN.service" >/dev/null 2>&1
   systemd-run --quiet --unit="$DEADMAN" --on-active=300 /bin/sh -c \
-    "systemctl stop $UNIT; pkill -KILL -f '^$D/'; pkill -KILL -x charon-cmd; $HELPER sweep; nft delete table inet neoxify; nft delete table inet neoxify_split; echo $RP_ALL > /proc/sys/net/ipv4/conf/all/rp_filter; echo $RP_UP > /proc/sys/net/ipv4/conf/$UPLINK/rp_filter; rm -rf $D; systemctl start $UNIT" \
+    "systemctl stop $UNIT; pkill -KILL -f '^$D/'; pkill -KILL -x charon-cmd; $HELPER sweep; nft delete table inet neoxify; nft delete table inet neoxify_split; nft delete table inet $ACCT; echo $RP_ALL > /proc/sys/net/ipv4/conf/all/rp_filter; echo $RP_UP > /proc/sys/net/ipv4/conf/$UPLINK/rp_filter; rm -rf $D; systemctl start $UNIT" \
     >/dev/null 2>&1
 }
 
@@ -226,6 +286,7 @@ finish() {
   trap - EXIT INT TERM
   for p in "${BG_PIDS[@]}"; do kill "$p" 2>/dev/null; done
   pkill -KILL -f "^$D/" 2>/dev/null
+  acct_stop
   echo "$RP_ALL" > /proc/sys/net/ipv4/conf/all/rp_filter
   echo "$RP_UP" > "/proc/sys/net/ipv4/conf/$UPLINK/rp_filter"
   systemctl is-active --quiet "$UNIT" || systemctl start "$UNIT" >/dev/null 2>&1
@@ -235,8 +296,14 @@ finish() {
   sleep 1
   systemctl stop "$DEADMAN.timer" "$DEADMAN.service" >/dev/null 2>&1
   [ -d "$WORK/baseline" ] && judge machine "left as found" "$(same_as_baseline)"
-  # KEEP=1 keeps the captures, root's alone, for a look at a failure.
-  if [ "${KEEP:-0}" = 1 ]; then rm -rf /root/nx-custom-pcaps; mkdir -m 700 /root/nx-custom-pcaps; cp "$WORK"/*.pcap /root/nx-custom-pcaps/ 2>/dev/null; fi
+  # KEEP=1 keeps the captures, root's alone, for a look at a failure. A
+  # failure keeps them by itself, with the log of who sent each stray, so
+  # a stray that comes once in ten runs is never lost to a re-run again.
+  if [ "${KEEP:-0}" = 1 ] || [ "$FAILS" -gt 0 ]; then
+    rm -rf /root/nx-custom-pcaps; mkdir -m 700 /root/nx-custom-pcaps
+    cp "$WORK"/*.pcap "$WORK"/strays-*.log /root/nx-custom-pcaps/ 2>/dev/null
+    echo "INFO the captures are kept in /root/nx-custom-pcaps (root's alone: they hold the servers' addresses)"
+  fi
   rm -rf "$WORK" "$D"
   if [ "$FAILS" -eq 0 ]; then echo "ALL PASS"; else echo "FAILED $FAILS"; fi
   exit $(( FAILS > 0 ))
@@ -369,8 +436,12 @@ run_mode() {
   judge "$L" "pre-started chosen program sorted" "$([ "$(group_of "$PRE")" = /neoxify.split ] && echo ok || echo "it is not in the group")"
 
   cap="$WORK/$P-$mode.pcap"
+  [ "$mode" = allExcept ] && acct_start "$SRV"
   capture_start "$UPLINK" "$cap"
   traffic
+  # NetworkManager's check, asked for now (see acct_start); it waits for
+  # the answer, so the flow is whole in the capture.
+  [ "$mode" = allExcept ] && command -v nmcli >/dev/null 2>&1 && nmcli networking connectivity check >/dev/null 2>&1
   status
   local restart_with_pre=$S_restart
   capture_stop
@@ -404,8 +475,16 @@ run_mode() {
   if [ "$mode" = allExcept ]; then
     # Everything that is not a chosen program's goes into the tunnel, the
     # machine's own daemons included.
-    n=$(count "$cap" "ip and not ($BYPASS_CHOSEN) and not host $SRV and not arp and not (udp and (port 67 or port 68)) and not (tcp port 22 and net $LANNET) and not dst net 224.0.0.0/4")
-    judge "$L" "capture: no other IPv4 on the uplink" "$([ "$n" = 0 ] && echo ok || echo "$n packets")"
+    local other="ip and not ($BYPASS_CHOSEN) and not host $SRV and not arp and not (udp and (port 67 or port 68)) and not (tcp port 22 and net $LANNET) and not dst net 224.0.0.0/4"
+    local nmf nm_n
+    nmf=$(acct_nm_filter)
+    nm_n=$(( $(count "$cap" "$other") - $(count "$cap" "$other $nmf") ))
+    echo "INFO $L NetworkManager's connectivity check, bound to the uplink by NetworkManager itself: $(acct_nm_ports) flows, $nm_n packets on the uplink (allowed: no machine-wide table in Custom mode)"
+    command -v nmcli >/dev/null 2>&1 && judge "$L" "the attribution sees NetworkManager's check (the control)" "$([ "$(acct_nm_ports)" -gt 0 ] && echo ok || echo "none seen, so its allowance is unproven")"
+    n=$(count "$cap" "$other $nmf")
+    judge "$L" "capture: no other IPv4 on the uplink" "$([ "$n" = 0 ] && echo ok || echo "$n packets; senders by control group: $(acct_counts)")"
+    [ "$n" = 0 ] || journalctl -k --since "-5min" -o short-precise 2>/dev/null | grep 'nx-custom-stray: ' > "$WORK/strays-$P.log"
+    acct_stop
   fi
   n=$(count "$cap" "host $SRV")
   judge "$L" "capture: the engine's own traffic is seen" "$([ "$n" -gt 0 ] && echo ok || echo none)"

@@ -4770,6 +4770,12 @@ export function Dashboard({
           // the last word, the screen says there is no network rather than
           // naming anything: `err.noNetwork`.
           failedRungs.push({ routeId: candidate.routeId, fate: rungFate(classified.kind) });
+          // Linux only: Built-in skipped for want of strongSwan is remembered,
+          // so a pass that lands elsewhere can say what to install
+          // (`failoverText`). Windows never produces this message key. A
+          // separate line, so the one above stays word for word what the
+          // wiring tests look for.
+          if (classified.messageKey === "err.engineMissingStrongswan") failedRungs[failedRungs.length - 1].strongswanMissing = true;
           lastError = { ...classified, detail: describeAttempts(attempts, candidates.length) };
           if (classified.kind === "noNetwork") break;
           // On Linux a helper that cannot be reached cannot dial any rung:
@@ -5424,7 +5430,18 @@ export function Dashboard({
   // a counted disclosure (MainView), or into the summary's sheet on a phone.
   const details: ReactNode[] = [];
   if (isTunnelUp(connectionState) && splitTunnelActive && !splitTunnelProblem) {
-    details.push(<Note key="custom" tone="info">{t("dash.customActive")}</Note>);
+    // Linux blocks no ping in Custom mode, so its line leaves the ping
+    // sentences out, and it follows the direction of the list: the shared
+    // line describes only "Only these apps" (i18n.tsx, dash.customActiveLinux).
+    const customLine: TranslationKey =
+      desktopPlatform() === "linux"
+        ? customExcept
+          ? "dash.customActiveExceptLinux"
+          : "dash.customActiveLinux"
+        : "dash.customActive";
+    details.push(
+      <Note key="custom" tone="info">{t(customLine)}</Note>,
+    );
   }
   // Only when the service reports the block installed -- never derived
   // from the protocol. Not in Custom mode, whose line says what happens

@@ -264,6 +264,16 @@ const en = {
   // be narrowed to the chosen apps. See `redirect::icmp_echo_request`.
   "dash.customActive":
     "Custom mode: only the apps you chose go through the VPN. Their IPv6 is blocked instead of going outside the VPN, so sites that only have IPv6 won't open for them. Ping is blocked too, for every app on this computer, because the VPN can't carry it and it would show your real address to every server your games ping. In-game ping and latency numbers won't work while this is on.",
+  // Linux: the same line without the ping sentences. The Linux helper blocks
+  // no ping in Custom mode -- a chosen app's ping follows it into the tunnel
+  // and every other program's goes out as usual (checked in the VM) -- so
+  // "Ping is blocked for every app" would be untrue there.
+  "dash.customActiveLinux":
+    "Custom mode: only the apps you chose go through the VPN. Their IPv6 is blocked instead of going outside the VPN, so sites that only have IPv6 won't open for them.",
+  // The same for "All except these", where the list is the apps that stay
+  // outside.
+  "dash.customActiveExceptLinux":
+    "Custom mode: everything goes through the VPN except the apps you chose. IPv6 is blocked for everything that goes through the VPN instead of going outside it, so sites that only have IPv6 won't open there.",
   // The full-tunnel counterpart of the line above, and deliberately the
   // same shape of sentence: what is blocked, why, and what the customer
   // will notice. It is shown whenever the service reports a block is
@@ -734,6 +744,9 @@ const en = {
   // connection is: "didn't get through" would be a claim nothing made
   // true (failover-notice.ts).
   "dash.nowUsing": "Now using {protocol}",
+  // Linux only: Built-in was chosen, strongSwan is not installed, and the
+  // pass landed on another protocol in the same country (failover-notice.ts).
+  "dash.switchedNoStrongswan": "Built-in needs strongSwan, which isn't installed on this computer. Now using {protocol}",
   "dash.slowOnly": "Connected over {protocol}, but it's slow. Nothing faster got through on this network.",
   "dash.yourIp": "Your IP:",
   "err.serviceUnavailable": "The Neoxify background service isn't running. Restarting the app usually fixes this. If it doesn't, reinstall Neoxify.",
@@ -886,6 +899,11 @@ const en = {
   "repair.resultCleanLinux": "Nothing was left behind. Your network settings are as your system set them.",
   "repair.resultUnverifiedLinux":
     "Repaired, but one check couldn't finish, so the result can't be confirmed. This usually just means the computer was slow. Try connecting again. If it still doesn't work, run the command below in a terminal and send us what it prints.",
+  // The only open step is Custom mode's group with a program still in it.
+  // That check did finish: the helper leaves a running program where it is
+  // rather than move it, so "the computer was slow" would be untrue here.
+  "repair.resultGroupsLinux":
+    "Repaired. A program is still in Custom mode's group. It uses your normal connection now, and leaves the group when you close it and open it again.",
   "repair.resultProblemsLinux":
     "Some of it couldn't be repaired. Restarting the computer usually clears the rest. If it doesn't, run the command below in a terminal and send us what it prints.",
   "repair.noServiceHintLinux": "Open a terminal and run this command. It asks for your password:",
@@ -1800,6 +1818,10 @@ const fa: Record<TranslationKey, string> = {
   "settings.tooShort": "حداقل ۸ کاراکتر.",
   "dash.customActive":
     "حالت سفارشی: فقط برنامه‌هایی که انتخاب کرده‌اید از وی‌پی‌ان می‌گذرند. IPv6 این برنامه‌ها مسدود می‌شود تا بیرون از وی‌پی‌ان نرود، برای همین سایت‌هایی که فقط IPv6 دارند برایشان باز نمی‌شوند. پینگ هم برای همهٔ برنامه‌های این کامپیوتر مسدود است، چون وی‌پی‌ان نمی‌تواند پینگ را منتقل کند و اگر مسدود نشود، آدرس واقعی شما را به هر سروری که بازی‌تان پینگ می‌کند نشان می‌دهد. تا وقتی این حالت روشن است، عدد پینگ و تأخیر داخل بازی کار نمی‌کند.",
+  "dash.customActiveLinux":
+    "حالت سفارشی: فقط برنامه‌هایی که انتخاب کرده‌اید از وی‌پی‌ان می‌گذرند. IPv6 این برنامه‌ها مسدود می‌شود تا بیرون از وی‌پی‌ان نرود، برای همین سایت‌هایی که فقط IPv6 دارند برایشان باز نمی‌شوند.",
+  "dash.customActiveExceptLinux":
+    "حالت سفارشی: همه چیز به جز برنامه‌هایی که انتخاب کرده‌اید از وی‌پی‌ان می‌گذرد. IPv6 برای هر چیزی که از وی‌پی‌ان می‌گذرد مسدود می‌شود تا بیرون از وی‌پی‌ان نرود، برای همین سایت‌هایی که فقط IPv6 دارند آنجا باز نمی‌شوند.",
   "dash.fullTunnelIpv6Blocked":
     "تا وقتی وصل هستید، IPv6 مسدود است. سرورهای نئوکسیفای فقط IPv4 را منتقل می‌کنند، برای همین IPv6 روی همین دستگاه متوقف می‌شود تا بیرون از وی‌پی‌ان نرود. سایت‌هایی که فقط IPv6 دارند تا وقتی اتصال را قطع نکنید باز نمی‌شوند.",
   "dash.ipv6Escaping":
@@ -1994,6 +2016,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.switchedNoNetwork": "اول شبکه وصل نبود، برای همین {from} امتحان نشد. الان از {to} با {protocol} استفاده می‌شود",
   "dash.switchedToNoNetwork": "اول شبکه وصل نبود. الان از {protocol} استفاده می‌شود",
   "dash.nowUsing": "الان از {protocol} استفاده می‌شود",
+  "dash.switchedNoStrongswan": "پروتکل Built-in به strongSwan نیاز دارد که روی این کامپیوتر نصب نیست. الان از {protocol} استفاده می‌شود",
   "dash.slowOnly": "با {protocol} وصل شدید، اما سرعت کم است. روی این شبکه اتصال سریع‌تری پیدا نشد.",
   "dash.yourIp": "آی‌پی شما:",
   "err.serviceUnavailable": "سرویس پس‌زمینهٔ نئوکسیفای اجرا نمی‌شود. معمولاً بستن و باز کردن دوبارهٔ برنامه مشکل را حل می‌کند. اگر نشد، نئوکسیفای را دوباره نصب کنید.",
@@ -2085,6 +2108,8 @@ const fa: Record<TranslationKey, string> = {
   "repair.resultCleanLinux": "چیزی جا نمانده بود. تنظیمات شبکهٔ شما همان تنظیمات خود سیستم است.",
   "repair.resultUnverifiedLinux":
     "رفع مشکل انجام شد، ولی یکی از بررسی‌ها تمام نشد و نتیجه را نمی‌شود تأیید کرد. معمولاً دلیلش فقط کند بودن کامپیوتر است. دوباره وصل شوید. اگر باز وصل نشد، دستور زیر را در ترمینال اجرا کنید و خروجی‌اش را برای ما بفرستید.",
+  "repair.resultGroupsLinux":
+    "رفع مشکل انجام شد. یک برنامه هنوز در گروه حالت سفارشی است. الان از اتصال معمولی شما استفاده می‌کند و وقتی آن را ببندید و دوباره باز کنید، از این گروه بیرون می‌آید.",
   "repair.resultProblemsLinux":
     "بخشی از مشکل رفع نشد. معمولاً با راه‌اندازی دوبارهٔ کامپیوتر بقیه هم پاک می‌شود. اگر نشد، دستور زیر را در ترمینال اجرا کنید و خروجی‌اش را برای ما بفرستید.",
   "repair.noServiceHintLinux": "یک ترمینال باز کنید و این دستور را اجرا کنید. رمز عبور کامپیوترتان را می‌پرسد:",

@@ -12,7 +12,9 @@ import { setHealthIpTransport } from "@shared/lib/egress";
 import { ipv4OnlyHealthIp } from "@shared/lib/health-ip-v4";
 import { startEffects } from "@shared/lib/effects";
 import { startHasFallback } from "@shared/lib/old-engine-has";
-import "@shared/globals.css";
+// The shared stylesheet, through a Linux-only file beside it that also tells
+// Tailwind to scan the shared screens (see linux.css for why).
+import "@shared/linux.css";
 
 // The same start-up side effects as the Windows entry (desktop-windows
 // src/main.tsx), in the same order, because the screens assume them.

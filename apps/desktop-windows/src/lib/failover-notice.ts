@@ -27,6 +27,10 @@ export type RungFate = "dialled" | "noNetwork" | "notDialled";
 export interface FailedRung {
   routeId: string;
   fate: RungFate;
+  /** Linux only: the rung was Built-in and the computer has no strongSwan.
+   * Set from `err.engineMissingStrongswan`, which only a Linux build
+   * produces (connection-errors.ts), so Windows never sets it. */
+  strongswanMissing?: boolean;
 }
 
 /** The fate of a rung whose connect failed, by how its error was
@@ -60,6 +64,11 @@ export interface FailoverNotice {
    * that came up was too slow (`data-check.ts`), and the best of them was
    * kept. Said, so a slow tunnel is not mistaken for a good one. */
   slow?: boolean;
+  /** Linux only: a rung before the landing was Built-in, and it failed
+   * because strongSwan is not installed. Said, because otherwise the
+   * customer who chose Built-in is told only "Now using ..." and never
+   * learns the one thing that would make their choice work. */
+  strongswanMissing?: boolean;
 }
 
 export function failoverNotice(input: {
@@ -78,7 +87,10 @@ export function failoverNotice(input: {
       : "notTried";
   const dialledFailed = input.failed.some((rung) => rung.fate === "dialled");
   const noNetworkOnly = input.failed.some((rung) => rung.fate === "noNetwork") && !dialledFailed;
-  const notice: FailoverNotice = { label: input.label, fromRegion: input.fromRegion, toRegion: input.toRegion, shown, noNetworkOnly, dialledFailed };
+  const base: FailoverNotice = { label: input.label, fromRegion: input.fromRegion, toRegion: input.toRegion, shown, noNetworkOnly, dialledFailed };
+  // Added only when true, so a notice on Windows has exactly the fields it
+  // always had.
+  const notice = input.failed.some((rung) => rung.strongswanMissing) ? { ...base, strongswanMissing: true } : base;
   return input.slow ? { ...notice, slow: true } : notice;
 }
 
@@ -103,6 +115,10 @@ export function failoverText(notice: FailoverNotice): FailoverText {
           : "dash.usedInstead";
     return { key, vars: { from: notice.fromRegion, to: notice.toRegion ?? "", protocol: notice.label } };
   }
+  // In the country, Built-in skipped for want of strongSwan (Linux only):
+  // what to install, and where the connection is. It names no server as
+  // unreachable, since Built-in never dialled one.
+  if (notice.strongswanMissing) return { key: "dash.switchedNoStrongswan", vars: { protocol: notice.label } };
   // In the country: "didn't get through" only when a rung was dialled and
   // failed. Nothing failed at all -- the ladder landed at once on a route
   // other than the one on screen -- or every failure came before anything
