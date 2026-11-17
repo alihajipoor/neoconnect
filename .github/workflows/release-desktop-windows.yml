@@ -27,6 +27,14 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    # A fixed name for Azure to trust. This workflow runs on a tag, and the
+    # identity GitHub presents for a tag run names that tag -- so it is
+    # different for every release, and no single Azure federated credential
+    # could match it. With an environment the identity names the
+    # environment instead, which never changes. The environment is limited
+    # in the repository settings to desktop-v* tags, so a branch cannot
+    # borrow the signing identity by naming it.
+    environment: desktop-release
     # Signing is skipped, loudly, when the credentials are absent.
     #
     # It has to degrade rather than fail: releases predate the
@@ -78,13 +86,10 @@ jobs:
         working-directory: apps/desktop-windows
         run: pnpm run fetch-binaries
 
-      # No code-signing certificate exists yet (a real purchase/business
-      # decision, tracked separately in the M15 plan entry) -- this
-      # installer is unsigned for now, which means Windows SmartScreen
-      # will warn on first run. Once a certificate exists, sign here
-      # (e.g. via a signtool step against the built .exe, or Tauri's
-      # own WINDOWS_CERTIFICATE/WINDOWS_CERTIFICATE_PASSWORD env vars)
-      # before the release step below.
+      # Authenticode signing happens after the build, in the steps named
+      # "Sign ..." below, through Azure Artifact Signing -- and only when
+      # the AZURE_* secrets exist. Until they do the installer is unsigned
+      # and Windows SmartScreen warns on first run.
       #
       # Note this is a different concern from the updater signing below,
       # and neither covers the other: Authenticode proves the publisher
@@ -148,6 +153,11 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          # The signing identity holds one role, on the signing account,
+          # and nothing else in the subscription. Signing needs a token,
+          # not a selected subscription, so a login that finds none must
+          # not fail the release.
+          allow-no-subscriptions: true
 
       # Only the NSIS installer exists at this point. The bootstrapper is
       # built afterwards, deliberately, because it embeds this file --
@@ -160,17 +170,34 @@ jobs:
           endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE }}
-          files-folder: apps/desktop-windows/target/release/bundle/nsis
+          # Absolute, like the bootstrapper's path below: the action does
+          # not say what a relative folder is relative to.
+          files-folder: ${{ github.workspace }}\apps\desktop-windows\target\release\bundle\nsis
           files-folder-filter: exe
           file-digest: SHA256
           # Not on by default, and without it the signature is only
           # valid for three days -- after which every installer already
-          # in the wild would start warning again. A timestamp
-          # countersignature keeps shipped builds trusted even once the
-          # certificate expires or is replaced, which it will be: since
-          # March 2026 these certificates max out at 460 days.
+          # in the wild would start warning again. These certificates are
+          # renewed daily and each lives 72 hours; the timestamp
+          # countersignature is what keeps a shipped build trusted after
+          # the certificate that signed it is gone.
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
+          # The only credential on the runner is the one the login step
+          # above created. Everything else the Azure SDK would try first
+          # is switched off, as the action's own OIDC guide does, so a
+          # failure names the real cause instead of a credential type
+          # that was never there.
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
 
       # Signing rewrote the installer, so the updater signature produced
       # during the build no longer matches it.
@@ -260,6 +287,17 @@ jobs:
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
+          # As for the installer above: only the login step's credential.
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
 
       # A signing step that quietly does nothing is the failure mode
       # worth guarding against: everything stays green and the release
