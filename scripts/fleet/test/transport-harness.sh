@@ -27,6 +27,12 @@ PSQL_REMOTE="$T_REMOTE/psql.sh"
 SSH_BASE=("${SSH_BASE[@]/ServerAliveInterval=20/ServerAliveInterval=${T_ALIVE:-20}}")
 SSH_BASE=("${SSH_BASE[@]/ConnectTimeout=15/ConnectTimeout=${T_CONNECT_TIMEOUT:-15}}")
 SSH_BASE+=(-o "Port=$T_PORT" -o "UserKnownHostsFile=$T_KH" -o GlobalKnownHostsFile=/dev/null)
+# This machine's own ssh_config is not part of the test. Debian and Ubuntu
+# ship one with SendEnv in it, which the helper rightly leaves to ssh: on
+# CI every call then went over plain ssh and the suite compared ssh with
+# ssh. An empty file of the test's own instead.
+: >"$RUN_DIR/ssh_config"
+SSH_BASE+=(-F "$RUN_DIR/ssh_config")
 # shellcheck disable=SC2206
 [[ -n "${T_SSH_EXTRA:-}" ]] && SSH_BASE+=($T_SSH_EXTRA)
 st() { state_get "$@"; }

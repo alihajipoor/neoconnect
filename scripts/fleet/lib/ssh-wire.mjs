@@ -66,7 +66,9 @@ export function parseSshArgs(argv, { needCommand = true } = {}) {
       out.noStdin = true;
       continue;
     }
-    if (a === "-i" || a === "-o" || a === "-p" || a === "-l") {
+    // -F (a configuration file of the caller's choosing) goes to `ssh -G`
+    // with the rest, so what the helper reads is what ssh would read.
+    if (a === "-i" || a === "-o" || a === "-p" || a === "-l" || a === "-F") {
       const v = argv[i + 1];
       if (v === undefined) return { ok: false, why: `${a} without a value` };
       out.optArgs.push(a, v);
