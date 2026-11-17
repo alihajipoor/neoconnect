@@ -259,8 +259,9 @@ Four pieces, and only the interface is shared with Windows:
 | Piece | Where | What it is |
 |---|---|---|
 | Helper | `helper` | the root daemon `neoxify-helper`, on `/run/neoxify/helper.sock` |
-| Engines, routes, DNS | `tunnel` | bundled Xray with its own tun, kernel WireGuard, the distribution's OpenVPN |
-| Leak protection | `netguard` | one nftables table, `inet neoxify` |
+| Engines, routes, DNS | `tunnel` | bundled Xray with its own tun, kernel WireGuard, the distribution's OpenVPN, and its strongSwan (`charon-cmd`) for IKEv2 |
+| Leak protection | `netguard` | one nftables table, `inet neoxify`; the reconnect hold's rules |
+| Custom mode | `tunnel/src/sorting.rs`, `split.rs` | control groups `neoxify.split` and `neoxify.app`, marks, policy routes |
 | App | `src-tauri`, `src` | Tauri, reusing `apps/desktop-windows/src` as `@shared` |
 
 The helper speaks the Windows wire contract unchanged
@@ -278,12 +279,40 @@ job is what says so. On Linux, what is missing is not offered and its
 requests are never sent: a Linux session must not show or log an error
 for a feature it does not have.
 
-**Not in it, each refused plainly by the helper:** IKEv2 (a stated gap,
-not a decision: strongSwan is the route), per-app split tunnelling,
-Repair, the reconnect hold, and installing updates from inside the app
-(Linux shows a notice with a link; Tauri's updater cannot install a
-`.deb` or `.rpm`). Gaming mode is not wanted on Linux at all (owner,
-2026-11-16): do not list it as missing.
+**Since 0.2.0 it has what Windows has, except gaming mode**, which is
+not wanted on Linux at all (owner, 2026-11-16): do not build it, propose
+it or list it as missing. What 0.2.0 added:
+
+- **IKEv2** through the distribution's strongSwan. It is not bundled:
+  without it the interface says what to install, and never that a
+  server could not be reached.
+- **Custom mode** (per-app). A chosen program is moved into
+  `neoxify.split` and its packets are marked and routed. A fanotify
+  permission mark holds a chosen binary at start until it is moved, so
+  its first connection is already sorted. Only the session owner's
+  processes are moved.
+- **The reconnect hold**, Repair and Diagnostics.
+- **Installing an update from inside the app.** The app downloads the
+  package and its minisign signature; the helper checks the signature
+  against the updater's public key, that the package is ours and newer,
+  and installs it through `systemd-run` with apt or dnf. It refuses
+  while a tunnel is up, so the app disconnects first.
+
+**What 0.2.0 does not close, to be said plainly whenever it matters:**
+
+- Custom mode has no machine-wide confinement, as on Windows. A program
+  that binds its socket to the uplink leaves by the uplink in both
+  modes, a chosen app included. NetworkManager's own connectivity check
+  leaves by the uplink in "all except these".
+- The hold lets the app's whole control group out, so anything the app
+  itself starts there gets out too. Links are started outside the group
+  (`src-tauri/src/opener_scope.rs`) for that reason.
+- NetworkManager treats the WireGuard link as its own: GNOME shows
+  "Connection failed" after a WireGuard disconnect, and the "limited"
+  icon.
+- Unproven: the window coming forward for a `neoconnect://` link on
+  Wayland; the rpm install on a real Fedora machine (a container only);
+  any desktop but GNOME; a real IPv6 path.
 
 **nftables does not die with the process.** On Windows the kernel
 removes a dead service's filters by itself. Here a table outlives the
@@ -310,11 +339,16 @@ vmsync "<worktree root>" <name>     # the tree, through git, to ~/w/<name>
 vmssh 'cd ~/w/<name> && pnpm --filter @neoxify/desktop-linux run package'
 ```
 
-The proof is two scripts in `apps/desktop-linux/scripts`: `vm-proof.sh`
+The proof is four scripts in `apps/desktop-linux/scripts`: `vm-proof.sh`
 (the installed package: every protocol at the wire, the leak attempts
-with a control run, the failure paths; 252 checks) and
-`vm-gui-proof.mjs` (the app through WebDriver). A change to the helper,
-the engines or the rules is not done until `vm-proof.sh` says ALL PASS.
+with a control run, the hold, uplink loss, Repair, the failure paths;
+431 checks), `vm-custom-proof.sh` (Custom mode, both directions, every
+engine; 278 checks), `vm-review-proof.sh` (a second user on the machine:
+what they are refused, and that their programs are left alone) and
+`vm-gui-proof.mjs` (the app through WebDriver). Their headers say how to
+run them detached with a dead-man, and one part alone. A change to the
+helper, the engines or the rules is not done until the scripts that
+cover it say ALL PASS.
 
 Traps that cost time: xray's Linux tun creates and names the device but
 gives it no IPv4 address; deleting a WireGuard link takes the kernel up
@@ -323,6 +357,27 @@ under Xvfb when the `WEBKIT_DISABLE_*` variables are set and not
 otherwise; `health_ip::tests::never_asks_over_ipv6` fails on Ubuntu
 because `localhost` is not `::1` there, and it is Windows code pulled in
 by path.
+
+Traps from 0.2.0:
+
+- **Tailwind 4 scans the folder the build runs from.** The Linux build
+  runs from `apps/desktop-linux` while the screens live in
+  `apps/desktop-windows/src`, so their utility classes were never
+  generated and the Custom mode card was bare text in the real window.
+  `apps/desktop-windows/src/linux.css` adds the folder to the scan. No
+  test saw it; only the app on the VM's desktop did.
+- **`scripts/check-exit-groups.sh` looks for one line of
+  `split-tunnel.ts` word for word.** Wrapping it in a Linux condition
+  failed CI. The Linux helper accepts the exits and ignores them.
+- **The `ubuntu-22.04` runner has no minisign package.** The release
+  job checks its own signatures in an `ubuntu:24.04` container that is
+  given the public key and the signatures only.
+- **The signing key exists only in GitHub Actions.** Starting
+  `release-desktop-linux.yml` by hand builds and signs without
+  publishing, which is the only way to get packages the helper will
+  accept before a release.
+- **The helper has a private `/tmp`.** A file put there by anyone else
+  is "no longer there" to it.
 
 ## iOS
 

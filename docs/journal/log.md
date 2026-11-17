@@ -10349,3 +10349,91 @@ five wrong dependencies and seven proofs it would have weakened.
 to 17 minutes, from the measured per-call times and the Spain log. Five
 minutes is not reachable without dropping a proof. Quote the measured
 time after the next real add.
+
+## 2026-11-17 — Linux 0.2.0: the rest of the client, and what only the wire showed
+
+The owner asked for the rest of the Linux client. 0.2.0 adds IKEv2
+(through the distribution's strongSwan), Custom mode, the reconnect
+hold, Repair, Diagnostics and installing an update from inside the app.
+Gaming mode stays out on purpose.
+
+**How it was done.** Contracts first, then the code, then three rounds
+on the `Neoxify-Linux` guest with a capture at its uplink as the judge,
+one VM job at a time. The code was written in one pass and "all tests
+pass" meant little: the captures found real faults, each fixed and run
+again on the final build.
+
+**What the captures and the second user found, all fixed:**
+
+- A chosen program's first connection left the machine's own way,
+  because it was sorted after it started. A fanotify permission mark now
+  holds a chosen binary at start until it is in `neoxify.split`.
+- Packets the kernel sends for a closed connection (a reset) did not
+  follow the connection's mark.
+- The hold's list of resolvers included the tunnel's own, and was read
+  too late.
+- The status said "connected" for a link being torn down and "not
+  active" for a live Custom mode.
+- OpenVPN cannot change Custom mode in place. The switch was lost; now
+  the choice is kept and the screen says a reconnect is needed.
+- Another user on the machine could disconnect, repair or re-sort the
+  owner's session. All seven requests are refused now, and Custom mode
+  moves only the owner's processes.
+- A process stranded in `neoxify.split` by a killed helper was treated
+  as chosen in the next session.
+- The browser opened from a link inherited the app's group, which the
+  hold lets out. Links now start in their own scope.
+- The helper followed links, pipes and devices at the path it reads for
+  a sandboxed app.
+
+**What only the real desktop showed.** None of the shared screens'
+Tailwind classes were in the Linux build, 0.1.0 included: Tailwind 4
+scans the folder the build runs from. The Custom mode card was bare
+text. No test could have seen it. Also fixed there: Built-in falling
+back for want of strongSwan said only "Now using ..."; the Custom mode
+line spoke of ping and games; turning Custom mode off under OpenVPN
+showed nothing.
+
+**The update, with real signatures.** The signing key lives only in
+GitHub Actions, so `release-desktop-linux.yml` was started by hand: it
+builds and signs and publishes nothing. From a 0.1.9 build the signed
+0.2.0 installed itself on Ubuntu and, in a Fedora container, through
+dnf: the helper restarted once and the installed files are the signed
+package's. Refused, each with nothing installed: changed bytes, another
+file's signature, another key, no signature, another user's file, a
+link, the same version, a caller that is not the app, and any install
+while connected. A downgrade and a foreign package name were refused
+too, but only against a throwaway key, since no older signed build
+exists.
+
+**The one unexplained capture, explained.** "All except these" once
+showed eleven stray packets on the uplink. They are NetworkManager's
+plain-HTTP connectivity check, from root, bound to the uplink; it came
+back once in ten runs and is the same flow with every engine. The check
+now records who sent each packet and allows that sender by name.
+
+**Final counts.** `vm-proof.sh` 431 of 431, `vm-custom-proof.sh` 278 of
+278, the review proof with a second user, desktop JS 2733, CI green.
+
+**Not closed, and not proven:**
+
+- Under the hold, a program the app itself starts in its group gets
+  out. The app starts none but the browser, which is moved out.
+- A program that binds its socket to the uplink leaves by it in both
+  Custom modes, a chosen app included. Custom mode has no machine-wide
+  confinement, as on Windows.
+- A dead Xray server answers "connected, health unknown" from the
+  helper for over 40 s. The screen's own check turns that into
+  "unverified", as on Windows; the screen was not watched in that case.
+- The update notice, the download and the Restart button were not run
+  before the release, because production did not announce 0.2.0 yet.
+- The rpm install on a real Fedora machine; the window coming forward
+  for a `neoconnect://` link on Wayland; any desktop but GNOME; a real
+  IPv6 path; a censored network.
+- GNOME shows "Connection failed" after a WireGuard disconnect, and the
+  "limited" icon: NetworkManager treats the link as its own.
+- Small and left for the next version: the Custom card says "nothing
+  goes through the VPN" with no apps chosen while the session runs full
+  tunnel; it says "applies from your next connection" while changes
+  apply live; Repair's step details stay English in Persian; a hidden
+  32 px overflow in the app frame.
