@@ -6,6 +6,11 @@ serve HOST...:  listens on TCP 53, 80 and 443 (IPv4 and IPv6 alike) and on
 probe:  probe tcp|udp HOST PORT [MARK] -- prints "pass" or "refused" and
         how long it took, exits 0 or 1. MARK sets SO_MARK, which is how the
         WireGuard engine marks its own packets.
+stream HOST PORT SECONDS: sends UDP datagrams to HOST:PORT without pause
+        for SECONDS, whatever the sends answer, and prints how many it tried.
+count HOST PORT SECONDS: counts the datagrams that arrive at HOST:PORT in
+        SECONDS and prints the number: what got past the rules, counted on
+        the far side rather than by the sender.
 """
 import socket
 import sys
@@ -76,8 +81,47 @@ def probe(kind, host, port, mark=None):
     return 0 if ok else 1
 
 
+def stream(host, port, seconds):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    end = time.monotonic() + float(seconds)
+    tried = 0
+    while time.monotonic() < end:
+        tried += 1
+        try:
+            s.sendto(b"x", (host, int(port)))
+        except OSError:
+            # A refusal answers the send itself; the next one goes anyway.
+            pass
+        time.sleep(0.0002)
+    print(tried)
+    return 0
+
+
+def count(host, port, seconds):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind((host, int(port)))
+    end = time.monotonic() + float(seconds)
+    got = 0
+    while True:
+        left = end - time.monotonic()
+        if left <= 0:
+            break
+        s.settimeout(left)
+        try:
+            s.recv(64)
+            got += 1
+        except socket.timeout:
+            break
+    print(got, flush=True)
+    return 0
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "serve":
         serve(sys.argv[2:])
+    elif sys.argv[1] == "stream":
+        sys.exit(stream(*sys.argv[2:]))
+    elif sys.argv[1] == "count":
+        sys.exit(count(*sys.argv[2:]))
     else:
         sys.exit(probe(*sys.argv[2:]))

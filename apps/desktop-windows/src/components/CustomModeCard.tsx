@@ -43,6 +43,7 @@ import {
   type GameExitGroup,
 } from "../lib/game-apps";
 import { Button, Card, Switch } from "../components/ui";
+import { isLinux, supportsGameCatalogue } from "../lib/desktop-platform";
 
 /** See the re-scan effect in `CustomModeCard` for why this is 15 s and
  * why the timer only exists while a game is incomplete. */
@@ -62,6 +63,9 @@ const RESCAN_INTERVAL_MS = 15_000;
  */
 export function CustomModeCard() {
   const { t } = useI18n();
+  /** The game catalogue, its groups and per-game exits: Windows only. On
+   * Linux the card is the chosen programs alone, in either direction. */
+  const catalogue = supportsGameCatalogue();
   const [settings, setSettings] = useState<SplitTunnelSettings | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   /**
@@ -106,6 +110,12 @@ export function CustomModeCard() {
     void loadSplitTunnel().then((loaded) => {
       if (!cancelled) setSettings(loaded);
     });
+    // Nothing about games or exits is asked where there is no catalogue.
+    if (!catalogue) {
+      return () => {
+        cancelled = true;
+      };
+    }
     // Failure is silent on purpose and leaves `games` null, which hides
     // the button. The catalogue is an extra way in, not the only one --
     // both existing pickers still work with no network at all, and a
@@ -138,6 +148,8 @@ export function CustomModeCard() {
    * A failure leaves `placements` null, which renders as "not
    * established" rather than as a match or a mismatch. */
   function refreshPlacements() {
+    // Placements are per-game exits, which only the catalogue makes.
+    if (!catalogue) return;
     void fetchExitPlacements().then(
       (result) => setPlacements(result.apps),
       () => setPlacements(null),
@@ -374,9 +386,11 @@ export function CustomModeCard() {
     if (!settings) return;
     // Compared case-insensitively because Windows paths are, and the
     // picker's casing does not always match what a running process
-    // reports -- two entries for one app would look like a bug.
-    const have = new Set(settings.apps.map((a) => a.toLowerCase()));
-    const fresh = picked.filter((p) => !have.has(p.toLowerCase()));
+    // reports -- two entries for one app would look like a bug. Linux
+    // paths are case-sensitive, so there they are compared as they are.
+    const same = (p: string) => (isLinux() ? p : p.toLowerCase());
+    const have = new Set(settings.apps.map(same));
+    const fresh = picked.filter((p) => !have.has(same(p)));
     if (fresh.length === 0) {
       setNotice(t("settings.customAlready"));
       return false;
@@ -521,10 +535,13 @@ export function CustomModeCard() {
   async function browseForApp() {
     setNotice(null);
     if (!settings) return;
+    // Windows programs are .exe files. A Linux program has no extension to
+    // filter on, so the dialog shows every file there; the helper checks
+    // whatever is chosen (`tunnel::valid_app`).
     const picked = await open({
       multiple: false,
       directory: false,
-      filters: [{ name: t("settings.customFileFilter"), extensions: ["exe"] }],
+      ...(isLinux() ? {} : { filters: [{ name: t("settings.customFileFilter"), extensions: ["exe"] }] }),
     });
     if (typeof picked !== "string") return;
     await addPaths([picked]);
@@ -720,7 +737,7 @@ export function CustomModeCard() {
 
               Only for games added from the catalogue, because that is
               the only place this client knows what a whole game is. */}
-          {settings.mode === "onlySelected"
+          {catalogue && settings.mode === "onlySelected"
             ? settings.games
                 .filter((game) => !isWholeGroup(game, settings.apps))
                 .map((game) => (
@@ -752,7 +769,7 @@ export function CustomModeCard() {
               honest response to that is to offer no choice rather than
               a choice built out of route ids that would report a
               mismatch for a game sitting exactly where it was put. */}
-          {settings.mode === "onlySelected" && settings.games.length > 0 && hasExitVocabulary(routes) ? (
+          {catalogue && settings.mode === "onlySelected" && settings.games.length > 0 && hasExitVocabulary(routes) ? (
             <div className="flex flex-col gap-2 rounded-lg border border-[var(--hairline-2)] bg-[var(--field)] p-2.5">
               <div className="flex items-center gap-1.5">
                 <MapPin className="size-3.5 text-primary" />
@@ -889,7 +906,7 @@ export function CustomModeCard() {
               else. Said out loud because a customer who asked for
               something and silently did not get it has been told the
               smaller half of what happened. */}
-          {exitsForGames(settings.games, settings.apps).withheld.map((held) => (
+          {(catalogue ? exitsForGames(settings.games, settings.apps).withheld : []).map((held) => (
             <p key={held.slug} className="text-[11px] text-muted-foreground">
               {held.reason === "partial"
                 ? t("settings.customGameExitPartial", {
@@ -983,7 +1000,7 @@ export function CustomModeCard() {
               the handover records people choosing one executable,
               getting half a product routed, and reporting Custom mode
               as broken. */}
-          {games && games.length > 0 ? (
+          {catalogue && games && games.length > 0 ? (
             <>
               <Button
                 variant="outline"
@@ -1000,7 +1017,7 @@ export function CustomModeCard() {
             </>
           ) : null}
 
-          {pickingGame && games ? (
+          {catalogue && pickingGame && games ? (
             <GamePicker
               games={games}
               // Nothing is "already chosen" here: Custom mode does not
@@ -1063,11 +1080,20 @@ export function CustomModeCard() {
 
               Shown whenever the mode is on, beside the fail-open note
               and for the same reason -- it is a standing property of
-              Custom mode, not an event. */}
-          <p className="text-[11px] font-medium text-foreground">
-            {t("settings.customIcmpTitle")}
-          </p>
-          <p className="text-[11px] text-muted-foreground">{t("settings.customIcmpBody")}</p>
+              Custom mode, not an event.
+
+              Windows only. It describes the Windows service's machine-wide
+              ping block. The Linux helper sorts programs by control group,
+              and a ping socket is sorted with the program that opened it,
+              so it has no such block to warn about. */}
+          {catalogue ? (
+            <>
+              <p className="text-[11px] font-medium text-foreground">
+                {t("settings.customIcmpTitle")}
+              </p>
+              <p className="text-[11px] text-muted-foreground">{t("settings.customIcmpBody")}</p>
+            </>
+          ) : null}
         </div>
       ) : null}
     </Card>

@@ -8,11 +8,18 @@ import {
   openSupportTicket,
   replyToSupportTicket,
 } from "../lib/customer";
-import { collectDiagnostics, diagnosticsToText } from "../lib/repair";
+import {
+  collectDiagnostics,
+  collectLinuxDiagnostics,
+  diagnosticsToText,
+  linuxDiagnosticsToText,
+  type Diagnostics,
+  type LinuxDiagnostics,
+} from "../lib/repair";
 import { loadFlagSet } from "../lib/flag-art";
 import { reportedPlatform } from "../lib/attempts";
 import { chromiumFromUserAgent, engineLine, webkitGtkVersion, webkitLine, webviewVersion } from "../lib/webview-engine";
-import { supportsRepair } from "../lib/desktop-platform";
+import { isLinux, supportsRepair } from "../lib/desktop-platform";
 import { useI18n } from "../lib/i18n";
 import { failureText } from "../lib/failure-text";
 import { swapView } from "../lib/view-transition";
@@ -138,9 +145,10 @@ function TicketList({
         )}
       </Card>
 
-      {/* The snapshot is the Windows service's (`vpn_diagnostics`); a
-          platform whose helper has no diagnostics yet (Linux) shows none
-          rather than a button that can only fail. */}
+      {/* The snapshot is the Windows service's (`vpn_diagnostics`) or the
+          Linux helper's (`vpn_linux_diagnostics`); a desktop without a
+          helper (the macOS shell) shows none rather than a button that
+          can only fail. */}
       {supportsRepair() ? <DiagnosticsCard /> : null}
     </div>
   );
@@ -188,8 +196,11 @@ function DiagnosticsCard() {
       // can read it (see diagnosticsToText).
       // And the Windows web component's version: an old one draws the
       // app from fallbacks, and nothing else in the text would say so.
+      // On Linux the helper answers with its own fields, and the text is
+      // made from those (`linuxDiagnosticsToText`).
+      const linux = isLinux();
       const [snapshot, appVersion, flags, engine] = await Promise.all([
-        collectDiagnostics(),
+        linux ? collectLinuxDiagnostics() : collectDiagnostics(),
         getVersion().catch(() => "unknown"),
         loadFlagSet(),
         reportedPlatform().then(
@@ -202,7 +213,12 @@ function DiagnosticsCard() {
           () => undefined,
         ),
       ]);
-      setText(diagnosticsToText(snapshot, appVersion, flags ? Object.keys(flags).length : null, engine));
+      const flagCount = flags ? Object.keys(flags).length : null;
+      setText(
+        linux
+          ? linuxDiagnosticsToText(snapshot as LinuxDiagnostics, appVersion, flagCount, engine)
+          : diagnosticsToText(snapshot as Diagnostics, appVersion, flagCount, engine),
+      );
     } catch {
       // Nothing partial. A snapshot missing the half the service
       // answers is worse than none: it would read as "everything is

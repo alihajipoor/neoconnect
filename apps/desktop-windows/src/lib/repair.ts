@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { ladderPass } from "./ladder-pass";
 import { SERVICE_CALL_TIMEOUT_MS, withTimeout } from "./service-call";
+import { isLinux } from "./desktop-platform";
 
 /** "Repair my network", and the diagnostics that go beside it.
  *
@@ -244,8 +245,84 @@ export async function repairCommandLine(): Promise<string> {
   } catch {
     // The command is still the answer even if the app cannot work out
     // where it lives -- the customer can find the file from the name.
-    return '"C:\\Program Files\\Neoxify\\resources\\neoconnect-service.exe" repair';
+    // On Linux the package puts the helper in one fixed place.
+    return isLinux() ? LINUX_REPAIR_COMMAND : '"C:\\Program Files\\Neoxify\\resources\\neoconnect-service.exe" repair';
   }
+}
+
+/** The Linux helper's own repair, run by hand when the helper's service is
+ * the thing that is broken. Where the package installs it. */
+export const LINUX_REPAIR_COMMAND = "sudo /usr/lib/neoxify/neoxify-helper repair";
+
+/** What the Linux helper can see of the machine (the `LinuxDiagnostics` of
+ * apps/desktop-linux/wire). Its own fields, not Windows': there is no NRPT,
+ * WFP or RAS entry on Linux to count, and a reply shaped like Windows'
+ * would have to make those up. */
+export interface LinuxDiagnostics {
+  helperVersion: string;
+  package?: "deb" | "rpm";
+  ourLinks: { name: string; present: boolean }[];
+  otherVpnsUp: string[];
+  ourRoutes: number;
+  ourRules: number;
+  firewallTable: boolean;
+  splitTable: boolean;
+  dnsMode: string;
+  dnsPointedAtUs: boolean;
+  orphanedEngines: number;
+  owed: number;
+  controlGroups: boolean;
+  programs: { name: string; present: boolean }[];
+  recentLog: string[];
+}
+
+export async function collectLinuxDiagnostics(): Promise<LinuxDiagnostics> {
+  return withTimeout(invoke<LinuxDiagnostics>("vpn_linux_diagnostics"), "diagnostics", SERVICE_CALL_TIMEOUT_MS * 5);
+}
+
+/** The Linux snapshot as text, on the same terms as `diagnosticsToText`:
+ * plain lines a customer can check at a glance before pasting them. Read
+ * defensively, because a helper older or newer than this app may leave a
+ * field out, and a missing field is said as that rather than as "no". */
+export function linuxDiagnosticsToText(d: LinuxDiagnostics, appVersion: string, flagSet?: number | null, engine?: string): string {
+  const yesNo = (value: unknown) => (value === true ? "yes" : value === false ? "no" : "not reported");
+  const count = (value: unknown) => (typeof value === "number" ? String(value) : "not reported");
+  const named = (values: unknown) =>
+    Array.isArray(values)
+      ? values.length
+        ? values
+            .map((v: { name?: unknown; present?: unknown }) => `${String(v?.name)}=${yesNo(v?.present)}`)
+            .join(", ")
+        : "none"
+      : "not reported";
+  const list = (values: unknown) =>
+    Array.isArray(values) ? (values.length ? values.map(String).join(", ") : "none") : "not reported";
+
+  const lines = [
+    "Neoxify diagnostics",
+    `app: ${appVersion}`,
+    ...(engine === undefined ? [] : [engine]),
+    ...(flagSet === undefined ? [] : [`flag set: ${flagSet === null ? "could not be read" : `${flagSet} flags`}`]),
+    `helper: ${d.helperVersion ?? "not reported"}`,
+    `package: ${d.package ?? "not a package install"}`,
+    `our interfaces: ${named(d.ourLinks)}`,
+    `other VPNs up: ${list(d.otherVpnsUp)}`,
+    `our routes: ${count(d.ourRoutes)}`,
+    `our routing rules: ${count(d.ourRules)}`,
+    `firewall table: ${yesNo(d.firewallTable)}`,
+    `Custom mode table: ${yesNo(d.splitTable)}`,
+    `DNS: ${d.dnsMode ?? "not reported"}, pointed at the VPN: ${yesNo(d.dnsPointedAtUs)}`,
+    `orphaned engines: ${count(d.orphanedEngines)}`,
+    `owed back to the system: ${count(d.owed)}`,
+    `control groups (v2): ${yesNo(d.controlGroups)}`,
+    `programs: ${named(d.programs)}`,
+  ];
+
+  if (Array.isArray(d.recentLog) && d.recentLog.length > 0) {
+    lines.push("", "helper log (most recent last):");
+    for (const line of d.recentLog) lines.push(`  ${line}`);
+  }
+  return lines.join("\n");
 }
 
 /** The snapshot as text a customer can read before pasting it.

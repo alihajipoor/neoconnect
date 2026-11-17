@@ -16,6 +16,7 @@ import { autoReconnect } from "../lib/auto-reconnect";
 import { useI18n, type TranslationKey } from "../lib/i18n";
 import { Button, Card } from "../components/ui";
 import { cn } from "../lib/utils";
+import { isLinux } from "../lib/desktop-platform";
 
 /** "Repair my network".
  *
@@ -54,6 +55,8 @@ export function RepairNetwork({
   onFinished?: () => void;
 }) {
   const { t } = useI18n();
+  // The same screen on Linux, in words that name no Windows.
+  const linux = isLinux();
   const [expanded, setExpanded] = useState(variant === "card");
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<RepairReport | null>(null);
@@ -142,14 +145,14 @@ export function RepairNetwork({
         </div>
         <div className="min-w-0">
           <p className="text-sm font-semibold">{t("repair.title")}</p>
-          <p className="text-xs text-muted-foreground">{t("repair.subtitle")}</p>
+          <p className="text-xs text-muted-foreground">{t(linux ? "repair.subtitleLinux" : "repair.subtitle")}</p>
         </div>
       </div>
 
       {/* Said before the button, not after it. The promise this makes --
           that it only removes things and never blocks any traffic -- is
           the one somebody in Iran needs in order to press it at all. */}
-      <p className="text-xs leading-relaxed text-muted-foreground">{t("repair.explain")}</p>
+      <p className="text-xs leading-relaxed text-muted-foreground">{t(linux ? "repair.explainLinux" : "repair.explain")}</p>
       <ul className="flex flex-col gap-1 text-xs text-muted-foreground">
         <li className="flex items-start gap-1.5">
           <TriangleAlert className="mt-0.5 size-3 shrink-0 text-highlight" />
@@ -171,7 +174,7 @@ export function RepairNetwork({
       {unreachable ? (
         <div className="flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3">
           <p className="text-xs font-medium text-destructive">{t("repair.noService")}</p>
-          <p className="text-xs text-muted-foreground">{t("repair.noServiceHint")}</p>
+          <p className="text-xs text-muted-foreground">{t(linux ? "repair.noServiceHintLinux" : "repair.noServiceHint")}</p>
           {/* Forced left-to-right: a Windows path in a right-to-left
               paragraph is reordered into something that cannot be typed
               back, and this is a line the customer has to reproduce
@@ -228,14 +231,21 @@ function Result({ report }: { report: RepairReport }) {
   // customers their repair had not worked when nothing established
   // that -- see `indeterminateSteps`. Only a determined failure is bad
   // news; an unfinished check is a caveat on good news.
+  const linux = isLinux();
   const summaryKey: TranslationKey =
     failed.length > 0
-      ? "repair.resultProblems"
+      ? linux
+        ? "repair.resultProblemsLinux"
+        : "repair.resultProblems"
       : indeterminate.length > 0
-        ? "repair.resultUnverified"
+        ? linux
+          ? "repair.resultUnverifiedLinux"
+          : "repair.resultUnverified"
         : anythingFixed(report)
           ? "repair.resultFixed"
-          : "repair.resultClean";
+          : linux
+            ? "repair.resultCleanLinux"
+            : "repair.resultClean";
 
   return (
     <div className="flex flex-col gap-2">
@@ -262,14 +272,24 @@ function Result({ report }: { report: RepairReport }) {
   );
 }
 
+/** A step's words: on Linux its own first, where a step shares an id with
+ * Windows but looks at something else (`repair.stepLinux.<id>`), then the
+ * shared ones. `known` is false for an id this build has no words for. */
+export function stepLabel(id: string, t: (key: TranslationKey) => string): { label: string; known: boolean } {
+  const keys = [...(isLinux() ? [`repair.stepLinux.${id}`] : []), `repair.step.${id}`] as TranslationKey[];
+  for (const key of keys) {
+    const label = t(key);
+    if (label !== key) return { label, known: true };
+  }
+  return { label: id, known: false };
+}
+
 function StepRow({ step }: { step: RepairStep }) {
   const { t } = useI18n();
   // The label is looked up by id, and the English one the service sent
   // is the fallback rather than the id itself: a step this build of the
   // app has never heard of should still read as words.
-  const labelKey = `repair.step.${step.id}` as TranslationKey;
-  const label = t(labelKey);
-  const known = label !== labelKey;
+  const { label, known } = stepLabel(step.id, t);
 
   const style = {
     alreadyClean: { key: "repair.stepClean", icon: Minus, tone: "text-muted-foreground" },

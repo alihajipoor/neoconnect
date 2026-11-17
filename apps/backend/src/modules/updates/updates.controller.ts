@@ -42,9 +42,9 @@ export class UpdatesController {
     res.redirect(302, await this.updates.androidApkUrl());
   }
 
-  /** The Linux packages, one stable link per format. Linux has no in-app
-   * updater in its first version, so these are what both the website and
-   * the app's "a new version is available" notice open. */
+  /** The Linux packages, one stable link per format, for the website and
+   * for the app's notice when a release carries no signature it can
+   * install from. */
   @Get("/installer/linux-deb")
   async linuxDebInstaller(@Res() res: Response) {
     res.redirect(302, await this.updates.linuxPackageUrl("deb"));
@@ -146,10 +146,13 @@ export class UpdatesController {
     res.json({ version: check.version, downloadPath: "/updates/installer/android" });
   }
 
-  /** The Linux app's update check, shaped like Android's: there is no
-   * updater to hand a manifest to, only the newer version and where to
-   * get it, in both package formats so the notice can offer the right
-   * one. Only x86_64 is built, so the arch is not consulted. */
+  /** The Linux app's update check, shaped like Android's: the newer
+   * version and where to get it, in both package formats so the notice
+   * can offer the right one. From 0.2.0 the app's helper installs the
+   * package itself, so a signed release also carries `signed`, each
+   * package's download link and signature; 0.1.0 reads only `version` and
+   * `downloadPath` and ignores it. Only x86_64 is built, so the arch is not
+   * consulted. */
   private async checkLinux(currentVersion: string, res: Response) {
     if (!/^\d+\.\d+\.\d+$/.test(currentVersion)) {
       res.status(400).json({ message: "currentVersion must be x.y.z" });
@@ -168,6 +171,7 @@ export class UpdatesController {
       version: check.version,
       downloadPath: "/updates/installer/linux-deb",
       packages: { deb: "/updates/installer/linux-deb", rpm: "/updates/installer/linux-rpm" },
+      ...(check.signed ? { signed: check.signed } : {}),
     });
   }
 }

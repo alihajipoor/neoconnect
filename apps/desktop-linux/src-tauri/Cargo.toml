@@ -27,8 +27,8 @@ tauri-build = { version = "2", features = [] }
 # Versions as the Windows app names them, for the modules pulled in from it
 # by path (relay_http, door_http, control_plane_probe, bundle_scope,
 # health_ip, window_fit): see the Windows Cargo.toml for why each is there.
-# No updater plugin: Linux does not install its own updates; it says a new
-# version exists and links to it.
+# No updater plugin: Linux installs its updates through the helper and the
+# distribution's package manager (update.rs, linux_requests.rs).
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
@@ -40,6 +40,12 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-process = "2"
 tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
 neoconnect-ipc = { path = "../../desktop-windows/ipc" }
+# The requests only the Linux helper answers (update install, diagnostics).
+neoxify-linux-wire = { path = "../wire" }
+# The GTK window under Tauri's, for the activation token that lets a
+# second launch bring it forward on Wayland (activation.rs). The version
+# Tauri already builds against, so nothing new is compiled.
+gtk = "0.18"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "macros", "rt", "process"] }

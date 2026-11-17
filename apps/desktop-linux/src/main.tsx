@@ -1,7 +1,7 @@
 // First, before any shared module is evaluated: the screens ask which
-// desktop they are on, and the Linux first version hides what its helper
-// does not carry (Custom mode, gaming, Repair, the reconnect hold, IKEv2,
-// self-update). See platform.ts for why this is an import, not a call.
+// desktop they are on, and leave out what Linux does not have (gaming
+// mode, and the game catalogue in Custom mode). See platform.ts for why
+// this is an import, not a call.
 import "./platform";
 import React from "react";
 import ReactDOM from "react-dom/client";

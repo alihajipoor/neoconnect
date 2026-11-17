@@ -1,14 +1,16 @@
 //! Brings one tunnel up from a saved Connect request, holds it, and takes
 //! it down: the live check of this crate, run as root on a test machine.
 //!
-//!   up <connect.json> [seconds]
+//!   up <connect.json> [seconds] [only|except <app>...]
+//!   up --sweep
 //!
-//! The file is the JSON of one `Request::Connect`. Without `seconds` the
-//! tunnel is held until Enter. `NEOXIFY_BIN` names the directory holding
-//! `xray` (default `/usr/lib/neoxify`); state and scratch go under
-//! `NEOXIFY_TEST_DIR` (default `/tmp/neoxify-up`). Nothing that identifies
-//! the server or the account is printed: the transports are counted, not
-//! listed.
+//! The file is the JSON of one `Request::Connect`. Without `seconds` (or
+//! with 0) the tunnel is held until Enter. `only` and `except` bring it up
+//! in Custom mode with the apps that follow. `NEOXIFY_BIN` names the
+//! directory holding `xray` (default `/usr/lib/neoxify`); state and
+//! scratch go under `NEOXIFY_TEST_DIR` (default `/tmp/neoxify-up`).
+//! Nothing that identifies the server or the account is printed: the
+//! transports are counted, not listed.
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -16,15 +18,24 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use neoconnect_ipc::Request;
-use neoxify_tunnel::{connect, sweep_leftovers, visible_tunnel, way_out, Dirs, Limits};
+use neoxify_tunnel::{connect, sweep_leftovers, visible_tunnel, way_out, Dirs, Limits, Shape};
+
+fn limits(secs: u64) -> Limits {
+    Limits { deadline: Instant::now() + Duration::from_secs(secs), cancel: Arc::new(AtomicBool::new(false)) }
+}
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let Some(file) = args.next() else {
-        eprintln!("usage: up <connect.json> [seconds]");
+        eprintln!("usage: up <connect.json> [seconds] [only|except <app>...]");
         std::process::exit(2);
     };
-    let hold: Option<u64> = args.next().and_then(|s| s.parse().ok());
+    let hold: Option<u64> = args.next().and_then(|s| s.parse().ok()).filter(|s| *s > 0);
+    let shape = match args.next().as_deref() {
+        Some("only") => Shape::OnlySelected(args.collect()),
+        Some("except") => Shape::AllExcept(args.collect()),
+        _ => Shape::Full,
+    };
     let sweep_only = file == "--sweep";
 
     let base = PathBuf::from(std::env::var("NEOXIFY_TEST_DIR").unwrap_or_else(|_| "/tmp/neoxify-up".into()));
@@ -49,15 +60,23 @@ fn main() {
         eprintln!("not a Connect request");
         std::process::exit(2);
     };
+    for app in match &shape {
+        Shape::OnlySelected(a) | Shape::AllExcept(a) => a.as_slice(),
+        Shape::Full => &[],
+    } {
+        if let Err(why) = neoxify_tunnel::valid_app(app) {
+            eprintln!("not an app identity: {why}");
+            std::process::exit(2);
+        }
+    }
 
     for line in sweep_leftovers(&dirs) {
         println!("sweep: {line}");
     }
     println!("way out: {:?}", way_out(&profile));
 
-    let limits = Limits { deadline: Instant::now() + Duration::from_secs(60), cancel: Arc::new(AtomicBool::new(false)) };
     let started = Instant::now();
-    let mut tunnel = match connect(&profile, &exits, &known_nodes, &neoxify_tunnel::Shape::Full, &dirs, &limits) {
+    let mut tunnel = match connect(&profile, &exits, &known_nodes, &shape, &dirs, &limits(60)) {
         Ok(t) => t,
         Err(problem) => {
             println!("connect failed after {:?}: {problem}", started.elapsed());
@@ -78,6 +97,9 @@ fn main() {
         up.dns_protected
     );
     println!("visible: {:?}", visible_tunnel());
+    println!("shape: {:?}", tunnel.shape());
+    println!("split: {:?}", tunnel.split());
+    println!("probe: {:?}", tunnel.probe(&limits(15)));
     println!("READY");
 
     match hold {
@@ -92,6 +114,7 @@ fn main() {
         }
     }
 
+    println!("split before stop: {:?}", tunnel.split());
     println!("health: {:?}", tunnel.health());
     println!("counters (rx, tx): {:?}", tunnel.counters());
     let stopping = Instant::now();

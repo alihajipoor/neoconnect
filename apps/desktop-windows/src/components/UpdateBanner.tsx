@@ -19,17 +19,22 @@ export function UpdateBanner({
   blocked,
   onOpenDownload,
   openFailed = false,
+  installing = false,
 }: {
   state: UpdateState;
   onRestart: () => void;
   busy: boolean;
   /** Restart was asked for while a tunnel was up, and refused. */
   blocked: boolean;
-  /** Opens the website's download page, for "available": a build that
-   * cannot install its own updates (Linux) only says one exists. */
+  /** Opens the download, for "available": a build that is not installing
+   * this update itself (the macOS shell, or Linux without a signed
+   * package) only says one exists. */
   onOpenDownload?: () => void;
   /** The download page was asked for and did not open. */
   openFailed?: boolean;
+  /** Linux: Restart was pressed and the package manager is installing the
+   * update, which takes longer than Windows' restart. */
+  installing?: boolean;
 }) {
   const { t } = useI18n();
   if (state.status === "none") return null;
@@ -39,7 +44,13 @@ export function UpdateBanner({
       <div className="nx-upd" role="status">
         <p className="flex items-center gap-2">
           <Download className="size-4 shrink-0 text-cobalt-ink" aria-hidden />
-          <span>{openFailed ? t("update.openFailed") : t("update.available", { version: state.version })}</span>
+          <span>
+            {openFailed
+              ? t("update.openFailed")
+              : state.installFailed
+                ? t("update.installFailed", { version: state.version })
+                : t("update.available", { version: state.version })}
+          </span>
         </p>
         {onOpenDownload ? (
           <PillButton variant="ghost" size="sm" onClick={onOpenDownload} disabled={busy}>
@@ -69,7 +80,9 @@ export function UpdateBanner({
               : t("update.downloadingPercent", { version: state.version, percent: state.percent })
             : blocked
               ? t("update.connectedFirst")
-              : t("update.ready", { version: state.version })}
+              : installing
+                ? t("update.installing", { version: state.version })
+                : t("update.ready", { version: state.version })}
         </span>
       </p>
       {!downloading && (

@@ -12,6 +12,8 @@ export interface PlatformRelease {
   /** Null when nothing is released for that platform yet, or the feed failed. */
   version: string | null;
   url: string | null;
+  /** Linux only: both package formats. `url` is the .deb. */
+  packages?: { deb: string; rpm: string } | null;
   publishedAt: string | null;
 }
 

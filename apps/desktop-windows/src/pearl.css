@@ -3628,6 +3628,20 @@
   .nx-prow .n {
     font-size: 13.5px;
   }
+  /* In the narrow locations panel a protocol's name with its server number
+     ("Stealth HTTPS · Server 2") and a latency beside it is wider than the
+     row, and was cut short with an ellipsis, IKEv2's row among them (seen
+     at 940x700 on Linux; the same widths on Windows). The name now keeps
+     whole and the server number moves to a second line instead. A name
+     that fits is drawn exactly as before. */
+  .nx-loclist:not(.page) .nx-prow .n {
+    white-space: normal;
+    text-overflow: clip;
+  }
+  .nx-loclist:not(.page) .nx-prow .n > bdi,
+  .nx-node {
+    white-space: nowrap;
+  }
   .nx-node {
     color: var(--ink-2);
     font-weight: 400;

@@ -252,3 +252,148 @@ pub(crate) fn build(plan: &Plan) -> String {
     let _ = writeln!(s, "}}");
     s
 }
+
+/// The hold's refusals, and the permit that says DNS is open to anywhere.
+/// The read-back finds a hold, and what it lets through, by these.
+pub(crate) const TAG_HOLD: &str = "nx:hold";
+pub(crate) const TAG_DNS_ANYWHERE: &str = "nx:dns-anywhere";
+
+/// A control group path relative to the cgroup root, as nft's
+/// `socket cgroupv2` takes it. Like an interface name it is written into
+/// the script inside quotes, so it is held to plain characters, and no
+/// component may be "." or "..", which would name a group outside the one
+/// the plan meant (the root itself, whose sockets are every program's).
+pub(crate) fn valid_group(path: &str) -> bool {
+    path.len() <= 255
+        && path.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'/'))
+        && path.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
+}
+
+/// How deep the group sits below the root: nft compares the ancestor at
+/// that level, so the level has to be the group's own.
+pub(crate) fn group_level(path: &str) -> usize {
+    path.split('/').count()
+}
+
+/// The hold's script: the same table as the confinement, so loading one
+/// replaces the other in the same transaction. The order is the weight,
+/// as above: loopback, the tunnels, the servers, the engine's mark, the
+/// app's group, DHCP, the resolvers, the refusal of every other lookup,
+/// the local network, then the refusal of everything else.
+pub(crate) fn build_hold(plan: &crate::HoldPlan) -> String {
+    use std::net::IpAddr;
+    // apply_hold() refuses anything invalid before it gets here; what
+    // arrives anyway is left out, which only makes the table stricter.
+    let mut tunnels: Vec<String> = Vec::new();
+    for name in plan.tunnel_ifaces.iter().filter(|n| valid_iface(n)) {
+        let quoted = format!("\"{name}\"");
+        if !tunnels.contains(&quoted) {
+            tunnels.push(quoted);
+        }
+    }
+    let mut servers: Vec<String> = Vec::new();
+    for ip in plan.servers.iter().filter(|ip| crate::usable_v4(**ip)) {
+        let ip = ip.to_string();
+        if !servers.contains(&ip) {
+            servers.push(ip);
+        }
+    }
+    let (mut dns4, mut dns6): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    for ip in plan.resolvers.iter().filter(|ip| crate::usable_resolver(**ip)) {
+        let (list, text) = match ip {
+            IpAddr::V4(v4) => (&mut dns4, v4.to_string()),
+            IpAddr::V6(v6) => (&mut dns6, v6.to_string()),
+        };
+        if !list.contains(&text) {
+            list.push(text);
+        }
+    }
+    let fwmark = plan.engine_fwmark.filter(|m| *m != 0);
+    let group = plan.app_group.as_deref().filter(|g| valid_group(g));
+    let lan: Vec<String> = merged(plan.lan.iter().copied().chain(LAN_PLUMBING)).into_iter().map(cidr).collect();
+    let lan = set(&lan);
+
+    let mut s = String::new();
+    let _ = writeln!(s, "table inet {TABLE}");
+    let _ = writeln!(s, "delete table inet {TABLE}");
+    let _ = writeln!(s, "table inet {TABLE} {{");
+
+    chain_head(&mut s, "output");
+    let _ = writeln!(s, "\t\toifname \"lo\" accept comment \"nx:loopback\"");
+    if !tunnels.is_empty() {
+        let _ = writeln!(s, "\t\toifname {} accept comment \"nx:tunnel\"", set(&tunnels));
+    }
+    if !servers.is_empty() {
+        let _ = writeln!(s, "\t\tip daddr {} meta l4proto {{ tcp, udp }} accept comment \"nx:server\"", set(&servers));
+    }
+    if let Some(mark) = fwmark {
+        let _ = writeln!(s, "\t\tmeta mark {mark:#010x} accept comment \"nx:engine\"");
+    }
+    if let Some(g) = group {
+        // Above the DNS refusal: the app looks up the service's name itself.
+        let _ = writeln!(s, "\t\tsocket cgroupv2 level {} \"{g}\" accept comment \"nx:app\"", group_level(g));
+    }
+    let _ = writeln!(s, "\t\tmeta nfproto ipv4 udp sport 68 udp dport 67 accept comment \"nx:dhcp\"");
+    let _ = writeln!(s, "\t\tmeta nfproto ipv4 udp sport 67 udp dport 68 accept comment \"nx:dhcp\"");
+    hold_dns(&mut s, plan.dns_anywhere, &dns4, &dns6);
+    let _ = writeln!(s, "\t\tip daddr {lan} accept comment \"nx:lan\"");
+    let _ = writeln!(s, "\t\t{V6_ND} accept comment \"nx:ipv6-nd\"");
+    let _ = writeln!(s, "\t\tip6 daddr {V6_LOCAL} accept comment \"nx:ipv6-local\"");
+    refuse(&mut s, "", TAG_HOLD, true);
+    let _ = writeln!(s, "\t}}");
+
+    chain_head(&mut s, "input");
+    let _ = writeln!(s, "\t\tiifname \"lo\" accept comment \"nx:loopback\"");
+    if !tunnels.is_empty() {
+        let _ = writeln!(s, "\t\tiifname {} accept comment \"nx:tunnel\"", set(&tunnels));
+    }
+    let _ = writeln!(s, "\t\tct state established,related accept comment \"nx:established\"");
+    if !servers.is_empty() {
+        // A WireGuard peer may speak first after its endpoint roamed; the
+        // answers to everything else come back as established.
+        let _ = writeln!(s, "\t\tip saddr {} meta l4proto {{ tcp, udp }} accept comment \"nx:server\"", set(&servers));
+    }
+    let _ = writeln!(s, "\t\tmeta nfproto ipv4 udp sport 67 udp dport 68 accept comment \"nx:dhcp\"");
+    let _ = writeln!(s, "\t\tmeta nfproto ipv4 udp sport 68 udp dport 67 accept comment \"nx:dhcp\"");
+    let _ = writeln!(s, "\t\tip saddr {lan} accept comment \"nx:lan\"");
+    let _ = writeln!(s, "\t\t{V6_ND} accept comment \"nx:ipv6-nd\"");
+    let _ = writeln!(s, "\t\tip6 saddr {V6_LOCAL} accept comment \"nx:ipv6-local\"");
+    refuse(&mut s, "", TAG_HOLD, false);
+    let _ = writeln!(s, "\t}}");
+
+    // Containers and virtual machines are held as the confinement holds
+    // them: the tunnel, the answers, the local network, and no lookups of
+    // their own outside the tunnel.
+    chain_head(&mut s, "forward");
+    if !tunnels.is_empty() {
+        let _ = writeln!(s, "\t\tiifname {} accept comment \"nx:tunnel\"", set(&tunnels));
+        let _ = writeln!(s, "\t\toifname {} accept comment \"nx:tunnel\"", set(&tunnels));
+    }
+    let _ = writeln!(s, "\t\tct state established,related accept comment \"nx:established\"");
+    let _ = writeln!(s, "\t\ttcp dport 53 reject with tcp reset comment \"{TAG_HOLD}\"");
+    let _ = writeln!(s, "\t\tudp dport 53 reject with icmpx type admin-prohibited comment \"{TAG_HOLD}\"");
+    let _ = writeln!(s, "\t\tip daddr {lan} accept comment \"nx:lan\"");
+    refuse(&mut s, "", TAG_HOLD, true);
+    let _ = writeln!(s, "\t}}");
+
+    let _ = writeln!(s, "}}");
+    s
+}
+
+/// Lookups while held: to the machine's resolvers, or to anywhere when
+/// they could not be read, and every other port 53 refused above the local
+/// network, so the router cannot stand in for a resolver nobody listed.
+fn hold_dns(s: &mut String, anywhere: bool, dns4: &[String], dns6: &[String]) {
+    if anywhere {
+        let _ = writeln!(s, "\t\tmeta l4proto {{ tcp, udp }} th dport 53 accept comment \"{TAG_DNS_ANYWHERE}\"");
+        return;
+    }
+    if !dns4.is_empty() {
+        let _ = writeln!(s, "\t\tip daddr {} meta l4proto {{ tcp, udp }} th dport 53 accept comment \"nx:resolver\"", set(dns4));
+    }
+    if !dns6.is_empty() {
+        let _ = writeln!(s, "\t\tip6 daddr {} meta l4proto {{ tcp, udp }} th dport 53 accept comment \"nx:resolver\"", set(dns6));
+    }
+    let _ = writeln!(s, "\t\ttcp dport 53 reject with tcp reset comment \"{TAG_HOLD}\"");
+    let _ = writeln!(s, "\t\tudp dport 53 reject with icmpx type admin-prohibited comment \"{TAG_HOLD}\"");
+}

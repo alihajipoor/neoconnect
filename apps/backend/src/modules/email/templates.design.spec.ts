@@ -420,9 +420,25 @@ describe("where the voucher email sends people to install", () => {
     expect(render("fa", "https://example.com").html).toContain(">اپ‌استور</span>");
   });
 
-  it("names iPhone in the sentence above the tiles, in both languages", () => {
-    expect(render("en", "https://example.com").html).toContain("on Windows, Android or iPhone");
-    expect(render("fa", "https://example.com").html).toContain("روی ویندوز، اندروید یا آیفون");
+  it("names iPhone and Linux in the sentence above the tiles, in both languages", () => {
+    expect(render("en", "https://example.com").html).toContain("on Windows, Android, iPhone or Linux");
+    expect(render("fa", "https://example.com").html).toContain("روی ویندوز، اندروید، آیفون یا لینوکس");
+  });
+
+  it.each(["en", "fa"] as const)("links both Linux packages through the website in %s", (locale) => {
+    const { html, text } = render(locale, "https://example.com/");
+    expect(html).toContain('href="https://example.com/get/linux-deb"');
+    expect(html).toContain('href="https://example.com/get/linux-rpm"');
+    expect(text).toContain("Linux (.deb): https://example.com/get/linux-deb");
+    expect(text).toContain("Linux (.rpm): https://example.com/get/linux-rpm");
+    // A line under the row, not a fourth tile that would not fit a phone.
+    expect(html.match(/class="nx-tile"/g)).toHaveLength(3);
+    expect(html.indexOf("/get/linux-deb")).toBeGreaterThan(html.indexOf("/get/windows"));
+  });
+
+  it("names Linux where to go when no website address is known", () => {
+    expect(render("en").html).toContain("Windows, Android or Linux from neoxify.net");
+    expect(render("fa").html).toContain("ویندوز، اندروید و لینوکس را از neoxify.net");
   });
 
   it("activates first, installs second, and never sends the code into the app", () => {

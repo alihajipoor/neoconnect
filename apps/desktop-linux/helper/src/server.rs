@@ -2,21 +2,28 @@
 //!
 //! The Windows wire contract, unchanged: one JSON `Request` per line in,
 //! one JSON `Response` per line out, one connection per request (several
-//! lines on one connection are served in turn, as on Windows). Anything
-//! that changes the machine is run one at a time on the supervisor's
-//! thread; the questions a stranded customer asks -- "am I tunnelled" and
-//! "get me out" -- never queue behind a slow one. See [`dispatch`], whose
-//! shape is the Windows service's `pipe::dispatch`.
+//! lines on one connection are served in turn, as on Windows). A line
+//! whose `type` is one of the Linux-only requests (`neoxify_linux_wire`)
+//! is read as one of those instead and answered by [`dispatch_linux`].
+//! Anything that changes the machine is run one at a time on the
+//! supervisor's thread; the questions a stranded customer asks -- "am I
+//! tunnelled" and "get me out" -- never queue behind a slow one. See
+//! [`dispatch`], whose shape is the Windows service's `pipe::dispatch`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use neoconnect_ipc::{ConnectProfile, GamingPhase, Request, Response, TunnelHealth, NO_NETWORK};
+use neoconnect_ipc::{GamingPhase, ReconnectHoldProblem, RepairOutcome, Request, Response, TunnelHealth, NO_NETWORK};
+use neoxify_linux_wire::{LinuxRequest, LinuxResponse, LINUX_REQUEST_TYPES};
+use neoxify_tunnel::Dirs;
+use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::backend::Backend;
+use crate::hold::{Hold, Release};
 use crate::lifecycle::budget::ABANDONED;
 use crate::lifecycle::client_watch::{self, PidWatch};
 use crate::lifecycle::idle::{IdleTick, IdleWatch, IDLE_GRACE, IDLE_POLL};
@@ -24,6 +31,7 @@ use crate::lifecycle::ledger::Ledger;
 use crate::lifecycle::supervisor::Supervisor;
 use crate::peer::{Caller, Policy};
 use crate::session::{nothing, Session};
+use crate::{custom, repair, update};
 
 /// Caps a single request line. A profile with three PEM blocks is a few
 /// kilobytes; this leaves generous headroom while stopping a caller from
@@ -46,11 +54,10 @@ const DISCONNECT_LOCK_WAIT: Duration = Duration::from_secs(2);
 /// slice is.
 const HEALTH_POLL: Duration = Duration::from_secs(1);
 
-const SPLIT_TUNNEL_UNAVAILABLE: &str = "Custom mode is not available on Linux yet";
-const IKEV2_UNAVAILABLE: &str = "IKEv2 is not available on Linux yet";
 const REFUSED: &str =
     "only the Neoxify app, run by the person at this computer's screen or by a member of the neoxify group, may control the Neoxify helper";
 const ANOTHER_USERS_SESSION: &str = "another user's Neoxify connection is active on this computer";
+const DISCONNECT_LETS_GO: &str = "the customer disconnected";
 
 /// How long a connection may take to send each request line. The app
 /// writes its request the moment it connects; a caller that sends nothing
@@ -79,6 +86,8 @@ pub struct Shared {
     pub ledger: Arc<Ledger>,
     pub backend: Arc<dyn Backend>,
     pub policy: Arc<Policy>,
+    pub hold: Arc<Hold>,
+    pub dirs: Dirs,
     /// The last time the app asked anything.
     last_seen: Arc<Mutex<Instant>>,
     /// The session's owner. Only its Connect sets it, so another process
@@ -89,19 +98,31 @@ pub struct Shared {
     /// does not produce a second watch.
     watched: Arc<Mutex<Option<u32>>>,
     slots: Arc<tokio::sync::Semaphore>,
+    /// An update is being copied and checked: a second waits for none.
+    installing: Arc<AtomicBool>,
 }
 
 impl Shared {
-    pub fn new(engines: Supervisor<Session>, ledger: Arc<Ledger>, backend: Arc<dyn Backend>, policy: Arc<Policy>) -> Self {
+    pub fn new(
+        engines: Supervisor<Session>,
+        ledger: Arc<Ledger>,
+        backend: Arc<dyn Backend>,
+        policy: Arc<Policy>,
+        hold: Arc<Hold>,
+        dirs: Dirs,
+    ) -> Self {
         Self {
             engines,
             ledger,
             backend,
             policy,
+            hold,
+            dirs,
             last_seen: Arc::new(Mutex::new(Instant::now())),
             owner: Arc::new(Mutex::new(None)),
             watched: Arc::new(Mutex::new(None)),
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
+            installing: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -113,6 +134,13 @@ impl Shared {
         if let Ok(mut seen) = self.last_seen.lock() {
             *seen = Instant::now();
         }
+    }
+
+    /// Runs `job` on the hold where blocking is allowed: letting go of it
+    /// or putting it in runs `nft`.
+    async fn with_hold<T: Send + 'static>(&self, job: impl FnOnce(&Hold) -> T + Send + 'static) -> Option<T> {
+        let hold = Arc::clone(&self.hold);
+        tokio::task::spawn_blocking(move || job(&hold)).await.ok()
     }
 }
 
@@ -158,14 +186,14 @@ pub async fn serve(listener: UnixListener, shared: Shared, stop: impl std::futur
                     tokio::spawn(async move {
                         let _slot = slot;
                         if let Err(err) = handle_connection(stream, shared).await {
-                            eprintln!("neoxify-helper: connection error: {err}");
+                            crate::say!("neoxify-helper: connection error: {err}");
                         }
                     });
                 }
                 // A transient failure (out of descriptors) must not end
                 // the daemon; a moment's pause stops it spinning.
                 Err(err) => {
-                    eprintln!("neoxify-helper: accept failed: {err}");
+                    crate::say!("neoxify-helper: accept failed: {err}");
                     // The app cannot reach us now, which is not the app
                     // having gone: the idle watchdog must not take that
                     // silence for it. The process watch still sees an exit.
@@ -175,6 +203,21 @@ pub async fn serve(listener: UnixListener, shared: Shared, stop: impl std::futur
             },
         }
     }
+}
+
+fn encode<T: Serialize>(reply: &T) -> String {
+    serde_json::to_string(reply).unwrap_or_else(|_| r#"{"status":"error","message":"could not encode response"}"#.to_string())
+}
+
+/// The `type` of a request line, read before anything else so the two
+/// contracts are told apart without parsing a line as the wrong one.
+fn request_type(line: &[u8]) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Peek {
+        #[serde(rename = "type")]
+        kind: Option<String>,
+    }
+    serde_json::from_slice::<Peek>(line).ok().and_then(|p| p.kind)
 }
 
 async fn handle_connection(stream: UnixStream, shared: Shared) -> std::io::Result<()> {
@@ -187,22 +230,23 @@ async fn handle_connection(stream: UnixStream, shared: Shared) -> std::io::Resul
     let pinned = pid.and_then(|p| u32::try_from(p).ok()).and_then(|p| PidWatch::open(p).ok());
     let mut caller = match uid {
         Some(uid) => shared.policy.judge(uid, pid),
-        None => Caller::Refused { who: "a caller whose credentials could not be read".into() },
+        None => Caller::Refused { who: "a caller whose credentials could not be read".into(), reply: None },
     };
     if matches!(caller, Caller::App { .. }) && pinned.as_ref().is_some_and(|p| !p.still_running()) {
-        caller = Caller::Refused { who: "a process that exited while it was being checked".into() };
+        caller = Caller::Refused { who: "a process that exited while it was being checked".into(), reply: None };
     }
     let mut pinned = pinned;
 
     // Refused: answered at once and let go, without reading a byte, so a
     // refused caller holds nothing. What it may have sent is read for a
     // moment afterwards only so that closing does not cut off the answer.
-    if let Caller::Refused { who } = &caller {
+    if let Caller::Refused { who, reply } = &caller {
         if shared.policy.first_refusal(who) {
-            eprintln!("neoxify-helper: refused a caller ({who})");
+            crate::say!("neoxify-helper: refused a caller ({who})");
         }
         let mut stream = stream;
-        let mut encoded = serde_json::to_string(&Response::Error { message: REFUSED.to_string() }).unwrap_or_default();
+        let message = reply.clone().unwrap_or_else(|| REFUSED.to_string());
+        let mut encoded = encode(&Response::Error { message });
         encoded.push('\n');
         let _ = tokio::time::timeout(Duration::from_secs(1), stream.write_all(encoded.as_bytes())).await;
         let _ = stream.shutdown().await;
@@ -229,21 +273,24 @@ async fn handle_connection(stream: UnixStream, shared: Shared) -> std::io::Resul
         }
         let too_long = line.last() != Some(&b'\n') && read as u64 >= MAX_REQUEST_BYTES;
 
-        let response = if too_long {
-            Response::Error { message: "malformed request: longer than the helper accepts".to_string() }
+        let mut encoded = if too_long {
+            encode(&Response::Error { message: "malformed request: longer than the helper accepts".to_string() })
+        } else if request_type(trim(&line)).is_some_and(|t| LINUX_REQUEST_TYPES.contains(&t.as_str())) {
+            match serde_json::from_slice::<LinuxRequest>(trim(&line)) {
+                Ok(request) => dispatch_linux(request, &shared, &caller).await,
+                Err(err) => encode(&Response::Error { message: malformed(&err) }),
+            }
         } else {
-            match serde_json::from_slice::<Request>(trim(&line)) {
+            let response = match serde_json::from_slice::<Request>(trim(&line)) {
                 Ok(request @ Request::Connect { .. }) => match claim_session(&shared, &caller, &mut pinned) {
                     Some(refusal) => refusal,
-                    None => dispatch(request, &shared).await,
+                    None => dispatch(request, &shared, &caller).await,
                 },
-                Ok(request) => dispatch(request, &shared).await,
+                Ok(request) => dispatch(request, &shared, &caller).await,
                 Err(err) => Response::Error { message: malformed(&err) },
-            }
+            };
+            encode(&response)
         };
-
-        let mut encoded = serde_json::to_string(&response)
-            .unwrap_or_else(|_| r#"{"status":"error","message":"could not encode response"}"#.to_string());
         encoded.push('\n');
         reader.get_mut().write_all(encoded.as_bytes()).await?;
         reader.get_mut().flush().await?;
@@ -263,7 +310,9 @@ pub(crate) fn claim_session(shared: &Shared, caller: &Caller, pinned: &mut Optio
     let (uid, pid) = match caller {
         Caller::App { pid, uid } => (*uid, Some(*pid)),
         Caller::Trusted => (shared.policy.trusted_uid, None),
-        Caller::Refused { .. } => return Some(Response::Error { message: REFUSED.to_string() }),
+        Caller::Refused { reply, .. } => {
+            return Some(Response::Error { message: reply.clone().unwrap_or_else(|| REFUSED.to_string()) })
+        }
     };
     {
         let mut owner = shared.owner();
@@ -330,16 +379,20 @@ fn watch_the_app(shared: &Shared, watch: PidWatch) {
             }
             *owner = None;
         }
-        eprintln!("neoxify-helper: {}", signal.reason());
+        crate::say!("neoxify-helper: {}", signal.reason());
         // Whatever it was doing is no longer wanted by anyone.
         shared.engines.supersede();
         shared.engines.cancel_running();
-        let _ = shared.engines.run_detached(|session: &mut Session, _| {
+        let hold = Arc::clone(&shared.hold);
+        let _ = shared.engines.run_detached(move |session: &mut Session, _| {
+            // Nobody is left to reconnect: nothing is held for them.
+            hold.release(Release::Asked("the app exited"));
+            hold.disarm();
             if !session.has_session() && !session.owes_finish() {
                 return;
             }
             let report = session.hard_stop();
-            eprintln!("neoxify-helper: teardown after the app went away: {}", report.summary());
+            crate::say!("neoxify-helper: teardown after the app went away: {}", report.summary());
             session.finish();
         });
     });
@@ -355,32 +408,47 @@ fn queue_finish(shared: &Shared) {
     });
 }
 
+/// The hold's word in a status answered without the owning thread, tended
+/// first as every status read tends it.
+async fn hold_report(shared: &Shared) -> Option<neoconnect_ipc::ReconnectHold> {
+    let live = shared.ledger.live_generation();
+    shared
+        .with_hold(move |hold| {
+            hold.tend(live);
+            hold.report(live)
+        })
+        .await
+        .flatten()
+}
+
 /// The status answered without the owning thread: the record of a drop if
 /// there is one, else what the machine shows, and never "disconnected" on
 /// a look that proved nothing -- the app tells a customer their
 /// connection was lost only on `Down`.
 async fn status_without_the_thread(shared: &Shared) -> Response {
+    let held = hold_report(shared).await;
     if shared.ledger.confirmed_drop().is_some() {
-        return nothing(TunnelHealth::Down);
+        return nothing(TunnelHealth::Down, held);
     }
     // A connect in flight has finished nothing: its link may be up before
     // its routes, DNS and leak protection, and it may yet be rolled back.
     // Not connected, and not verified either way.
     if shared.ledger.is_connecting() {
-        return nothing(TunnelHealth::Unknown);
+        return nothing(TunnelHealth::Unknown, held);
     }
     let backend = Arc::clone(&shared.backend);
     let Ok(seen) = tokio::task::spawn_blocking(move || backend.visible_tunnel()).await else {
         return Response::Error { message: "could not read the tunnel state".to_string() };
     };
     let Some(_iface) = seen else {
-        return nothing(TunnelHealth::Unknown);
+        return nothing(TunnelHealth::Unknown, held);
     };
     let guard = shared.ledger.guard();
     Response::State {
         connected: true,
         protocol: shared.ledger.live_protocol(),
         health: TunnelHealth::Unknown,
+        // Not read without the owning thread: nothing rather than a guess.
         split_tunnel_active: false,
         split_tunnel_problem: None,
         split_tunnel_restart_needed: Vec::new(),
@@ -389,8 +457,7 @@ async fn status_without_the_thread(shared: &Shared) -> Response {
         tunnel_dns_unprotected: !guard.as_ref().is_some_and(|g| g.dns_protected),
         ipv4_confined: guard.as_ref().map(|g| g.ipv4_confined),
         confinement_problem: guard.and_then(|g| g.problem),
-        reconnect_hold: None,
-        // Not read without the owning thread: nothing rather than a guess.
+        reconnect_hold: held,
         traffic: None,
         split_tunnel_problem_code: None,
         session_secs: None,
@@ -406,7 +473,22 @@ fn unavailable(what: &str) -> Response {
     Response::Error { message: what.to_string() }
 }
 
-pub async fn dispatch(request: Request, shared: &Shared) -> Response {
+fn caller_uid(shared: &Shared, caller: &Caller) -> u32 {
+    match caller {
+        Caller::App { uid, .. } => *uid,
+        _ => shared.policy.trusted_uid,
+    }
+}
+
+/// The app's process, for the hold's group: once per process.
+async fn adopt_caller(shared: &Shared, caller: &Caller) {
+    if let Caller::App { pid, .. } = caller {
+        let pid = *pid;
+        shared.with_hold(move |hold| hold.adopt(pid)).await;
+    }
+}
+
+pub async fn dispatch(request: Request, shared: &Shared, caller: &Caller) -> Response {
     let engines = &shared.engines;
     let ledger = &shared.ledger;
     match request {
@@ -428,16 +510,43 @@ pub async fn dispatch(request: Request, shared: &Shared) -> Response {
                 _ => status_without_the_thread(shared).await,
             }
         }
-        Request::Disconnect | Request::DisconnectForReconnect => {
+        // The same teardown, but for the reconnect hold. The customer's
+        // lets go of it at once, here, without waiting for the owning
+        // thread. A reconnect's holds the gap from before the engine stops,
+        // when the session is armed, and keeps it through the teardown.
+        request @ (Request::Disconnect | Request::DisconnectForReconnect) => {
+            let for_reconnect = matches!(request, Request::DisconnectForReconnect);
+            if for_reconnect {
+                shared.hold.followed();
+            } else {
+                shared
+                    .with_hold(|hold| {
+                        hold.release(Release::Asked(DISCONNECT_LETS_GO));
+                        hold.disarm();
+                    })
+                    .await;
+            }
             // Cancel first, and before queueing anything: this reaches the
             // connect running now, and `supersede` the one still queued.
             engines.supersede();
             engines.cancel_running();
-            let hard = engines.run(|s: &mut Session, _| s.hard_stop());
+            let hold = Arc::clone(&shared.hold);
+            let hard = engines.run(move |s: &mut Session, _| {
+                if for_reconnect {
+                    s.hold_for_reconnect();
+                } else {
+                    // Again on the owning thread, ahead of the hard stop: a
+                    // drop the health watch held, or a connect this
+                    // cancelled that armed one, since the release above.
+                    hold.release(Release::Asked(DISCONNECT_LETS_GO));
+                    hold.disarm();
+                }
+                s.hard_stop()
+            });
             match tokio::time::timeout(DISCONNECT_LOCK_WAIT, hard).await {
                 Ok(Ok(report)) => {
                     if !report.within_budget() || !report.all_succeeded() {
-                        eprintln!("neoxify-helper: disconnect: {}", report.summary());
+                        crate::say!("neoxify-helper: disconnect: {}", report.summary());
                     }
                     queue_finish(shared);
                     if report.all_succeeded() {
@@ -469,10 +578,7 @@ pub async fn dispatch(request: Request, shared: &Shared) -> Response {
                 }
             }
         }
-        Request::Connect { profile, exits, known_nodes, block_while_reconnecting: _ } => {
-            if matches!(profile, ConnectProfile::Ikev2(_)) {
-                return unavailable(IKEV2_UNAVAILABLE);
-            }
+        Request::Connect { profile, exits, known_nodes, block_while_reconnecting } => {
             if let Err(e) = profile.validate() {
                 return Response::Error { message: e.to_string() };
             }
@@ -480,6 +586,17 @@ pub async fn dispatch(request: Request, shared: &Shared) -> Response {
                 if let Err(e) = exit.profile.validate() {
                     return Response::Error { message: e.to_string() };
                 }
+            }
+            // The setting as of this request, taken as it arrives rather
+            // than when the connect runs: a `SetReconnectHold` that turned
+            // it off after this was sent, but before it ran, still wins.
+            if block_while_reconnecting {
+                shared.hold.set_wanted(true);
+                // A connect follows a drop being held for, if one is.
+                shared.hold.followed();
+                adopt_caller(shared, caller).await;
+            } else {
+                shared.with_hold(|hold| hold.turn_off()).await;
             }
             // Taken as the connect is queued and checked when it starts: a
             // Disconnect in between means nothing is dialled.
@@ -509,25 +626,108 @@ pub async fn dispatch(request: Request, shared: &Shared) -> Response {
                 _ => Response::Ok,
             }
         }
-        // The reconnect hold is not in the first version. Letting go of
-        // one, or turning the setting off, is always true with nothing
-        // held; turning it on is refused so the app does not believe it.
-        Request::ReleaseReconnectHold => Response::Ok,
-        Request::SetReconnectHold { enabled: false } => Response::Ok,
+        Request::ReleaseReconnectHold => {
+            shared.with_hold(|hold| hold.release(Release::Asked("the app let go of it"))).await;
+            Response::Ok
+        }
+        // The setting changed. Off lets go and disarms at once; on arms the
+        // live session, which needs the owning thread, behind whatever it
+        // is doing. On is also how the app says, as its reconnect begins,
+        // that one follows the drop being held for.
         Request::SetReconnectHold { enabled: true } => {
-            unavailable("Blocking the internet while reconnecting is not available on Linux yet")
+            shared.hold.set_wanted(true);
+            shared.hold.followed();
+            adopt_caller(shared, caller).await;
+            let _ = engines.run_detached(|s: &mut Session, _| s.arm_live());
+            Response::Ok
         }
-        // Sent before every connect: off is what Linux already does. Not
-        // validated, because nothing here acts on it -- and the Windows
-        // rules for an app's path would refuse every Linux path anyway.
-        Request::SetSplitTunnel { config } if !config.enabled => Response::Ok,
-        Request::SetSplitTunnel { .. } => unavailable(SPLIT_TUNNEL_UNAVAILABLE),
-        Request::ProbeSplitTunnel | Request::SplitTunnelExits | Request::ListRunningApps => {
-            unavailable(SPLIT_TUNNEL_UNAVAILABLE)
+        Request::SetReconnectHold { enabled: false } => {
+            shared.with_hold(|hold| hold.turn_off()).await;
+            Response::Ok
         }
-        Request::Repair => unavailable("Repair is not available on Linux yet"),
-        Request::Diagnostics => unavailable("Diagnostics are not available on Linux yet"),
-        Request::ArmGaming { .. } => unavailable("Gaming mode is not available on Linux yet"),
+        // Checked here with Linux's rules -- never the config's own
+        // `validate()`, whose Windows rules refuse every Linux path -- and
+        // applied on the owning thread, in place when a tunnel is up.
+        Request::SetSplitTunnel { config } => {
+            let backend = Arc::clone(&shared.backend);
+            let shape = match custom::shape_of(&config, |app| backend.valid_app(app)) {
+                Ok(shape) => shape,
+                Err(message) => return Response::Error { message },
+            };
+            let egress = config.egress.clone().filter(|e| !e.trim().is_empty() && e.len() <= 128);
+            let busy = Ledger::busy(ledger);
+            engines
+                .run(move |s: &mut Session, token| {
+                    let _busy = busy;
+                    match s.set_split(shape, egress, token) {
+                        Ok(()) => Response::Ok,
+                        Err(message) => Response::Error { message },
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| gone())
+        }
+        Request::ProbeSplitTunnel => {
+            let busy = Ledger::busy(ledger);
+            engines
+                .run(move |s: &mut Session, token| {
+                    let _busy = busy;
+                    match s.probe(token) {
+                        Ok(()) => Response::Ok,
+                        Err(message) => Response::Error { message },
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| gone())
+        }
+        // No per-app exits on Linux: the egress the app named, and no
+        // placements to report.
+        Request::SplitTunnelExits => match engines.run(|s: &mut Session, _| s.egress()).await {
+            Ok(egress) => Response::ExitPlacements { egress, apps: Vec::new() },
+            Err(_) => gone(),
+        },
+        // The caller's own programs: one user's app does not list another's.
+        Request::ListRunningApps => {
+            let uid = caller_uid(shared, caller);
+            let backend = Arc::clone(&shared.backend);
+            match tokio::task::spawn_blocking(move || backend.running_processes(uid)).await {
+                Ok(processes) => Response::RunningApps { apps: custom::group_running(processes) },
+                Err(_) => Response::Error { message: "could not read the running programs".to_string() },
+            }
+        }
+        Request::Repair => {
+            shared
+                .with_hold(|hold| {
+                    hold.release(Release::Asked("Repair"));
+                    hold.disarm();
+                })
+                .await;
+            engines.supersede();
+            engines.cancel_running();
+            let busy = Ledger::busy(ledger);
+            let (backend, dirs) = (Arc::clone(&shared.backend), shared.dirs.clone());
+            engines
+                .run(move |s: &mut Session, _| {
+                    let _busy = busy;
+                    let had = s.has_session();
+                    let report = s.hard_stop();
+                    s.finish();
+                    let tunnel = if !report.all_succeeded() {
+                        RepairOutcome::Failed { detail: report.summary() }
+                    } else if had {
+                        RepairOutcome::Fixed { detail: "disconnected the tunnel that was up".to_string() }
+                    } else {
+                        RepairOutcome::AlreadyClean
+                    };
+                    Response::Repaired { report: repair::clear(backend.as_ref(), &dirs, tunnel) }
+                })
+                .await
+                .unwrap_or_else(|_| gone())
+        }
+        // The Windows shape names Windows' own machinery; the Linux app asks
+        // for `linuxDiagnostics` instead.
+        Request::Diagnostics => unavailable("this helper answers linuxDiagnostics; the Windows diagnostics do not apply on Linux"),
+        Request::ArmGaming { .. } => unavailable("Gaming mode is a Windows feature and is not part of Neoxify on Linux"),
         // Called defensively on every teardown: nothing is armed, so
         // there is nothing to undo.
         Request::DisarmGaming => Response::Ok,
@@ -543,10 +743,74 @@ pub async fn dispatch(request: Request, shared: &Shared) -> Response {
     }
 }
 
+/// The Linux-only requests (`neoxify_linux_wire`). Errors are answered in
+/// the shared shape so the app has one way to read a refusal.
+pub async fn dispatch_linux(request: LinuxRequest, shared: &Shared, caller: &Caller) -> String {
+    let error = |message: String| encode(&Response::Error { message });
+    match request {
+        LinuxRequest::UpdateSupport => match tokio::task::spawn_blocking(update::support).await {
+            Ok((kind, reason)) => encode(&LinuxResponse::UpdateSupport { kind, version: crate::VERSION.to_string(), reason }),
+            Err(_) => error("could not tell how this install was made".to_string()),
+        },
+        LinuxRequest::InstallUpdate { package, signature } => {
+            if !matches!(caller, Caller::App { .. }) {
+                return error("only the Neoxify app may install an update".to_string());
+            }
+            if shared.ledger.live_protocol().is_some() || shared.ledger.is_connecting() {
+                return error("an update cannot be installed while connected; disconnect first".to_string());
+            }
+            if shared.installing.swap(true, Ordering::SeqCst) {
+                return error("an update is already being installed".to_string());
+            }
+            let installing = Arc::clone(&shared.installing);
+            let (backend, dir) = (Arc::clone(&shared.backend), shared.dirs.state.join("update"));
+            let busy = Ledger::busy(&shared.ledger);
+            // On the owning thread, so no connect can begin between the
+            // check that no tunnel is up and the package manager starting.
+            let answered = shared
+                .engines
+                .run(move |s: &mut Session, _| {
+                    let _busy = busy;
+                    if s.has_session() || backend.visible_tunnel().is_some() {
+                        return Err("an update cannot be installed while connected; disconnect first".to_string());
+                    }
+                    let (kind, reason) = update::support();
+                    let Some(kind) = kind else {
+                        return Err(reason.unwrap_or_else(|| "this install cannot update itself".to_string()));
+                    };
+                    update::install(&dir, kind, &package, &signature)
+                })
+                .await;
+            installing.store(false, Ordering::SeqCst);
+            match answered {
+                Ok(Ok(())) => encode(&LinuxResponse::UpdateStarted),
+                Ok(Err(why)) => error(why),
+                Err(_) => encode(&gone()),
+            }
+        }
+        LinuxRequest::UpdateOutcome => {
+            let dir = shared.dirs.state.join("update");
+            match tokio::task::spawn_blocking(move || update::outcome(&dir, crate::VERSION, update::unit_active)).await {
+                Ok(outcome) => encode(&LinuxResponse::UpdateOutcome { outcome }),
+                Err(_) => error("could not read how the last update went".to_string()),
+            }
+        }
+        LinuxRequest::LinuxDiagnostics => {
+            let (backend, dirs) = (Arc::clone(&shared.backend), shared.dirs.clone());
+            let live = shared.ledger.live_protocol().is_some();
+            match tokio::task::spawn_blocking(move || repair::diagnostics(backend.as_ref(), &dirs, live, update::support().0)).await {
+                Ok(diagnostics) => encode(&LinuxResponse::LinuxDiagnostics { diagnostics: Box::new(diagnostics) }),
+                Err(_) => error("could not read the diagnostics".to_string()),
+            }
+        }
+    }
+}
+
 /// Asks the engine about once a second whether it is still there, and on
-/// a verified `Down` takes the session down (`Session::check_health`).
-/// Not while a long job is queued: a connect is replacing the session, and
-/// a thorough pass is already tidying.
+/// a verified `Down` takes the session down (`Session::check_health`),
+/// holding first if the customer asked for that. Not while a long job is
+/// queued: a connect is replacing the session, and a thorough pass is
+/// already tidying.
 fn spawn_health_watch(shared: Shared) {
     tokio::spawn(async move {
         loop {
@@ -578,14 +842,22 @@ fn spawn_idle_watchdog(shared: Shared) {
             if said != IdleTick::Silent {
                 continue;
             }
-            let _ = shared.engines.run_detached(|session: &mut Session, _| {
+            let hold = Arc::clone(&shared.hold);
+            let _ = shared.engines.run_detached(move |session: &mut Session, _| {
+                // No app is left to reconnect, so a hold would hold the
+                // machine for nobody.
+                hold.release(Release::Failed(
+                    ReconnectHoldProblem::Other,
+                    format!("the app was silent for {}s, so the hold was let go of", IDLE_GRACE.as_secs()),
+                ));
+                hold.disarm();
                 if !session.has_session() && !session.owes_finish() {
                     return;
                 }
-                eprintln!("neoxify-helper: the app has been silent for {IDLE_GRACE:?} with a tunnel up; tearing it down");
+                crate::say!("neoxify-helper: the app has been silent for {IDLE_GRACE:?} with a tunnel up; tearing it down");
                 let report = session.hard_stop();
                 if !report.all_succeeded() {
-                    eprintln!("neoxify-helper: {}", report.summary());
+                    crate::say!("neoxify-helper: {}", report.summary());
                 }
                 session.finish();
             });

@@ -60,6 +60,11 @@
           "openvpn",
           "xdg-utils"
         ],
+        "recommends": [
+          "charon-cmd",
+          "libcharon-extra-plugins",
+          "libcharon-extauth-plugins"
+        ],
         "files": {
           "/usr/lib/neoxify/neoxify-helper": "resources/neoxify-helper",
           "/usr/lib/neoxify/xray": "resources/xray",
@@ -78,6 +83,10 @@
           "wireguard-tools",
           "openvpn",
           "xdg-utils"
+        ],
+        "recommends": [
+          "strongswan",
+          "strongswan-libipsec"
         ],
         "files": {
           "/usr/lib/neoxify/neoxify-helper": "resources/neoxify-helper",

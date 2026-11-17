@@ -62,9 +62,9 @@ import type { AutostartBinding } from "../lib/autostart";
 import type { NotifySetting } from "../lib/notify";
 
 /** Which device this is: decides the rows that only exist on one of them
- * (gaming mode, Custom mode, Repair and leak protection are Windows's; the
- * web portal has none of them). Linux has leak protection and nothing else
- * of those in its first version; macOS is drawn as Windows is until its
+ * (gaming mode is Windows's alone; Custom mode, Repair, the reconnect hold
+ * and leak protection are the two helper desktops', Windows and Linux; the
+ * web portal has none of them). macOS is drawn as Windows is until its
  * shell says otherwise. */
 export type SettingsPlatform = "windows" | "linux" | "macos" | "android" | "ios" | "web";
 
@@ -216,11 +216,13 @@ export function Settings({
   const windows = platform === "windows";
   const linux = platform === "linux";
   // The Linux helper confines the tunnel for every protocol it offers, so
-  // the leak row is there too, without the exceptions Windows names.
+  // the leak row is there too, with only Custom mode left outside it.
   const leakRow = windows || linux;
-  // Nor does its helper hold the internet while reconnecting: the row is
-  // not drawn there, whatever the app bound.
-  const reconnectHold = linux ? undefined : device.reconnectHold;
+  // Both desktop helpers hold the internet while reconnecting, and both
+  // run Repair; the phones and the web portal do neither.
+  const helperDesktop = windows || linux;
+  const reconnectHold = device.reconnectHold;
+  const holdOn = helperDesktop && holdWanted(prefs.value.blockWhileReconnecting);
   const osName = OS_NAME[platform] ? t(OS_NAME[platform]!) : null;
   const unconfirmedRelay = customer !== null && !customer.emailVerifiedAt && Boolean(customer.relayUnverifiedSince);
   const socialOnly = customer?.hasPassword === false;
@@ -334,7 +336,7 @@ export function Settings({
               <Row
                 icon={<AppWindow />}
                 label={platform === "android" ? t("set.perApp") : t("set.custom")}
-                tag={windows ? <span className="nx-ntag">{t("set.beta")}</span> : undefined}
+                tag={helperDesktop ? <span className="nx-ntag">{t("set.beta")}</span> : undefined}
                 hint={t("set.customHint")}
                 onClick={() => openSub("custom")}
               />
@@ -465,7 +467,7 @@ export function Settings({
         </ListGroup>
 
         <ListGroup title={t("set.troubleshoot")}>
-          {windows ? <Row icon={<Wrench />} label={t("set.repair")} hint={t("set.repairHint")} onClick={() => openSub("repair")} /> : null}
+          {helperDesktop ? <Row icon={<Wrench />} label={t("set.repair")} hint={t("set.repairHint")} onClick={() => openSub("repair")} /> : null}
           <Row icon={<LifeBuoy />} label={t("support.title")} hint={t("set.supportHint")} onClick={onOpenSupport} />
         </ListGroup>
 
@@ -523,19 +525,17 @@ export function Settings({
               <b>{t("leak.heldLead")}</b> {t(linux ? "leak.heldAll" : "leak.held")}
             </span>
           </li>
-          {linux ? null : (
-            <li>
-              <Info aria-hidden />
-              <span>
-                <b>{t("leak.notHeldLead")}</b> {t("leak.notHeld")}
-              </span>
-            </li>
-          )}
-          <li className={windows && holdWanted(prefs.value.blockWhileReconnecting) ? "ok" : undefined}>
-            {windows && holdWanted(prefs.value.blockWhileReconnecting) ? <Check aria-hidden /> : <Info aria-hidden />}
+          <li>
+            <Info aria-hidden />
+            <span>
+              <b>{t(linux ? "leak.notHeldLeadLinux" : "leak.notHeldLead")}</b> {t(linux ? "leak.notHeldLinux" : "leak.notHeld")}
+            </span>
+          </li>
+          <li className={holdOn ? "ok" : undefined}>
+            {holdOn ? <Check aria-hidden /> : <Info aria-hidden />}
             <span>
               <b>{t("leak.reconLead")}</b>{" "}
-              {t(windows && holdWanted(prefs.value.blockWhileReconnecting) ? "leak.reconHeld" : "leak.recon")}
+              {t(holdOn ? "leak.reconHeld" : "leak.recon")}
             </span>
           </li>
         </ul>

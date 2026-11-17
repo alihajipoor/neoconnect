@@ -3,12 +3,12 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-/** The Linux app shares this interface with Windows, and its first version
- * has less: no Custom mode, no gaming mode, no Repair or Diagnostics, no
- * reconnect hold, no IKEv2, no self-update. Each is missing by not being
- * offered and by never being asked of the helper. And with the platform at
- * its default the Windows app, which ships to live users from these files,
- * must be exactly what it was. */
+/** The Linux app shares this interface with Windows and, since 0.2, has
+ * what Windows has but gaming mode and Custom mode's game catalogue (with
+ * its per-game exits): each of those is missing by not being offered and
+ * by never being asked of the helper. And with the platform at its default
+ * the Windows app, which ships to live users from these files, must be
+ * exactly what it was. */
 
 const invoke = vi.fn<(cmd: string, args?: unknown) => Promise<unknown>>();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
@@ -74,6 +74,7 @@ describe("the default platform", () => {
     expect(platform.supportsReconnectHold()).toBe(true);
     expect(platform.supportsSelfUpdate()).toBe(true);
     expect(platform.offersIkev2()).toBe(true);
+    expect(platform.supportsGameCatalogue()).toBe(true);
   });
 
   it("leaves Windows' requests and choices as they were", async () => {
@@ -118,40 +119,43 @@ describe("the default platform", () => {
 describe("on Linux", () => {
   beforeEach(() => setDesktopPlatform("linux"));
 
-  it("offers none of what its first version lacks", () => {
-    expect(platform.supportsCustomMode()).toBe(false);
+  it("offers everything Windows does but gaming mode and the game catalogue", () => {
+    expect(platform.supportsCustomMode()).toBe(true);
+    expect(platform.supportsRepair()).toBe(true);
+    expect(platform.supportsReconnectHold()).toBe(true);
+    expect(platform.supportsSelfUpdate()).toBe(true);
+    expect(platform.offersIkev2()).toBe(true);
     expect(platform.supportsGaming()).toBe(false);
-    expect(platform.supportsRepair()).toBe(false);
-    expect(platform.supportsReconnectHold()).toBe(false);
-    expect(platform.supportsSelfUpdate()).toBe(false);
-    expect(platform.offersIkev2()).toBe(false);
+    expect(platform.supportsGameCatalogue()).toBe(false);
   });
 
-  it("Settings has autostart, notifications and leak protection, and nothing it cannot do", () => {
-    // Bound as Windows binds it, hold included: Settings drops what Linux lacks.
-    const html = renderSettings("linux", { custom: false, gaming: false }, {
+  it("Settings has Custom mode, Repair and the hold, never gaming mode, and names no Windows", () => {
+    // What App passes on Linux: Custom mode's card, no gaming section.
+    const html = renderSettings("linux", { custom: true, gaming: false }, {
       ...DESKTOP_DEVICE,
       reconnectHold: { apply: async () => undefined },
     });
-    expect(html).toContain("Open Neoxify when I sign in");
-    expect(html).toContain("sign in to this computer");
-    expect(html).toContain("Notify me when the connection changes");
-    expect(html).toContain("Connect when Neoxify starts");
-    expect(html).toContain("Leak protection");
-    for (const missing of [
-      "Windows",
-      "Gaming mode",
+    for (const row of [
+      "Open Neoxify when I sign in",
+      "sign in to this computer",
+      "Notify me when the connection changes",
+      "Connect when Neoxify starts",
+      "Leak protection",
       "Custom mode",
+      "Modes",
       "Repair network",
       "Block the internet while reconnecting",
-      "Modes",
     ]) {
+      expect(html, row).toContain(row);
+    }
+    for (const missing of ["Windows", "Gaming mode", "Gaming"]) {
       expect(html, missing).not.toContain(missing);
     }
   });
 
-  it("never asks the helper for a hold, a gaming disarm or the WebView2 version", async () => {
-    expect(holdWanted(true)).toBe(false);
+  it("asks the helper for a hold, never for a gaming disarm or the WebView2 version", async () => {
+    expect(holdWanted(true)).toBe(true);
+    expect(holdWanted(false)).toBe(false);
     await desktopTeardownDeps.disarmGaming();
     expect(await webviewVersion()).toBeNull();
     expect(invoke).not.toHaveBeenCalled();
@@ -168,11 +172,23 @@ describe("on Linux", () => {
     expect(webkitLine(await webkitGtkVersion())).toBe("webview: WebKitGTK (version could not be read)");
   });
 
-  it("leaves IKEv2 out of the automatic order and out of the server list", () => {
+  it("offers IKEv2 in the automatic order and the server list, as Windows does", () => {
     const users = [user("a", "IKEV2"), user("b", "WIREGUARD"), user("c", "OPENVPN")];
-    expect(orderCandidates(users).map((u) => u.protocol)).toEqual(["WIREGUARD", "OPENVPN"]);
-    expect(orderCandidates(users, { pinnedRouteId: "a" }).map((u) => u.routeId)).not.toContain("a");
-    expect(offeredUsers(users).map((u) => u.protocol)).toEqual(["WIREGUARD", "OPENVPN"]);
+    expect(offeredUsers(users)).toBe(users);
+    setDesktopPlatform("windows");
+    const windowsOrder = orderCandidates(users).map((u) => u.protocol);
+    setDesktopPlatform("linux");
+    expect(orderCandidates(users).map((u) => u.protocol)).toEqual(windowsOrder);
+    expect(orderCandidates(users, { pinnedRouteId: "a" }).map((u) => u.routeId)[0]).toBe("a");
+  });
+
+  it("says to install strongSwan when Built-in cannot find it, and only on Linux", () => {
+    const shown = classifyConnectionError("charon-cmd is missing from the install: install strongswan");
+    expect(shown.kind).toBe("engineMissing");
+    expect(shown.messageKey).toBe("err.engineMissingStrongswan");
+    expect(classifyConnectionError("xray is missing from the install").messageKey).toBe("err.engineMissing");
+    setDesktopPlatform("windows");
+    expect(classifyConnectionError("charon-cmd is missing from the install").messageKey).toBe("err.engineMissing");
   });
 
   it("says what helps when the service is not running: restart the computer, or install again", () => {
@@ -208,12 +224,24 @@ describe("the guarded call sites", () => {
     expect(app).not.toContain('platform="windows"');
   });
 
-  it("never calls the updater where the app cannot install its own updates", () => {
-    expect(app).toContain("supportsSelfUpdate() ? startUpdateChecks(setUpdateState) : startUpdateNotices(setUpdateState)");
+  it("calls Tauri's updater on Windows only: Linux has its own path, and the notice elsewhere", () => {
+    expect(app).toMatch(
+      /if \(!supportsSelfUpdate\(\)\) return startUpdateNotices\(setUpdateState\);\s+return isLinux\(\) \? startLinuxUpdates\(setUpdateState\) : startUpdateChecks\(setUpdateState\);/,
+    );
+    expect(app).toMatch(/if \(isLinux\(\)\) \{\s+await applyLinuxUpdate\(setUpdateState\);\s+return;\s+\}\s+await applyStagedUpdate\(true\);/);
     expect(source("./update-notice.ts")).not.toMatch(/plugin-updater/);
+    expect(source("./linux-update.ts")).not.toMatch(/plugin-updater/);
   });
 
-  it("the Dashboard sends no split-tunnel, gaming or probe request on Linux, and offers no repair", () => {
+  it("the Dashboard sends no per-game exits where there is no catalogue", () => {
+    expect(dash).toContain("const concurrent = splitTunnelSettings && supportsGameCatalogue()");
+    expect(dash).toMatch(/if \(splitTunnelSettings && supportsGameCatalogue\(\)\) \{\s+await pushSplitTunnel\(/);
+    expect(source("./split-tunnel.ts")).toContain(
+      "exits: supportsGameCatalogue() ? exitsForGames(settings.games, settings.apps).exits : []",
+    );
+  });
+
+  it("the Dashboard sends no split-tunnel, gaming or probe request without the feature, and offers no repair", () => {
     expect(dash).toMatch(/if \(!onMainPage\) return;\s+\/\/[^\n]*\n\s+if \(!supportsCustomMode\(\)\) return;\s+loadSplitTunnel\(\)/);
     expect(dash).toMatch(/if \(supportsCustomMode\(\)\) \{\s+try \{\s+const settings = await loadSplitTunnel\(\);/);
     expect(dash).toContain("if (status.splitTunnelActive && supportsCustomMode()) {");
@@ -225,7 +253,6 @@ describe("the guarded call sites", () => {
     // Every split-tunnel push in the pass is behind the settings the guarded
     // read produced, and every probe behind a guarded \`customMode\`.
     expect(dash.match(/pushSplitTunnel\(/g)).toHaveLength(2);
-    expect(dash).toMatch(/if \(splitTunnelSettings\) \{\s+await pushSplitTunnel\(/);
   });
 
   it("Support offers its diagnostics only where the helper has them", () => {

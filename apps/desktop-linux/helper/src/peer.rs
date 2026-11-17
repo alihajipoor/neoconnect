@@ -46,8 +46,9 @@ pub enum Caller {
     App { pid: u32, uid: u32 },
     /// Served, not watched: root, or a tool run by root.
     Trusted,
-    /// Refused, with what to log once.
-    Refused { who: String },
+    /// Refused, with what to log once, and what the caller is told when
+    /// it is something they can act on (`None`: the general refusal).
+    Refused { who: String, reply: Option<String> },
 }
 
 pub struct Policy {
@@ -132,8 +133,9 @@ impl Policy {
             _ if uid == self.trusted_uid => Caller::Trusted,
             (true, Some(_)) => Caller::Refused {
                 who: format!("uid {uid}, {}, neither at this computer's screen nor in the {} group", exe_text(), self.group),
+                reply: Some(away_reply(&self.group, user_name(uid).as_deref())),
             },
-            _ => Caller::Refused { who: format!("uid {uid}, {}", exe_text()) },
+            _ => Caller::Refused { who: format!("uid {uid}, {}", exe_text()), reply: None },
         }
     }
 
@@ -141,6 +143,28 @@ impl Policy {
     pub fn first_refusal(&self, who: &str) -> bool {
         self.logged.lock().map(|mut seen| seen.insert(who.to_owned())).unwrap_or(false)
     }
+}
+
+/// What the app is told when its user is neither at the screen nor in
+/// the group: the two ways in, in words a customer can act on, with the
+/// command an administrator runs to add them.
+pub fn away_reply(group: &str, user: Option<&str>) -> String {
+    let user = user.unwrap_or("$USER");
+    format!(
+        "Neoxify can only be used by the person at this computer's screen, or by a member of the {group} group. \
+         To use it from this account, an administrator can run: sudo usermod -aG {group} {user} -- then sign out and back in."
+    )
+}
+
+/// A user's login name, from `/etc/passwd`.
+fn user_name(uid: u32) -> Option<String> {
+    let text = std::fs::read_to_string("/etc/passwd").ok()?;
+    let uid = uid.to_string();
+    text.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        (fields.nth(1)? == uid).then(|| name.to_string())
+    })
 }
 
 /// The executable of a process. A program replaced on disk while it runs
@@ -270,16 +294,18 @@ mod tests {
     #[test]
     fn the_app_run_by_anyone_else_is_refused() {
         let policy = Policy::new(0, vec![PathBuf::from(APP_PATH)]);
-        let Caller::Refused { who } = policy.judge_with(1001, Some(42), Some(Path::new(APP_PATH)), NEITHER) else {
+        let Caller::Refused { who, reply } = policy.judge_with(1001, Some(42), Some(Path::new(APP_PATH)), NEITHER) else {
             panic!("the app was served to a user who is neither at the screen nor in the group");
         };
         assert!(who.contains("uid 1001") && who.contains("group"), "{who}");
+        let reply = reply.expect("a refusal the customer can act on");
+        assert!(reply.contains("usermod -aG neoxify") && reply.contains("sign out"), "{reply}");
     }
 
     #[test]
     fn anyone_else_is_refused_and_logged_once() {
         let policy = Policy::new(0, vec![PathBuf::from(APP_PATH)]);
-        let Caller::Refused { who } = policy.judge_with(1000, Some(42), Some(Path::new("/usr/bin/curl")), AT_SEAT)
+        let Caller::Refused { who, .. } = policy.judge_with(1000, Some(42), Some(Path::new("/usr/bin/curl")), AT_SEAT)
         else {
             panic!("a stranger was served");
         };

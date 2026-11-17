@@ -15,8 +15,9 @@
 use std::time::Duration;
 
 use neoconnect_ipc::{
-    ConnectProfile, GamingPhase, Ikev2Profile, OpenvpnProfile, Request, Response, ShadowsocksProfile,
-    TrojanProfile, TunnelHealth, VlessTlsProfile, WireguardProfile, XrayProfile,
+    AppPlacement, ConnectProfile, GamingPhase, Ikev2Profile, OpenvpnProfile, RepairReport, Request, Response,
+    RunningApp, ShadowsocksProfile, SplitTunnelConfig, SplitTunnelMode, TrojanProfile, TunnelHealth,
+    VlessTlsProfile, WireguardProfile, XrayProfile,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -265,7 +266,7 @@ impl ProtocolUserPayload {
                     .and_then(|v| v.as_str())
                     .filter(|v| !v.is_empty())
                     .ok_or(
-                        "this server has no hostname recorded, and IKEv2 cannot be                          dialled by address -- ask support to re-register it",
+                        "this server has no hostname recorded, and IKEv2 cannot be dialled by address -- ask support to re-register it",
                     )?;
                 Ok(ConnectProfile::Ikev2(Ikev2Profile {
                     server: server.to_string(),
@@ -293,6 +294,15 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(45);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 async fn call_within(request: &Request, reply_timeout: Duration) -> Result<Response, String> {
+    let line = exchange(request, reply_timeout).await?;
+    serde_json::from_str(line.trim())
+        .map_err(|e| format!("could not decode the background service's reply: {e}"))
+}
+
+/// One request line out, one reply line back, undecoded. Shared by the
+/// shared contract above and the Linux-only requests (`linux_requests.rs`),
+/// which decode their replies against a different enum.
+pub(crate) async fn exchange<T: serde::Serialize>(request: &T, reply_timeout: Duration) -> Result<String, String> {
     // The wording of the failure is load-bearing: the interface's
     // `serviceGone` (desktop-windows src/lib/service-call.ts) matches
     // "Could not reach the Neoxify background service", and that is what
@@ -344,8 +354,7 @@ async fn call_within(request: &Request, reply_timeout: Duration) -> Result<Respo
         }
     }
 
-    serde_json::from_str(line.trim())
-        .map_err(|e| format!("could not decode the background service's reply: {e}"))
+    Ok(line)
 }
 
 /// Why the helper's socket could not be opened, in our own words. The
@@ -369,27 +378,16 @@ async fn call_expecting_ok(request: &Request) -> Result<(), String> {
     }
 }
 
-/// What the interface is told for a feature the Linux first version does
-/// not carry. The interface hides these on Linux; this is the answer for a
-/// path that reaches one anyway, in a sentence a person can read, never a
-/// default that looks like it worked.
-fn not_on_linux(what: &str) -> String {
-    format!("{what} is not available in the Linux version of Neoxify yet.")
-}
-
-/// IKEv2 goes through the Windows system client, and Linux has no route for
-/// it in the first version. Refused here, before the helper, so the refusal
-/// is the same sentence whichever helper is installed.
-fn refuse_unsupported(profile: &ConnectProfile) -> Result<(), String> {
-    if matches!(profile, ConnectProfile::Ikev2(_)) {
-        return Err(not_on_linux("IKEv2"));
-    }
-    Ok(())
-}
+/// How long a repair may take to be answered: the Windows app's figure.
+/// The helper's pass is far shorter, but every one of its steps runs a
+/// bounded program, and a repair is the request least worth cutting off
+/// halfway -- the customer's next move depends on which step is stuck.
+const REPAIR_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// One concurrent exit, as the frontend supplies it. Accepted so the
-/// command keeps the Windows signature, and dropped: per-game exits ride on
-/// Custom mode, which Linux does not have.
+/// command keeps the Windows signature, and dropped: on Windows these come
+/// from the game catalogue, whose programs are Windows programs, so there
+/// is nothing on Linux they could name.
 #[derive(Debug, Deserialize)]
 pub struct ExitPayload {
     #[allow(dead_code)]
@@ -399,8 +397,8 @@ pub struct ExitPayload {
 }
 
 /// Brings a tunnel up through the helper. `exits` is accepted and dropped
-/// (see [`ExitPayload`]); `block_while_reconnecting` is always sent as off,
-/// because the reconnect hold is not in the Linux first version.
+/// (see [`ExitPayload`]). `block_while_reconnecting` is the customer's
+/// "Block the internet while reconnecting" setting; absent is off.
 #[tauri::command]
 pub async fn vpn_connect(
     payload: ProtocolUserPayload,
@@ -408,14 +406,13 @@ pub async fn vpn_connect(
     known_nodes: Option<Vec<String>>,
     block_while_reconnecting: Option<bool>,
 ) -> Result<(), String> {
-    let _ = (exits, block_while_reconnecting);
+    let _ = exits;
     let profile = payload.into_profile()?;
-    refuse_unsupported(&profile)?;
     call_expecting_ok(&Request::Connect {
         profile,
         exits: Vec::new(),
         known_nodes: known_nodes.unwrap_or_default(),
-        block_while_reconnecting: false,
+        block_while_reconnecting: block_while_reconnecting.unwrap_or(false),
     })
     .await
 }
@@ -425,72 +422,126 @@ pub async fn vpn_disconnect() -> Result<(), String> {
     call_expecting_ok(&Request::Disconnect).await
 }
 
-/// With no reconnect hold, a reconnect's teardown is an ordinary one: the
-/// same as `vpn_disconnect`, which is what Windows does with the setting
-/// off.
+/// Takes the tunnel down for a reconnect. With the setting on, the helper
+/// holds the gap closed; otherwise it is the same as `vpn_disconnect`.
 #[tauri::command]
 pub async fn vpn_disconnect_for_reconnect() -> Result<(), String> {
-    call_expecting_ok(&Request::Disconnect).await
+    call_expecting_ok(&Request::DisconnectForReconnect).await
 }
 
-/// Nothing is ever held on Linux, so letting go of it always succeeds.
+/// Lets go of the reconnect hold: a tunnel proved, or the reconnect over.
 #[tauri::command]
 pub async fn vpn_release_reconnect_hold() -> Result<(), String> {
-    Ok(())
+    call_expecting_ok(&Request::ReleaseReconnectHold).await
 }
 
-/// Switching the hold off is already true; switching it on is refused, so
-/// the interface never shows a protection that is not there.
+/// The "Block the internet while reconnecting" setting changed.
 #[tauri::command]
 pub async fn vpn_set_reconnect_hold(enabled: bool) -> Result<(), String> {
-    if enabled {
-        return Err(not_on_linux("Blocking the internet while reconnecting"));
-    }
-    Ok(())
+    call_expecting_ok(&Request::SetReconnectHold { enabled }).await
 }
 
-/// Custom mode needs a per-application packet filter that Linux does not
-/// have yet. Switching it off, or sending the default all-traffic setting
-/// before a connect, is already the truth and succeeds; asking for it on
-/// is refused.
-#[tauri::command]
-pub async fn vpn_set_split_tunnel(enabled: bool) -> Result<(), String> {
-    if enabled {
-        return Err(not_on_linux("Choosing which apps use the VPN"));
-    }
-    Ok(())
-}
-
+/// Asks the helper to prove the tunnel carries traffic the way a chosen
+/// app's traffic travels. The app's own check cannot: in "only the chosen
+/// apps" mode the app is not one of them and leaves by the ordinary route.
 #[tauri::command]
 pub async fn vpn_probe_split_tunnel() -> Result<(), String> {
-    Err(not_on_linux("Choosing which apps use the VPN"))
+    call_expecting_ok(&Request::ProbeSplitTunnel).await
 }
 
+/// Which apps Custom mode sorts, and which way round. Sent whenever the
+/// setting changes and again before every connect, as on Windows, so the
+/// helper never has to assume a selection survived its own restart.
+///
+/// `scopes` and `exits` are accepted for the Windows signature and not
+/// sent: both come from the game catalogue, which names Windows programs.
+/// The helper checks each app with `tunnel::valid_app`; the shared
+/// `SplitTunnelConfig::validate` is Windows-shaped and is not called here.
 #[tauri::command]
-pub async fn vpn_exit_placements() -> Result<serde_json::Value, String> {
-    Err(not_on_linux("Choosing an exit for each app"))
+pub async fn vpn_set_split_tunnel(
+    enabled: bool,
+    apps: Option<Vec<String>>,
+    mode: Option<SplitTunnelMode>,
+    scopes: Option<serde_json::Value>,
+    exits: Option<serde_json::Value>,
+    egress: Option<String>,
+) -> Result<(), String> {
+    let _ = (scopes, exits);
+    call_expecting_ok(&Request::SetSplitTunnel {
+        config: SplitTunnelConfig {
+            enabled,
+            apps: apps.unwrap_or_default(),
+            mode: mode.unwrap_or_default(),
+            scopes: Vec::new(),
+            exits: Vec::new(),
+            egress,
+        },
+    })
+    .await
 }
 
+/// Where each chosen app's traffic leaves from, in the Windows reply shape.
 #[tauri::command]
-pub async fn vpn_list_running_apps() -> Result<Vec<serde_json::Value>, String> {
-    Err(not_on_linux("Choosing which apps use the VPN"))
+pub async fn vpn_exit_placements() -> Result<ExitPlacements, String> {
+    match call(&Request::SplitTunnelExits).await? {
+        Response::ExitPlacements { egress, apps } => Ok(ExitPlacements { egress, apps }),
+        Response::Error { message } => Err(message),
+        // Refused rather than read as an empty list: "the helper said
+        // something unexpected" must not render as "no app has a place".
+        _ => Err("the background service returned an unexpected reply".into()),
+    }
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExitPlacements {
+    pub egress: Option<String>,
+    pub apps: Vec<AppPlacement>,
+}
+
+/// The apps running right now, for the picker. The helper says which of
+/// this person's programs are running, grouped by program; which of those
+/// is an app a person would recognise is decided here, from the installed
+/// desktop entries, because those are the user's own files (apps.rs).
 #[tauri::command]
-pub async fn vpn_repair() -> Result<serde_json::Value, String> {
-    Err(not_on_linux("Repair my network"))
+pub async fn vpn_list_running_apps() -> Result<Vec<RunningApp>, String> {
+    match call(&Request::ListRunningApps).await? {
+        Response::RunningApps { apps } => {
+            // Reading desktop entries and icons is file work: off the
+            // async runtime so a slow disk cannot stall other commands.
+            tauri::async_runtime::spawn_blocking(move || crate::apps::presentable(apps))
+                .await
+                .map_err(|_| "could not read the installed apps".to_string())
+        }
+        Response::Error { message } => Err(message),
+        _ => Err("the background service returned an unexpected reply".into()),
+    }
 }
 
+/// Runs the repair in the helper and hands back what it found. A repair
+/// whose steps failed still returns its report: which step is stuck
+/// decides what the customer does next.
+#[tauri::command]
+pub async fn vpn_repair() -> Result<RepairReport, String> {
+    match call_within(&Request::Repair, REPAIR_TIMEOUT).await? {
+        Response::Repaired { report } => Ok(report),
+        Response::Error { message } => Err(message),
+        _ => Err("the background service returned an unexpected reply".into()),
+    }
+}
+
+/// The Windows snapshot's fields are the Windows machine's (NRPT, WFP,
+/// services); Linux has its own report, `vpn_linux_diagnostics`.
 #[tauri::command]
 pub async fn vpn_diagnostics() -> Result<serde_json::Value, String> {
-    Err(not_on_linux("Diagnostics"))
+    Err("This report is the Windows one; the Linux app uses vpn_linux_diagnostics.".to_string())
 }
 
-/// The command to give a customer when the app cannot reach the helper:
-/// on Linux that is the helper's unit, not a repair binary.
+/// The command to give a customer when the app cannot reach the helper or
+/// a repair is needed from a terminal: the helper's own repair, as root.
 #[tauri::command]
 pub fn repair_command_line() -> String {
-    "sudo systemctl restart neoxify-helper".to_string()
+    "sudo /usr/lib/neoxify/neoxify-helper repair".to_string()
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -931,10 +982,11 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
     }
 }
 
-/// Gaming mode is not in the Linux first version.
+/// Gaming mode is a Windows feature and the Linux interface never offers
+/// it; this answers a path that reaches it anyway, without promising it.
 #[tauri::command]
 pub async fn gaming_arm() -> Result<GamingStatus, String> {
-    Err(not_on_linux("Gaming mode"))
+    Err("Gaming mode is part of the Windows app.".to_string())
 }
 
 /// Nothing can be armed on Linux, so disarming always succeeds: the
@@ -1738,22 +1790,30 @@ mod linux_tests {
         assert_eq!(ping_time("1 packets transmitted, 0 received, 100% packet loss"), None);
     }
 
+    /// The terminal fallback names the helper's own repair, which the
+    /// package installs at this path.
     #[test]
-    fn ikev2_is_refused_with_a_sentence_and_the_rest_pass() {
-        let ikev2 = ConnectProfile::Ikev2(Ikev2Profile {
-            server: "vpn.example.com".into(),
-            username: "u".into(),
-            password: "p".into(),
-        });
-        let err = refuse_unsupported(&ikev2).unwrap_err();
-        assert!(err.contains("IKEv2") && err.contains("Linux"), "{err}");
-        let shadowsocks = ConnectProfile::Shadowsocks(ShadowsocksProfile {
-            host: "192.0.2.5".into(),
-            port: 443,
-            method: "2022-blake3-aes-128-gcm".into(),
-            password: "a:b".into(),
-        });
-        assert!(refuse_unsupported(&shadowsocks).is_ok());
+    fn the_repair_command_is_the_helpers_own() {
+        assert_eq!(repair_command_line(), "sudo /usr/lib/neoxify/neoxify-helper repair");
+        assert!(REPAIR_TIMEOUT > REPLY_TIMEOUT);
+    }
+
+    /// The interface sends Custom mode's settings with the Windows names;
+    /// what Linux has no use for (the game catalogue's scopes and exits)
+    /// must not stop the rest from arriving.
+    #[test]
+    fn split_tunnel_settings_with_the_windows_names_reach_the_helper_shape() {
+        let config = SplitTunnelConfig {
+            enabled: true,
+            apps: vec!["/usr/bin/firefox".into()],
+            mode: serde_json::from_value(serde_json::json!("allExcept")).unwrap(),
+            scopes: Vec::new(),
+            exits: Vec::new(),
+            egress: None,
+        };
+        let json = serde_json::to_value(Request::SetSplitTunnel { config }).unwrap();
+        assert_eq!(json["config"]["mode"], "allExcept");
+        assert_eq!(json["config"]["apps"][0], "/usr/bin/firefox");
     }
 
     /// The interface decides the helper is gone by this exact wording
@@ -1788,8 +1848,5 @@ mod linux_tests {
         let json = serde_json::to_value(&status).unwrap();
         assert_eq!(json["state"], "off");
         assert!(tauri::async_runtime::block_on(gaming_disarm()).is_ok());
-        assert!(tauri::async_runtime::block_on(vpn_release_reconnect_hold()).is_ok());
-        assert!(tauri::async_runtime::block_on(vpn_set_split_tunnel(false)).is_ok());
-        assert!(tauri::async_runtime::block_on(vpn_set_split_tunnel(true)).is_err());
     }
 }

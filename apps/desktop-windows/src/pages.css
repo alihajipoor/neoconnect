@@ -634,6 +634,23 @@
     flex-direction: column;
     gap: 16px;
   }
+  /* On a wide window the page runs to the window's top edge, where the
+     title strip and its buttons are drawn over it. The strip is kept out
+     of the scrolling box itself rather than only out of its first lines:
+     with the space in the padding, a scrolled page slid up under the
+     buttons (seen on Linux at the default 940x700, and the same CSS on
+     Windows), and its scrollbar ran under them too. At rest the page sits
+     exactly where it did. Medium and narrow windows have their own header
+     above the page and are left alone. */
+  @container app (min-width: 900px) {
+    .nx-pscroll {
+      margin-top: var(--tb);
+      height: calc(100% - var(--tb));
+    }
+    .nx-pinner {
+      padding-top: 22px;
+    }
+  }
   .nx-phead {
     display: flex;
     flex-direction: column;

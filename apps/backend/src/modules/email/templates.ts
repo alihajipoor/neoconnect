@@ -655,11 +655,14 @@ const EN = {
       `You've been given a <strong>${planName}</strong> plan on Neoxify. Activate it with the code below. No payment is needed.`,
     codeLabel: "Activation code",
     button: "Activate my plan",
-    thenInstall: "Then install the app on Windows, Android or iPhone and sign in with the same email:",
+    thenInstall: "Then install the app on Windows, Android, iPhone or Linux and sign in with the same email:",
     /** Only when no website address is known. The reseller service
      * always passes one, so this keeps the template whole on its own. */
     noLinks: (appStore: string) =>
-      `Get the app for Windows or Android from neoxify.net, and for iPhone from the ${appStore}.`,
+      `Get the app for Windows, Android or Linux from neoxify.net, and for iPhone from the ${appStore}.`,
+    /** The line under the tiles. Linux comes as two packages, and a
+     * fourth tile would not fit a phone without the stylesheet. */
+    linux: (deb: string, rpm: string) => `On Linux, use the ${deb} package on Ubuntu or Debian, or the ${rpm} package on Fedora.`,
     installerSub: "Installer",
     apkSub: "APK",
     appStoreSub: "App Store",
@@ -834,9 +837,11 @@ const FA: Strings = {
       `یک پلن <strong>${planName}</strong> در نئوکسیفای به شما داده شده است. با کد زیر فعالش کنید. نیازی به پرداخت نیست.`,
     codeLabel: "کد فعال‌سازی",
     button: "فعال کردن پلن",
-    thenInstall: "بعد برنامه را روی ویندوز، اندروید یا آیفون نصب کنید و با همین ایمیل وارد شوید:",
+    thenInstall: "بعد برنامه را روی ویندوز، اندروید، آیفون یا لینوکس نصب کنید و با همین ایمیل وارد شوید:",
     noLinks: (appStore: string) =>
-      `نسخهٔ ویندوز و اندروید را از neoxify.net بگیرید و نسخهٔ آیفون را از ${appStore}.`,
+      `نسخهٔ ویندوز، اندروید و لینوکس را از neoxify.net بگیرید و نسخهٔ آیفون را از ${appStore}.`,
+    linux: (deb: string, rpm: string) =>
+      `روی لینوکس، در اوبونتو یا دبیان بستهٔ ${deb} و در فدورا بستهٔ ${rpm} را نصب کنید.`,
     installerSub: "فایل نصب",
     apkSub: "فایل APK",
     appStoreSub: "اپ‌استور",
@@ -1220,6 +1225,14 @@ export function installLinks(siteUrl?: string): InstallLink[] {
   ];
 }
 
+/** The two Linux packages, through the website's `/get/*` addresses for
+ * the same reason as the tiles. None without a website address. */
+export function linuxLinks(siteUrl?: string): { deb: string; rpm: string } | null {
+  const site = siteUrl?.replace(/\/+$/, "");
+  if (!site) return null;
+  return { deb: `${site}/get/linux-deb`, rpm: `${site}/get/linux-rpm` };
+}
+
 /** A row of platform download links, laid out as a table so it survives
  * Outlook, which ignores flexbox entirely.
  *
@@ -1256,7 +1269,15 @@ function downloadRow(s: Style, siteUrl?: string): string {
     <tr>
       ${links.map((link, i) => cell(i === links.length - 1, link.label, t[link.sub], link.href)).join("")}
     </tr>
-  </table>`;
+  </table>${linuxLine(s, siteUrl)}`;
+}
+
+function linuxLine(s: Style, siteUrl?: string): string {
+  const linux = linuxLinks(siteUrl);
+  if (!linux) return "";
+  const a = (href: string, label: string) =>
+    `<a href="${escapeAttribute(href)}" dir="ltr" class="nx-link" style="color:${COBALT};text-decoration:underline;">${label}</a>`;
+  return fineprint(s, STRINGS[s.locale].voucher.linux(a(linux.deb, ".deb"), a(linux.rpm, ".rpm")));
 }
 
 /** The install step as plain text: the same sentence as the html, then
@@ -1265,7 +1286,12 @@ function installText(locale: Locale, siteUrl?: string): string {
   const t = STRINGS[locale].voucher;
   const links = installLinks(siteUrl);
   if (links.length < 3) return `${t.thenInstall}\n${t.noLinks(t.appStoreSub)}\niPhone: ${APP_STORE_URL}`;
-  return [t.thenInstall, ...links.map((link) => `${link.label}: ${link.href}`)].join("\n");
+  const linux = linuxLinks(siteUrl);
+  return [
+    t.thenInstall,
+    ...links.map((link) => `${link.label}: ${link.href}`),
+    ...(linux ? [`Linux (.deb): ${linux.deb}`, `Linux (.rpm): ${linux.rpm}`] : []),
+  ].join("\n");
 }
 
 /**

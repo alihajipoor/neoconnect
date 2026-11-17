@@ -2340,17 +2340,19 @@ dependencies = [
 
 [[package]]
 name = "neoxify-desktop-linux"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
  "flate2",
+ "gtk",
  "h2",
  "http",
  "hyper",
  "hyper-util",
  "libc",
  "neoconnect-ipc",
+ "neoxify-linux-wire",
  "notify-rust",
  "reqwest 0.12.28",
  "ring",
@@ -2371,6 +2373,14 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "webpki-roots",
+]
+
+[[package]]
+name = "neoxify-linux-wire"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

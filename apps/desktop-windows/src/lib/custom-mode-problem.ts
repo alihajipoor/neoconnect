@@ -9,6 +9,7 @@
  * both languages; a code this app does not know -- from a newer service --
  * is shown as the service's own sentence, which is the most it can say. */
 
+import { isLinux } from "./desktop-platform";
 import type { TranslationKey } from "./i18n";
 
 const WORDS: Record<string, TranslationKey> = {
@@ -33,5 +34,8 @@ export function readCustomModeProblem(status: { splitTunnelProblem?: string; spl
  * service's sentence. */
 export function customModeProblemText(problem: CustomModeProblem, t: (key: TranslationKey) => string): string {
   const key = problem.code !== null && Object.prototype.hasOwnProperty.call(WORDS, problem.code) ? WORDS[problem.code] : null;
+  // The one code whose words name Windows: on Linux it is the kernel's
+  // sorting of the chosen apps that would not go in.
+  if (key === "dash.customProblemInjectionRefused" && isLinux()) return t("dash.customProblemInjectionRefusedLinux");
   return key ? t(key) : problem.sentence;
 }

@@ -130,17 +130,36 @@ interface AndroidBuild {
   version: string;
 }
 
-/** Linux has no in-app updater in its first version, so the answer is
- * only the newer version, and the notice links to the package. */
-export type LinuxUpdateCheck = { status: "update"; version: string } | { status: "current" } | { status: "unknown" };
-
 export type LinuxPackage = "deb" | "rpm";
+
+/** One package the Linux app's helper may install itself: where to fetch
+ * it (through /updates/download, never straight from GitHub) and the
+ * text of its detached signature, which the helper checks against the
+ * same public key the Windows updater uses. */
+export interface SignedLinuxPackage {
+  url: string;
+  signature: string;
+}
+
+/** The newer Linux version, and, for a release published with signatures,
+ * each package whose signature could be read. 0.1.0 had no in-app update
+ * and reads only the version, so `signed` is purely additive: absent for
+ * an unsigned release, and missing a package whose signature could not be
+ * fetched rather than failing the whole answer, since the notice and the
+ * other package still work without it. */
+export type LinuxUpdateCheck =
+  | { status: "update"; version: string; signed?: Partial<Record<LinuxPackage, SignedLinuxPackage>> }
+  | { status: "current" }
+  | { status: "unknown" };
 
 interface LinuxBuild {
   tag: string;
   version: string;
   deb: string;
   rpm: string;
+  /** The .sig beside each package, when the release carries one. */
+  debSignatureUrl: string | null;
+  rpmSignatureUrl: string | null;
   publishedAt: string;
 }
 
@@ -212,7 +231,28 @@ export class UpdatesService {
     const newest = await this.newestLinuxBuild();
     if (!newest) return { status: "unknown" };
     if (compareVersions(newest.version, currentVersion) <= 0) return { status: "current" };
-    return { status: "update", version: newest.version };
+
+    const base = (this.config.get<string>("publicApiUrl") ?? "").replace(/\/$/, "");
+    const signed: Partial<Record<LinuxPackage, SignedLinuxPackage>> = {};
+    const kinds: Array<[LinuxPackage, string, string | null]> = [
+      ["deb", newest.deb, newest.debSignatureUrl],
+      ["rpm", newest.rpm, newest.rpmSignatureUrl],
+    ];
+    await Promise.all(
+      kinds.map(async ([kind, asset, signatureUrl]) => {
+        if (!signatureUrl) return;
+        const signature = (await this.fetchSignature(signatureUrl))?.trim();
+        if (!signature) return;
+        signed[kind] = {
+          url: `${base}/updates/download/${encodeURIComponent(newest.tag)}/${encodeURIComponent(asset)}`,
+          signature,
+        };
+      }),
+    );
+
+    return Object.keys(signed).length > 0
+      ? { status: "update", version: newest.version, signed }
+      : { status: "update", version: newest.version };
   }
 
   /** The newest Linux package of the given kind: one stable link per
@@ -319,8 +359,20 @@ export class UpdatesService {
    *
    * Checked against the release rather than trusted from the path, and
    * rebuilt rather than echoed, so this endpoint cannot be turned into
-   * an open redirect to an arbitrary URL. */
+   * an open redirect to an arbitrary URL.
+   *
+   * A Linux tag is answered from the Linux build alone, so its two
+   * packages are reachable here and a failed Windows lookup cannot block
+   * a Linux update (nor the reverse). Only the packages: their .sig files
+   * travel inside the update answer, not through this redirect. */
   async downloadUrl(tag: string, assetName: string): Promise<string> {
+    if (tag.startsWith(LINUX_TAG_PREFIX)) {
+      const linux = await this.newestLinuxBuild();
+      if (!linux || linux.tag !== tag || (linux.deb !== assetName && linux.rpm !== assetName)) {
+        throw new NotFoundException("Unknown release asset");
+      }
+      return releaseAssetUrl(tag, assetName);
+    }
     const newest = await this.newestBuild();
     if (!newest || newest.tag !== tag || newest.payloadName !== assetName) {
       throw new NotFoundException("Unknown release asset");
@@ -598,11 +650,17 @@ function pickNewestLinuxBuild(releases: GithubRelease[]): LinuxBuild | null {
     const rpm = release.assets.find((a) => LINUX_RPM_PATTERN.exec(a.name)?.[1] === tagVersion);
     if (!deb || !rpm) continue;
     if (!build || compareVersions(tagVersion, build.version) > 0) {
+      // A signature counts only under the exact name "<package>.sig", so a
+      // signature can never be paired with a file it was not made over.
+      const signatureOf = (name: string) =>
+        release.assets.find((a) => a.name === `${name}.sig`)?.browser_download_url ?? null;
       build = {
         tag: release.tag_name,
         version: tagVersion,
         deb: deb.name,
         rpm: rpm.name,
+        debSignatureUrl: signatureOf(deb.name),
+        rpmSignatureUrl: signatureOf(rpm.name),
         publishedAt: release.published_at,
       };
     }

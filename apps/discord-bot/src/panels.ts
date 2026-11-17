@@ -86,9 +86,14 @@ function downloadsEmbed(releases: PlatformRelease[], config: BotConfig): EmbedBu
     });
   } else {
     for (const release of known) {
+      // Linux comes in two package formats, and a Fedora user handed only
+      // the .deb has nothing to install, so both are linked.
+      const links = release.packages
+        ? `[Ubuntu / Debian (.deb)](${release.packages.deb}) · [Fedora (.rpm)](${release.packages.rpm})`
+        : `[Download](${release.url})`;
       embed.addFields({
         name: PLATFORM_LABELS[release.platform] ?? release.platform,
-        value: `**v${release.version}** — [Download](${release.url})`,
+        value: `**v${release.version}** — ${links}`,
         inline: true,
       });
     }

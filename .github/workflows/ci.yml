@@ -402,7 +402,9 @@ jobs:
             apps/desktop-linux/src-tauri/target
           key: desktop-linux-cargo-${{ hashFiles('apps/desktop-linux/Cargo.lock', 'apps/desktop-linux/src-tauri/Cargo.lock') }}
 
-      - name: Test the helper, tunnel and netguard
+      # Every member of the workspace: helper, tunnel, netguard and wire,
+      # the Linux-only requests the helper and the app both speak.
+      - name: Test the helper, tunnel, netguard and wire
         working-directory: apps/desktop-linux
         run: cargo test --workspace
 

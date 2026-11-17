@@ -5,10 +5,22 @@
 # devices, add routes and policy rules, set sysctls such as src_valid_mark
 # (as wg-quick does), load an nftables table, and change DNS through
 # systemd-resolved or by rewriting /etc/resolv.conf. So /etc, /proc/sys,
-# /dev/net/tun and netlink all stay reachable; what it never needs, home
-# directories, other users' /tmp, cgroups, realtime scheduling, is closed.
+# /dev/net/tun and netlink all stay reachable; what it never needs, other
+# users' /tmp and realtime scheduling, is closed.
 # No ProtectClock or PrivateDevices: both close the device list, and
 # /dev/net/tun has to stay open.
+#
+# Custom mode sorts programs into two control groups of the helper's own
+# at the root of the hierarchy (neoxify.split and neoxify.app), so the
+# cgroup tree stays writable: no ProtectControlGroups. Home directories are
+# read-only rather than hidden, because an update is a package the app
+# downloaded into the person's home; the helper copies it into its own
+# root-only directory before checking it. It cannot be handed over through
+# /tmp or /var/tmp, of which PrivateTmp gives the helper its own copies.
+#
+# The package manager for an in-app update runs as a transient unit of its
+# own, never as a child of this one, because the package's scripts restart
+# this unit and a restart kills everything in its control group.
 [Unit]
 Description=Neoxify VPN helper
 Documentation=https://neoxify.net
@@ -35,9 +47,8 @@ StateDirectoryMode=0700
 
 NoNewPrivileges=yes
 ProtectSystem=true
-ProtectHome=yes
+ProtectHome=read-only
 PrivateTmp=yes
-ProtectControlGroups=yes
 ProtectHostname=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

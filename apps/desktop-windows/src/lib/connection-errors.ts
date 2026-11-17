@@ -102,6 +102,13 @@ export function classifyConnectionError(raw: unknown): ClassifiedError {
   const detail = typeof raw === "string" ? raw : raw instanceof Error ? raw.message : String(raw);
   const haystack = detail.toLowerCase();
 
+  // Linux: Built-in needs the distribution's strongSwan, which the package
+  // only recommends. Reinstalling Neoxify would not bring it, so the
+  // advice is to install strongSwan, whatever words the helper used.
+  if (desktopPlatform() === "linux" && /strongswan|charon-cmd/.test(haystack) && /missing|not installed|install/.test(haystack)) {
+    return { kind: "engineMissing", messageKey: "err.engineMissingStrongswan", detail };
+  }
+
   for (const { kind, messageKey, match } of PATTERNS) {
     if (!match.test(haystack)) continue;
     // On Linux the service is the system's to start, so the advice is to

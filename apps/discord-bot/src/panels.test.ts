@@ -48,6 +48,22 @@ describe("downloadsEmbed", () => {
     assert.match(json.fields?.[0]?.value ?? "", /\[Download\]\(https:/);
   });
 
+  it("links both Linux packages, not only the .deb", () => {
+    const linux = release({
+      platform: "linux",
+      version: "0.2.0",
+      url: "https://example.com/Neoxify_0.2.0_amd64.deb",
+      packages: {
+        deb: "https://example.com/Neoxify_0.2.0_amd64.deb",
+        rpm: "https://example.com/Neoxify-0.2.0-1.x86_64.rpm",
+      },
+    });
+    const field = downloadsEmbed([linux], config).toJSON().fields?.[0];
+    assert.match(field?.name ?? "", /Linux/);
+    assert.match(field?.value ?? "", /\(https:\/\/example\.com\/Neoxify_0\.2\.0_amd64\.deb\)/);
+    assert.match(field?.value ?? "", /\(https:\/\/example\.com\/Neoxify-0\.2\.0-1\.x86_64\.rpm\)/);
+  });
+
   /** A platform with no release yet is a real answer to "is there an iOS
    *  app". Silence would leave people asking in support. */
   it("names platforms that have no release rather than hiding them", () => {

@@ -23,7 +23,7 @@ use std::process::{Command, Stdio};
 mod lan;
 mod script;
 
-use script::{TAG_DNS, TAG_IPV4, TAG_IPV6};
+use script::{TAG_DNS, TAG_DNS_ANYWHERE, TAG_HOLD, TAG_IPV4, TAG_IPV6};
 
 /// The table's name, in the `inet` family. Nothing else is ever ours.
 pub const TABLE: &str = "neoxify";
@@ -125,21 +125,7 @@ pub fn ruleset(plan: &Plan) -> String {
 /// what the kernel now holds.
 pub fn apply(plan: &Plan) -> Result<Applied, Error> {
     validate(plan).map_err(Error::Refused)?;
-    let nft = nft()?;
-    let mut child = Command::new(nft)
-        .args(["-f", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| Error::NftMissing(format!("{}: {e}", nft.display())))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(ruleset(plan).as_bytes()).map_err(|e| Error::Refused(format!("writing the rules: {e}")))?;
-    }
-    let out = child.wait_with_output().map_err(|e| Error::Refused(e.to_string()))?;
-    if !out.status.success() {
-        return Err(Error::Refused(String::from_utf8_lossy(&out.stderr).trim().to_string()));
-    }
+    load(&ruleset(plan))?;
     // What the customer is told comes from the kernel, not the plan: a
     // flag the plan asked for and the table does not show is an error.
     let Some(applied) = in_force()? else {
@@ -178,7 +164,18 @@ pub fn remove() -> Result<Removal, Error> {
 }
 
 /// What is in force right now, or `None` when there is no table.
+///
+/// A table that is a hold answers `Some(Applied::default())`: rules of
+/// ours are in force, but none of the three confinement claims is made.
 pub fn in_force() -> Result<Option<Applied>, Error> {
+    match listing()? {
+        None => Ok(None),
+        Some(json) => readback(&json).map(Some).map_err(Error::NotVerified),
+    }
+}
+
+/// `nft -j list table inet neoxify`, or `None` when there is no table.
+fn listing() -> Result<Option<String>, Error> {
     let nft = nft()?;
     let out = Command::new(nft)
         .args(["-j", "list", "table", "inet", TABLE])
@@ -190,7 +187,28 @@ pub fn in_force() -> Result<Option<Applied>, Error> {
         }
         return Err(Error::NotVerified(String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }
-    readback(&String::from_utf8_lossy(&out.stdout)).map(Some).map_err(Error::NotVerified)
+    Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+}
+
+/// One `nft -f -`: the whole script is one transaction, so either all of
+/// it is in force afterwards or none of it is and the old table stands.
+fn load(script: &str) -> Result<(), Error> {
+    let nft = nft()?;
+    let mut child = Command::new(nft)
+        .args(["-f", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::NftMissing(format!("{}: {e}", nft.display())))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(script.as_bytes()).map_err(|e| Error::Refused(format!("writing the rules: {e}")))?;
+    }
+    let out = child.wait_with_output().map_err(|e| Error::Refused(e.to_string()))?;
+    if !out.status.success() {
+        return Err(Error::Refused(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+    }
+    Ok(())
 }
 
 /// The on-link private IPv4 prefixes of the interfaces that are up,
@@ -255,29 +273,140 @@ pub struct Held {
 /// The complete nft script for a hold: pure, no I/O. Loading it replaces
 /// any earlier table of ours in the same transaction.
 pub fn hold_ruleset(plan: &HoldPlan) -> String {
-    let _ = plan;
-    String::new()
+    script::build_hold(plan)
 }
 
+/// Where cgroup v2 is mounted. nft resolves a `socket cgroupv2` path
+/// against this same directory when the script is loaded.
+const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
 /// Put the hold in force, replacing whatever of ours was there, and say
-/// what the kernel now holds. An error means nothing is held: the caller
-/// reports that and fails open.
+/// what the kernel now holds. An error means the load did not happen or
+/// could not be confirmed; on a refusal the table that was there before
+/// still stands, since the load is one transaction. The caller reports
+/// it and fails open.
 pub fn apply_hold(plan: &HoldPlan) -> Result<Held, Error> {
-    let _ = plan;
-    Err(Error::Refused("the hold is not built yet".into()))
+    validate_hold(plan).map_err(Error::Refused)?;
+    if let Some(group) = &plan.app_group {
+        // nft would refuse a missing group too, but in words about a
+        // path; this says which group, which is what the helper reports.
+        if !Path::new(CGROUP_ROOT).join(group).is_dir() {
+            return Err(Error::Refused(format!("the control group {group:?} does not exist")));
+        }
+    }
+    load(&hold_ruleset(plan))?;
+    match hold_in_force()? {
+        Some(held) => Ok(held),
+        None => Err(Error::NotVerified("the hold is not in the kernel's table after loading it".into())),
+    }
 }
 
 /// The hold as the kernel shows it now: `None` when the table is absent
 /// or is not a hold.
 pub fn hold_in_force() -> Result<Option<Held>, Error> {
-    Ok(None)
+    match listing()? {
+        None => Ok(None),
+        Some(json) => hold_readback(&json).map_err(Error::NotVerified),
+    }
 }
 
 /// The resolvers this machine sends its lookups to, loopback stubs left
 /// out (with systemd-resolved, the upstream servers it uses; otherwise
 /// what `/etc/resolv.conf` names). Empty when they cannot be read.
 pub fn machine_resolvers() -> Vec<std::net::IpAddr> {
-    Vec::new()
+    let etc = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    // The upstream list is read only when resolv.conf points programs at
+    // resolved's stub: a machine that names its servers directly sends
+    // its lookups there, whatever resolved would have used.
+    let upstream = if names_resolved_stub(&etc) {
+        std::fs::read_to_string("/run/systemd/resolve/resolv.conf").ok()
+    } else {
+        None
+    };
+    resolvers_from(&etc, upstream.as_deref())
+}
+
+/// The most resolvers a hold names, as on Windows (`MAX_RESOLVERS`).
+const MAX_RESOLVERS: usize = 16;
+
+/// systemd-resolved listens on 127.0.0.53, and 127.0.0.54 for its proxy.
+fn names_resolved_stub(conf: &str) -> bool {
+    let stubs = [Ipv4Addr::new(127, 0, 0, 53), Ipv4Addr::new(127, 0, 0, 54)];
+    nameservers(conf).any(|ip| matches!(ip, std::net::IpAddr::V4(v4) if stubs.contains(&v4)))
+}
+
+fn nameservers(conf: &str) -> impl Iterator<Item = std::net::IpAddr> + '_ {
+    conf.lines().filter_map(|line| {
+        let mut words = line.split_whitespace();
+        if words.next() != Some("nameserver") {
+            return None;
+        }
+        // A link-local IPv6 server carries its interface ("fe80::1%eth0");
+        // the rule names the address alone.
+        let word = words.next()?;
+        word.split('%').next()?.parse().ok()
+    })
+}
+
+/// The resolvers from `/etc/resolv.conf` and, when it names resolved's
+/// stub, from resolved's own list of upstream servers. Loopback is left
+/// out (the hold passes it anyway), and so is anything no rule should
+/// name.
+fn resolvers_from(etc: &str, upstream: Option<&str>) -> Vec<std::net::IpAddr> {
+    let mut out: Vec<std::net::IpAddr> = Vec::new();
+    for ip in nameservers(etc).chain(upstream.into_iter().flat_map(nameservers)) {
+        if !ip.is_loopback() && usable_resolver(ip) && !out.contains(&ip) && out.len() < MAX_RESOLVERS {
+            out.push(ip);
+        }
+    }
+    out
+}
+
+/// A server's address that a permit can name without naming more than one
+/// host: not 0.0.0.0, not the broadcast, not a multicast group.
+pub(crate) fn usable_v4(ip: Ipv4Addr) -> bool {
+    !ip.is_unspecified() && !ip.is_broadcast() && !ip.is_multicast()
+}
+
+pub(crate) fn usable_resolver(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => usable_v4(v4),
+        std::net::IpAddr::V6(v6) => !v6.is_unspecified() && !v6.is_multicast(),
+    }
+}
+
+/// The hold's counterpart of [`validate`]: nothing in the plan becomes nft
+/// syntax, and nothing widens a permit to everyone.
+fn validate_hold(plan: &HoldPlan) -> Result<(), String> {
+    for name in &plan.tunnel_ifaces {
+        if !script::valid_iface(name) {
+            return Err(format!("{name:?} is not an interface name this accepts"));
+        }
+    }
+    if plan.engine_fwmark == Some(0) {
+        return Err("an engine mark of 0 would match every unmarked packet".into());
+    }
+    for ip in &plan.servers {
+        if !usable_v4(*ip) {
+            return Err(format!("{ip} is not a server's address"));
+        }
+    }
+    for ip in &plan.resolvers {
+        if !usable_resolver(*ip) {
+            return Err(format!("{ip} is not a resolver's address"));
+        }
+    }
+    if let Some(group) = &plan.app_group {
+        if !script::valid_group(group) {
+            return Err(format!("{group:?} is not a control group path this accepts"));
+        }
+    }
+    for c in &plan.lan {
+        if c.prefix < 8 || c.prefix > 32 {
+            return Err(format!("{}/{} is not a local network", c.addr, c.prefix));
+        }
+    }
+    Ok(())
 }
 
 /// nft from the system's own directories only. The helper runs as root,
@@ -335,52 +464,84 @@ fn validate(plan: &Plan) -> Result<(), String> {
 /// a chain hooked where it has to act: IPv4 and IPv6 on output, input
 /// and forward; DNS on output and forward.
 fn readback(json: &str) -> Result<Applied, String> {
-    use serde_json::Value;
-    let v: Value = serde_json::from_str(json).map_err(|e| format!("unreadable nft output: {e}"))?;
-    let items = v.get("nftables").and_then(Value::as_array).ok_or("nft output has no \"nftables\" list")?;
-    let mut hooks: Vec<(String, String)> = Vec::new();
-    let mut refusals: Vec<(String, String)> = Vec::new();
-    for item in items {
-        if let Some(chain) = item.get("chain") {
-            if chain.get("table").and_then(Value::as_str) != Some(TABLE) {
-                continue;
-            }
-            if let (Some(name), Some(hook)) =
-                (chain.get("name").and_then(Value::as_str), chain.get("hook").and_then(Value::as_str))
-            {
-                hooks.push((name.to_string(), hook.to_string()));
-            }
-        }
-        if let Some(rule) = item.get("rule") {
-            if rule.get("table").and_then(Value::as_str) != Some(TABLE) {
-                continue;
-            }
-            let (Some(chain), Some(comment)) =
-                (rule.get("chain").and_then(Value::as_str), rule.get("comment").and_then(Value::as_str))
-            else {
-                continue;
-            };
-            let refuses = rule
-                .get("expr")
-                .and_then(Value::as_array)
-                .is_some_and(|e| e.iter().any(|x| x.get("reject").is_some() || x.get("drop").is_some()));
-            if refuses {
-                refusals.push((chain.to_string(), comment.to_string()));
-            }
-        }
-    }
-    let held = |tag: &str, at: &[&str]| {
-        at.iter().all(|hook| {
-            refusals
-                .iter()
-                .any(|(chain, comment)| comment == tag && hooks.iter().any(|(n, h)| n == chain && h == hook))
-        })
-    };
+    let seen = Seen::parse(json)?;
     Ok(Applied {
-        ipv6_blocked: held(TAG_IPV6, &["output", "input", "forward"]),
-        dns_confined: held(TAG_DNS, &["output", "forward"]),
-        ipv4_confined: held(TAG_IPV4, &["output", "input", "forward"]),
+        ipv6_blocked: seen.refused(TAG_IPV6, &["output", "input", "forward"]),
+        dns_confined: seen.refused(TAG_DNS, &["output", "forward"]),
+        ipv4_confined: seen.refused(TAG_IPV4, &["output", "input", "forward"]),
     })
+}
+
+/// Whether the kernel's table is a hold, and what it lets through. It is
+/// one only when the hold's refusal sits in all three hooks; DNS counts as
+/// open to anywhere when the permit for that is in the outbound hook, so
+/// the customer is never told lookups are held when the table says not.
+fn hold_readback(json: &str) -> Result<Option<Held>, String> {
+    let seen = Seen::parse(json)?;
+    if !seen.refused(TAG_HOLD, &["output", "input", "forward"]) {
+        return Ok(None);
+    }
+    Ok(Some(Held { dns_anywhere: seen.accepted(TAG_DNS_ANYWHERE, "output") }))
+}
+
+/// What `nft -j list table` shows of our table: each base chain's hook,
+/// and each commented rule with whether it refuses or accepts.
+struct Seen {
+    hooks: Vec<(String, String)>,
+    refusals: Vec<(String, String)>,
+    accepts: Vec<(String, String)>,
+}
+
+impl Seen {
+    fn hooked(&self, chain: &str, hook: &str) -> bool {
+        self.hooks.iter().any(|(n, h)| n == chain && h == hook)
+    }
+
+    fn refused(&self, tag: &str, at: &[&str]) -> bool {
+        at.iter().all(|hook| self.refusals.iter().any(|(chain, comment)| comment == tag && self.hooked(chain, hook)))
+    }
+
+    fn accepted(&self, tag: &str, hook: &str) -> bool {
+        self.accepts.iter().any(|(chain, comment)| comment == tag && self.hooked(chain, hook))
+    }
+
+    fn parse(json: &str) -> Result<Seen, String> {
+        use serde_json::Value;
+        let v: Value = serde_json::from_str(json).map_err(|e| format!("unreadable nft output: {e}"))?;
+        let items = v.get("nftables").and_then(Value::as_array).ok_or("nft output has no \"nftables\" list")?;
+        let mut seen = Seen { hooks: Vec::new(), refusals: Vec::new(), accepts: Vec::new() };
+        for item in items {
+            if let Some(chain) = item.get("chain") {
+                if chain.get("table").and_then(Value::as_str) != Some(TABLE) {
+                    continue;
+                }
+                if let (Some(name), Some(hook)) =
+                    (chain.get("name").and_then(Value::as_str), chain.get("hook").and_then(Value::as_str))
+                {
+                    seen.hooks.push((name.to_string(), hook.to_string()));
+                }
+            }
+            if let Some(rule) = item.get("rule") {
+                if rule.get("table").and_then(Value::as_str) != Some(TABLE) {
+                    continue;
+                }
+                let (Some(chain), Some(comment)) =
+                    (rule.get("chain").and_then(Value::as_str), rule.get("comment").and_then(Value::as_str))
+                else {
+                    continue;
+                };
+                let expr = rule.get("expr").and_then(Value::as_array);
+                let has = |verdict: &str| expr.is_some_and(|e| e.iter().any(|x| x.get(verdict).is_some()));
+                let entry = (chain.to_string(), comment.to_string());
+                if has("reject") || has("drop") {
+                    seen.refusals.push(entry);
+                } else if has("accept") {
+                    seen.accepts.push(entry);
+                }
+            }
+        }
+        Ok(seen)
+    }
 }
 
 #[cfg(test)]

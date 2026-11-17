@@ -153,7 +153,7 @@ pub(crate) fn rewrite_resolv_conf_with(
     ledger.owe(owed.clone());
     // A symlink is replaced by a file, not written through: writing
     // through it would change resolved's or NetworkManager's own file.
-    if let Err(e) = replace_file(etc, ours.as_bytes()) {
+    if let Err(e) = replace_or_rewrite(etc, ours.as_bytes()) {
         let _ = std::fs::remove_file(backup);
         ledger.settle(&owed);
         return Err(e);
@@ -173,6 +173,28 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&temporary, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&temporary);
     })
+}
+
+/// [`replace_file`], or, where the file cannot be renamed over because it
+/// is a mount point of its own (a container's bind-mounted
+/// `/etc/resolv.conf`: the rename fails with EBUSY, or EXDEV across
+/// filesystems), the same bytes written into the file in place. Never
+/// through a symlink: that would change the file it points at, which is
+/// resolved's or NetworkManager's.
+pub(crate) fn replace_or_rewrite(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    match replace_file(path, bytes) {
+        Err(e) if rename_blocked(&e) && std::fs::read_link(path).is_err() => {
+            let mut file = std::fs::OpenOptions::new().write(true).truncate(true).open(path)?;
+            file.write_all(bytes)?;
+            file.sync_all()
+        }
+        other => other,
+    }
+}
+
+/// EBUSY or EXDEV: the rename cannot be done here, though a write can.
+fn rename_blocked(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(libc::EBUSY) | Some(libc::EXDEV))
 }
 
 fn temporary_beside(path: &Path) -> PathBuf {
@@ -241,7 +263,7 @@ pub(crate) fn restore_resolv_conf(
     let result = if let Some(target) = symlink {
         std::fs::remove_file(etc).and_then(|_| std::os::unix::fs::symlink(target, etc))
     } else if existed {
-        std::fs::read(backup).and_then(|bytes| replace_file(etc, &bytes))
+        std::fs::read(backup).and_then(|bytes| replace_or_rewrite(etc, &bytes))
     } else {
         std::fs::remove_file(etc)
     };

@@ -31,6 +31,8 @@ pub(crate) fn undo(owed: &Owed, budget: &Budget) -> Result<Option<String>, Strin
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.to_string()),
         },
+        Owed::NftTable { .. } => crate::split::delete_table(budget).map(|_| None),
+        Owed::Sysctl { path, before } => crate::split::undo_sysctl(path, before).map(|_| None),
     }
 }
 
@@ -43,6 +45,8 @@ pub(crate) fn describe(owed: &Owed) -> String {
         Owed::ResolvConf { .. } => format!("{}", dns::RESOLV_CONF),
         Owed::Link { name } => format!("the interface {name}"),
         Owed::File { path } => format!("{}", path.display()),
+        Owed::NftTable { family, name } => format!("the firewall table {family} {name}"),
+        Owed::Sysctl { path, before } => format!("{} (to {before})", path.display()),
     }
 }
 
@@ -92,9 +96,16 @@ pub(crate) fn sweep(dirs: &Dirs) -> Vec<String> {
         }
     }
 
+    // strongSwan's likewise, by the settings file it was handed; then the
+    // rule and table it leaves when killed.
+    lines.extend(crate::ikev2::sweep(dirs, &budget));
+
     lines.extend(replay(&Ledger::in_dir(&dirs.state), &budget));
     lines.extend(routes::sweep_ours(&budget));
     lines.extend(crate::wireguard::sweep_rules(&budget));
+    // Custom mode's table and rules; its routes carry our protocol and
+    // went with the line above but one.
+    lines.extend(crate::split::sweep(&budget));
 
     for name in link::OURS {
         if !link::exists(name) {
@@ -114,6 +125,9 @@ pub(crate) fn sweep(dirs: &Dirs) -> Vec<String> {
         crate::wireguard::KEY_FILE,
         crate::xray::LOG_FILE,
         crate::openvpn::LOG_FILE,
+        crate::ikev2::CONFIG_FILE,
+        crate::ikev2::LOG_FILE,
+        crate::ikev2::OUT_FILE,
     ] {
         let config = dirs.run.join(file);
         if !config.exists() {

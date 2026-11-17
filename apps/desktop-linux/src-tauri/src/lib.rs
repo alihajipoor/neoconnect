@@ -4,8 +4,11 @@
 //! The modules with no Windows in them are the Windows app's own files,
 //! pulled in by path and not edited, so a fix to either client is a fix to
 //! both. The rest are this app's: vpn.rs (the helper over a Unix socket and
-//! the network tables from /proc), autostart.rs (an XDG autostart entry)
-//! and notify.rs (D-Bus notifications).
+//! the network tables from /proc), linux_requests.rs (the helper requests
+//! only Linux has), update.rs (downloading an update and relaunching),
+//! apps.rs (Custom mode's picker, from desktop entries), activation.rs
+//! (raising the window for a second launch on Wayland), autostart.rs (an
+//! XDG autostart entry) and notify.rs (D-Bus notifications).
 
 #[path = "../../../desktop-windows/src-tauri/src/bundle_scope.rs"]
 mod bundle_scope;
@@ -20,8 +23,12 @@ mod relay_http;
 #[path = "../../../desktop-windows/src-tauri/src/window_fit.rs"]
 mod window_fit;
 
+mod activation;
+mod apps;
 mod autostart;
+mod linux_requests;
 mod notify;
+mod update;
 mod vpn;
 
 use tauri::{Emitter, Manager};
@@ -67,6 +74,10 @@ pub fn run() {
     let mut context = tauri::generate_context!();
     window_fit::defer_main_window(&mut context.config_mut().app.windows);
 
+    // Before the single-instance plugin, which ends a second instance
+    // without passing its environment on (activation.rs).
+    activation::leave_for_running_instance();
+
     tauri::Builder::default()
         // First, so a second launch is turned away before anything else
         // starts. Two instances would drive the one helper and could tear
@@ -74,9 +85,19 @@ pub fn run() {
         // link the second was opened with is handed to it.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
+                // The token must reach GTK before the window is presented,
+                // and GTK only on the main thread; the plugin's callback
+                // may not be on it.
+                let token = activation::take();
+                let target = window.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Some(token) = token {
+                        activation::apply(&target, &token);
+                    }
+                    let _ = target.unminimize();
+                    let _ = target.show();
+                    let _ = target.set_focus();
+                });
             }
             if let Some(url) = argv.iter().find(|a| a.starts_with("neoconnect://")) {
                 let _ = app.emit("deep-link-received", url.clone());
@@ -95,7 +116,11 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(LaunchDeepLink(launch_url))
         .manage(WebviewVersion(webview))
+        .manage(update::Downloaded::default())
         .setup(|app| {
+            // Only the first instance gets here; a token in the channel is
+            // its own launch's, already used by GTK, or a stale one.
+            activation::forget();
             window_fit::create_main_window(app, None)?;
             // Tells the helper the app is still here, so a helper that
             // tears down an abandoned tunnel can tell a crash from a quiet
@@ -123,6 +148,12 @@ pub fn run() {
             vpn::vpn_repair,
             vpn::vpn_diagnostics,
             vpn::repair_command_line,
+            linux_requests::vpn_linux_diagnostics,
+            linux_requests::linux_update_support,
+            linux_requests::linux_update_install,
+            linux_requests::linux_update_outcome,
+            update::linux_update_download,
+            update::linux_relaunch,
             vpn::gaming_arm,
             vpn::gaming_disarm,
             vpn::gaming_status,

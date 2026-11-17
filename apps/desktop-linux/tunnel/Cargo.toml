@@ -7,3 +7,6 @@ edition = "2021"
 neoconnect-ipc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# For two sockets std has no way to ask for: the probe's, bound to the
+# tunnel interface (SO_BINDTODEVICE), and the kernel's exec notifications.
+libc = "0.2"

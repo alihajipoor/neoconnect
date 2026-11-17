@@ -74,6 +74,11 @@ pub enum Owed {
     Link { name: String },
     /// A file holding credentials (an engine config).
     File { path: PathBuf },
+    /// An nftables table of ours (Custom mode's sorting), deleted whole.
+    NftTable { family: String, name: String },
+    /// A kernel setting under `/proc/sys` changed from `before`, which is
+    /// written back.
+    Sysctl { path: PathBuf, before: String },
 }
 
 impl Owed {
@@ -82,7 +87,7 @@ impl Owed {
     pub(crate) fn rank(&self) -> u8 {
         match self {
             Owed::Route(_) | Owed::EngineRoute(_) => 0,
-            Owed::Rule { .. } => 1,
+            Owed::Rule { .. } | Owed::NftTable { .. } | Owed::Sysctl { .. } => 1,
             Owed::ResolvedLink { .. } | Owed::ResolvConf { .. } => 2,
             Owed::Link { .. } => 3,
             Owed::File { .. } => 4,

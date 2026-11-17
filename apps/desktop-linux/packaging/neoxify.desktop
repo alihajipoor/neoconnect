@@ -6,6 +6,9 @@ StartupWMClass={{exec}}
 Icon={{icon}}
 Name={{name}}
 Terminal=false
+# Makes the launcher (and a browser opening a link) issue the activation
+# token that lets a second launch bring the running window forward.
+StartupNotify=true
 Type=Application
 # Sign-in and verification links open the app: neoconnect://...
 MimeType=x-scheme-handler/neoconnect;

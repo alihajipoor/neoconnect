@@ -446,6 +446,118 @@ describe("UpdatesService", () => {
       await expect(settle(service.checkLinux("0.1.0"))).resolves.toEqual({ status: "update", version: "0.1.1" });
     });
 
+    describe("signed packages", () => {
+      const signedRelease = {
+        ...linuxRelease,
+        tag_name: "linux-v0.2.0",
+        assets: [
+          { name: "Neoxify_0.2.0_amd64.deb", browser_download_url: "https://example.test/a.deb" },
+          { name: "Neoxify_0.2.0_amd64.deb.sig", browser_download_url: "https://example.test/a.deb.sig" },
+          { name: "Neoxify-0.2.0-1.x86_64.rpm", browser_download_url: "https://example.test/a.rpm" },
+          { name: "Neoxify-0.2.0-1.x86_64.rpm.sig", browser_download_url: "https://example.test/a.rpm.sig" },
+        ],
+      };
+      /** The feed, and each .sig answering with its own text, or with the
+       * status given for it. */
+      const serving = (feed: unknown[], sigStatus: Record<string, number> = {}) =>
+        fetchMock.mockImplementation((url: string) => {
+          const u = String(url);
+          if (u.includes("api.github.com")) return Promise.resolve(feedOf(...feed));
+          const status = Object.entries(sigStatus).find(([k]) => u.endsWith(k))?.[1];
+          if (status) return Promise.resolve(failWith(status));
+          return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(`sig of ${u}\n`) });
+        });
+      const api = configWith({ publicApiUrl: "https://example.test/api/" });
+
+      it("carries each package's download link and trimmed signature", async () => {
+        serving([signedRelease, linuxRelease]);
+        const service = new UpdatesService(api);
+        await expect(settle(service.checkLinux("0.1.0"))).resolves.toEqual({
+          status: "update",
+          version: "0.2.0",
+          signed: {
+            deb: {
+              url: "https://example.test/api/updates/download/linux-v0.2.0/Neoxify_0.2.0_amd64.deb",
+              signature: "sig of https://example.test/a.deb.sig",
+            },
+            rpm: {
+              url: "https://example.test/api/updates/download/linux-v0.2.0/Neoxify-0.2.0-1.x86_64.rpm",
+              signature: "sig of https://example.test/a.rpm.sig",
+            },
+          },
+        });
+      });
+
+      it("answers as before, without signed, for a release published without signatures", async () => {
+        serving([linuxRelease]);
+        const service = new UpdatesService(api);
+        await expect(settle(service.checkLinux("0.1.0"))).resolves.toEqual({ status: "update", version: "0.1.1" });
+        expect(fetchMock.mock.calls.every((call) => String(call[0]).includes("api.github.com"))).toBe(true);
+      });
+
+      it("leaves out only the package whose signature could not be read", async () => {
+        serving([signedRelease], { "a.rpm.sig": 404 });
+        const service = new UpdatesService(api);
+        const check = await settle(service.checkLinux("0.1.0"));
+        expect(check.status === "update" && Object.keys(check.signed ?? {})).toEqual(["deb"]);
+      });
+
+      it("drops signed altogether, still offering the version, when no signature is readable", async () => {
+        serving([signedRelease], { "a.deb.sig": 404, "a.rpm.sig": 404 });
+        const service = new UpdatesService(api);
+        await expect(settle(service.checkLinux("0.1.0"))).resolves.toEqual({ status: "update", version: "0.2.0" });
+      });
+
+      it("pairs a signature only with the file it is named after", async () => {
+        const misnamed = {
+          ...signedRelease,
+          assets: [
+            signedRelease.assets[0],
+            signedRelease.assets[2],
+            { name: "Neoxify_0.2.0_amd64.sig", browser_download_url: "https://example.test/x.sig" },
+            { name: "other-Neoxify-0.2.0-1.x86_64.rpm.sig", browser_download_url: "https://example.test/y.sig" },
+          ],
+        };
+        serving([misnamed]);
+        const service = new UpdatesService(api);
+        await expect(settle(service.checkLinux("0.1.0"))).resolves.toEqual({ status: "update", version: "0.2.0" });
+      });
+
+      it("fetches nothing for an app that is already current", async () => {
+        serving([signedRelease]);
+        const service = new UpdatesService(api);
+        await expect(settle(service.checkLinux("0.2.0"))).resolves.toEqual({ status: "current" });
+        expect(fetchMock.mock.calls.every((call) => String(call[0]).includes("api.github.com"))).toBe(true);
+      });
+
+      it("redirects the newest Linux build's two packages and nothing else", async () => {
+        serving([windowsRelease, signedRelease, linuxRelease]);
+        const service = new UpdatesService(api);
+        await expect(settle(service.downloadUrl("linux-v0.2.0", "Neoxify_0.2.0_amd64.deb"))).resolves.toBe(
+          "https://github.com/alihajipoor/neoxify-releases/releases/download/linux-v0.2.0/Neoxify_0.2.0_amd64.deb",
+        );
+        await expect(settle(service.downloadUrl("linux-v0.2.0", "Neoxify-0.2.0-1.x86_64.rpm"))).resolves.toContain(
+          "Neoxify-0.2.0-1.x86_64.rpm",
+        );
+        await expect(settle(service.downloadUrl("linux-v0.2.0", "Neoxify_0.2.0_amd64.deb.sig"))).rejects.toThrow(
+          "Unknown release asset",
+        );
+        await expect(settle(service.downloadUrl("linux-v0.1.1", "Neoxify_0.1.1_amd64.deb"))).rejects.toThrow(
+          "Unknown release asset",
+        );
+        await expect(settle(service.downloadUrl("linux-v0.2.0", "Neoxify_0.9.25_x64-setup.exe"))).rejects.toThrow(
+          "Unknown release asset",
+        );
+        // The Windows payload still passes, and a Windows tag cannot name a package.
+        await expect(settle(service.downloadUrl("desktop-v0.9.25", "Neoxify_0.9.25_x64-setup.exe"))).resolves.toContain(
+          "desktop-v0.9.25",
+        );
+        await expect(settle(service.downloadUrl("desktop-v0.9.25", "Neoxify_0.2.0_amd64.deb"))).rejects.toThrow(
+          "Unknown release asset",
+        );
+      });
+    });
+
     it("serves last known good for Linux too", async () => {
       const service = new UpdatesService(configWith({}));
       const good = await settle(service.linuxPackageUrl("rpm"));

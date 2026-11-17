@@ -485,7 +485,12 @@ export function LocationList({
           <span className="n">
             <bdi>{label}</bdi>
             {twin !== null ? (
-              <span className="nx-node"> · {t("loc.serverN", { n: formatNumber(twin, language) })}</span>
+              // The space outside the span: where the name may break onto a
+              // second line when the panel is too narrow for both.
+              <>
+                {" "}
+                <span className="nx-node">· {t("loc.serverN", { n: formatNumber(twin, language) })}</span>
+              </>
             ) : null}
             {quick ? (
               ownAt !== null ? (

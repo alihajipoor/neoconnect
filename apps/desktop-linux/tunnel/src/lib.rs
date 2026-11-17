@@ -21,7 +21,9 @@ use std::time::Instant;
 // touching it: `cmd` runs system programs within a budget, `ledger`
 // records what is owed back to the machine, `routes`, `link` and `dns`
 // change the machine and undo it, `process` starts and finds engines,
-// `cleanup` undoes the ledger and sweeps after a crash.
+// `cleanup` undoes the ledger and sweeps after a crash. Custom mode is
+// `sorting` (which programs are chosen, and their control group) and
+// `split` (routing that group its own way).
 mod cleanup;
 mod cmd;
 mod dns;
@@ -32,6 +34,7 @@ mod link;
 mod openvpn;
 mod process;
 mod routes;
+mod sorting;
 mod split;
 mod wireguard;
 mod xray;
@@ -259,17 +262,14 @@ pub fn connect(
     dirs: &Dirs,
     limits: &Limits,
 ) -> Result<Box<dyn Tunnel>, Problem> {
-    if shape.is_split() {
-        return Err(Problem::Failed("Custom mode is not available on Linux yet".into()));
-    }
     match profile {
         ConnectProfile::XrayVlessReality(_)
         | ConnectProfile::XrayVlessTls(_)
         | ConnectProfile::XrayTrojan(_)
-        | ConnectProfile::Shadowsocks(_) => xray::connect(profile, exits, known_nodes, dirs, limits),
-        ConnectProfile::Wireguard(_) => wireguard::connect(profile, known_nodes, dirs, limits),
-        ConnectProfile::Openvpn(_) => openvpn::connect(profile, known_nodes, dirs, limits),
-        ConnectProfile::Ikev2(_) => ikev2::connect(profile, known_nodes, dirs, limits),
+        | ConnectProfile::Shadowsocks(_) => xray::connect(profile, exits, known_nodes, shape, dirs, limits),
+        ConnectProfile::Wireguard(_) => wireguard::connect(profile, known_nodes, shape, dirs, limits),
+        ConnectProfile::Openvpn(_) => openvpn::connect(profile, known_nodes, shape, dirs, limits),
+        ConnectProfile::Ikev2(_) => ikev2::connect(profile, known_nodes, shape, dirs, limits),
     }
 }
 
@@ -277,14 +277,14 @@ pub fn connect(
 /// identity in a request before anything uses it, because it is matched
 /// against what root reads from `/proc` and written into nothing else.
 pub fn valid_app(app: &str) -> Result<(), String> {
-    split::valid_app(app)
+    sorting::valid_app(app)
 }
 
 /// The running programs of one user that could be chosen for Custom
 /// mode, one entry per process. The app turns these into names and
 /// icons; this side only says what is running.
 pub fn running_processes(uid: u32) -> Vec<Running> {
-    split::running(uid)
+    sorting::running(uid)
 }
 
 /// Put a process and everything it has started into the control group
@@ -293,7 +293,7 @@ pub fn running_processes(uid: u32) -> Vec<Running> {
 /// takes). The helper calls this for the app itself when a hold is
 /// wanted. Programs started later by the app inherit the group.
 pub fn adopt_app(pid: u32) -> Result<String, String> {
-    split::adopt_app(pid)
+    sorting::adopt_app(pid)
 }
 
 /// Is there a way out to the internet for this profile's server right
@@ -339,5 +339,10 @@ pub fn sweep_leftovers(dirs: &Dirs) -> Vec<String> {
 /// right now. For answering a status question when the session's owner
 /// is busy: what the machine shows, not what we remember.
 pub fn visible_tunnel() -> Option<String> {
-    link::OURS.iter().find(|name| link::is_up(name) == Some(true)).map(|name| name.to_string())
+    link::OURS
+        .iter()
+        .find(|name| link::is_up(name) == Some(true))
+        .map(|name| name.to_string())
+        // IKEv2's TUN has no fixed name; it is found from the engine.
+        .or_else(ikev2::visible_link)
 }

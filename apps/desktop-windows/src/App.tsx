@@ -28,8 +28,10 @@ import { GamingModeCard } from "./components/GamingModeCard";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
 import { openDownloadPage, startUpdateNotices } from "./lib/update-notice";
+import { applyLinuxUpdate, startLinuxUpdates } from "./lib/linux-update";
 import {
   desktopPlatform,
+  isLinux,
   supportsCustomMode,
   supportsGaming,
   supportsReconnectHold,
@@ -66,10 +68,9 @@ setRelayTunnelReader(async () => (await invoke<{ connected: boolean }>("vpn_stat
  * reconnecting" only in a build that offers it: not until a capture has
  * proved it (`RECONNECT_HOLD_PROVEN` in lib/reconnect-hold.ts).
  *
- * The Linux app binds the same: autostart and notifications go through the
- * same commands, which its Rust side answers for its own system, and
- * Settings drops the hold's row on a platform whose helper has none
- * (`supportsReconnectHold`), as `holdWanted` drops the setting. */
+ * The Linux app binds the same: autostart, notifications and the hold go
+ * through the same commands, which its Rust side answers for its own
+ * system. */
 const WINDOWS_DEVICE: DeviceSettings = {
   autostart: windowsAutostart,
   autoConnect: true,
@@ -160,7 +161,8 @@ export default function App() {
   // read here so the setting is known before any screen asks.
   useEffect(() => {
     void appPrefs.load();
-    // A desktop with no hold (Linux) watches nothing and asks nothing.
+    // A desktop with no hold (the macOS shell) watches nothing and asks
+    // nothing.
     if (!supportsReconnectHold()) return undefined;
     return watchEpisodesForHold({
       phase: autoReconnect.current,
@@ -241,10 +243,15 @@ export default function App() {
 
   // Background update checking. Downloading is automatic; applying is
   // not -- see the note below on why there is no install-on-close.
-  // Where the app cannot install its own updates (Linux) the updater is
-  // never called: the API is asked whether a newer version exists, and the
-  // notice sends the customer to the download page (lib/update-notice.ts).
-  useEffect(() => (supportsSelfUpdate() ? startUpdateChecks(setUpdateState) : startUpdateNotices(setUpdateState)), []);
+  // Linux never calls Tauri's updater: its signed package goes to the
+  // helper and the package manager (lib/linux-update.ts). Where the app
+  // cannot install its own updates (the macOS shell) the API is only asked
+  // whether a newer version exists, and the notice sends the customer to
+  // the download page (lib/update-notice.ts).
+  useEffect(() => {
+    if (!supportsSelfUpdate()) return startUpdateNotices(setUpdateState);
+    return isLinux() ? startLinuxUpdates(setUpdateState) : startUpdateChecks(setUpdateState);
+  }, []);
 
   // Anything the app could not report at the time -- which is every
   // "could not reach the control plane", since a client cannot tell us
@@ -315,6 +322,12 @@ export default function App() {
         // replacing the binaries under a live VPN -- the helper service
         // among them -- cuts the connection with no warning.
         setUpdateBlocked(true);
+        return;
+      }
+      // Linux installs through its helper and the package manager, and
+      // puts the notice back itself when that does not work.
+      if (isLinux()) {
+        await applyLinuxUpdate(setUpdateState);
         return;
       }
       await applyStagedUpdate(true);
@@ -444,9 +457,8 @@ export default function App() {
           onOpenReferrals={() => go("referrals")}
           onOpenSupport={() => go("support")}
           onLoggedOut={() => void handleLoggedOut()}
-          // Only where the platform has it: the Linux helper has no
-          // per-app routing yet, and passing nothing is what removes the
-          // row and its section.
+          // Only where the platform has it (Windows and Linux): passing
+          // nothing is what removes the row and its section.
           customSection={supportsCustomMode() ? <CustomModeCard /> : null}
           // Supplied here rather than imported by the screen, the same way
           // Custom mode is: gaming mode drives the Windows helper service
@@ -586,6 +598,8 @@ export default function App() {
           blocked={updateBlocked}
           onOpenDownload={() => void openDownload()}
           openFailed={downloadOpenFailed}
+          // Linux's Restart runs the package manager before it relaunches.
+          installing={restarting && isLinux()}
         />
       }
     />

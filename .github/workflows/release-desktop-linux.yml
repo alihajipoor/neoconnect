@@ -10,10 +10,13 @@ name: Release Desktop (Linux)
 # artifact without publishing anything, so a build can be tried on real
 # machines before a tag commits to it.
 #
-# There is no signing key here: Linux has no in-app updater in this
-# version. The app only says a new version exists and links to
-# /updates/installer/linux-deb or linux-rpm, which the API resolves from
-# the newest linux-v release by the exact filenames checked below.
+# Both packages are signed with the updater key the Windows release uses,
+# and each .sig is published beside its package. From 0.2.0 the app's root
+# helper installs an update itself, and only after the signature verifies
+# against the public key compiled into it; the API finds each .sig by the
+# exact name "<package>.sig". A manual run signs too, so the artifact is
+# exactly what a tag would publish and an in-app update can be tried
+# before the tag.
 on:
   push:
     tags:
@@ -56,12 +59,28 @@ jobs:
       # 4.1 and GTK for the window, rpm so the bundler can write the .rpm at
       # all, and patchelf and file for the bundler's own steps. unzip and
       # curl are for fetch-binaries, which downloads the pinned Xray build.
+      # minisign checks the updater signatures with a tool that is not ours.
       - name: Install build packages
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev \
-            pkg-config build-essential file rpm patchelf unzip curl
+            pkg-config build-essential file rpm patchelf unzip curl minisign
+
+      # Without the key the packages would build and publish unsigned, and
+      # every 0.2.0 app would be offered an update it can only open a web
+      # page for: a silent loss of in-app updates rather than a failure.
+      # Checked first, as the Windows release does, so it fails in a minute
+      # rather than after the build.
+      - name: Check updater signing key is present
+        shell: bash
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is not set -- the packages would ship without an updater signature." >&2
+            exit 1
+          fi
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
       - uses: pnpm/action-setup@v4
         # No `version:`: pnpm/action-setup reads it from package.json's
@@ -153,6 +172,33 @@ jobs:
           (cd "$out" && sha256sum "$deb" "$rpm" > sha256sums.txt && cat sha256sums.txt)
           echo "dir=$out" >> "$GITHUB_OUTPUT"
 
+      # Over the final bytes, after they were copied and checked: a
+      # signature over anything else is rejected by the helper and cannot be
+      # fixed from the server side. Each is then verified by minisign against
+      # the public key the Windows app ships (the helper compiles in the
+      # same one), so a secret that does not match it, or a .sig that is not
+      # over this file, fails here instead of in the field.
+      - name: Sign and verify the packages
+        shell: bash
+        working-directory: apps/desktop-linux
+        run: |
+          set -euo pipefail
+          out="$GITHUB_WORKSPACE/${{ steps.collect.outputs.dir }}"
+          keydir=$(mktemp -d)
+          node -p "require('../desktop-windows/src-tauri/tauri.conf.json').plugins.updater.pubkey" \
+            | base64 -d > "$keydir/updater.pub"
+          for pkg in "$out"/*.deb "$out"/*.rpm; do
+            pnpm exec tauri signer sign "$pkg"
+            test -s "$pkg.sig"
+            base64 -d "$pkg.sig" > "$keydir/minisig"
+            minisign -V -q -p "$keydir/updater.pub" -x "$keydir/minisig" -m "$pkg"
+            echo "signed and verified: $(basename "$pkg")"
+          done
+          rm -rf "$keydir"
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
       - name: Keep the packages as a workflow artifact
         uses: actions/upload-artifact@v4
         with:
@@ -190,6 +236,7 @@ jobs:
           files: |
             ${{ steps.collect.outputs.dir }}/*.deb
             ${{ steps.collect.outputs.dir }}/*.rpm
+            ${{ steps.collect.outputs.dir }}/*.sig
             ${{ steps.collect.outputs.dir }}/sha256sums.txt
           body: ${{ steps.tagmsg.outputs.body }}
           generate_release_notes: false

@@ -6,8 +6,16 @@
 //!   netguard-ctl ruleset <same options>
 //!   netguard-ctl in-force
 //!   netguard-ctl remove
+//!   netguard-ctl hold [--tunnel IF]... [--server IP]... [--fwmark N] [--app-group PATH]
+//!                     [--resolver IP|machine]... [--dns-anywhere] [--lan auto|CIDR]...
+//!   netguard-ctl hold-ruleset <same options>
+//!   netguard-ctl held
+//!   netguard-ctl resolvers
 
-use neoxify_netguard::{apply, in_force, lan_prefixes, remove, ruleset, Applied, Cidr4, Plan, Proto, Transport};
+use neoxify_netguard::{
+    apply, apply_hold, hold_in_force, hold_ruleset, in_force, lan_prefixes, machine_resolvers, remove, ruleset, Applied,
+    Cidr4, Held, HoldPlan, Plan, Proto, Transport,
+};
 use std::process::exit;
 
 fn die(msg: &str) -> ! {
@@ -63,9 +71,51 @@ fn plan(args: &[String]) -> Plan {
     plan
 }
 
+fn hold_plan(args: &[String]) -> HoldPlan {
+    let mut plan = HoldPlan::default();
+    let mut lan_auto = false;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let mut value = || it.next().cloned().unwrap_or_else(|| die(&format!("{arg} needs a value")));
+        match arg.as_str() {
+            "--tunnel" => plan.tunnel_ifaces.push(value()),
+            "--server" => plan.servers.push(value().parse().unwrap_or_else(|_| die("bad server address"))),
+            "--fwmark" => plan.engine_fwmark = Some(value().parse().unwrap_or_else(|_| die("bad mark"))),
+            "--app-group" => plan.app_group = Some(value()),
+            "--resolver" => match value().as_str() {
+                "machine" => plan.resolvers.extend(machine_resolvers()),
+                v => plan.resolvers.push(v.parse().unwrap_or_else(|_| die("bad resolver address"))),
+            },
+            "--dns-anywhere" => plan.dns_anywhere = true,
+            "--lan" => {
+                let v = value();
+                if v == "auto" {
+                    lan_auto = true;
+                } else {
+                    let (a, p) = v.split_once('/').unwrap_or_else(|| die("lan is CIDR"));
+                    plan.lan.push(Cidr4 {
+                        addr: a.parse().unwrap_or_else(|_| die("bad lan")),
+                        prefix: p.parse().unwrap_or_else(|_| die("bad lan")),
+                    });
+                }
+            }
+            other => die(&format!("unknown option {other}")),
+        }
+    }
+    if lan_auto {
+        let exclude: Vec<&str> = plan.tunnel_ifaces.iter().map(String::as_str).collect();
+        plan.lan.extend(lan_prefixes(&exclude));
+    }
+    plan
+}
+
+fn show_held(h: Held) -> String {
+    format!("dns_anywhere={}", h.dns_anywhere)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(cmd) = args.first() else { die("apply | ruleset | in-force | remove") };
+    let Some(cmd) = args.first() else { die("apply | ruleset | in-force | remove | hold | hold-ruleset | held | resolvers") };
     match cmd.as_str() {
         "ruleset" => print!("{}", ruleset(&plan(&args[1..]))),
         "apply" => match apply(&plan(&args[1..])) {
@@ -90,6 +140,27 @@ fn main() {
                 exit(1)
             }
         },
+        "hold-ruleset" => print!("{}", hold_ruleset(&hold_plan(&args[1..]))),
+        "hold" => match apply_hold(&hold_plan(&args[1..])) {
+            Ok(h) => println!("held {}", show_held(h)),
+            Err(e) => {
+                println!("error {e}");
+                exit(1)
+            }
+        },
+        "held" => match hold_in_force() {
+            Ok(Some(h)) => println!("held {}", show_held(h)),
+            Ok(None) => println!("none"),
+            Err(e) => {
+                println!("error {e}");
+                exit(1)
+            }
+        },
+        "resolvers" => {
+            for ip in machine_resolvers() {
+                println!("{ip}");
+            }
+        }
         other => die(&format!("unknown command {other}")),
     }
 }

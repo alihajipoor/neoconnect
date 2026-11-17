@@ -28,8 +28,13 @@ use neoconnect_ipc::{ConnectProfile, WireguardProfile};
 
 use crate::cmd::{self, Budget, IpError};
 use crate::ledger::{Ledger, Owed, RouteSpec};
+use crate::split::{self, Custom, Engine, Plan};
 use crate::{dns, link, routes};
-use crate::{Dirs, Limits, Problem, Proto, Transport, Tunnel, TunnelHealth, Up};
+use crate::{Dirs, Limits, Problem, Proto, Shape, SplitState, Transport, Tunnel, TunnelHealth, Up};
+
+/// The kernel setting that lets reverse-path filtering use a packet's
+/// mark, which WireGuard's replies need on a machine with strict filtering.
+const SRC_VALID_MARK: &str = "/proc/sys/net/ipv4/conf/all/src_valid_mark";
 
 pub const LINK: &str = link::WG_LINK;
 
@@ -167,11 +172,16 @@ pub(crate) struct WgTunnel {
     dns: Option<Owed>,
     key_owed: Option<Owed>,
     baseline: Option<(u64, u64)>,
+    /// `src_valid_mark` as it was, when we changed it.
+    mark_setting: Option<Owed>,
+    /// Custom mode: the shape, and the sorting when there is one.
+    custom: Custom,
 }
 
 pub(crate) fn connect(
     profile: &ConnectProfile,
     known_nodes: &[String],
+    shape: &Shape,
     dirs: &Dirs,
     limits: &Limits,
 ) -> Result<Box<dyn Tunnel>, Problem> {
@@ -195,9 +205,12 @@ pub(crate) fn connect(
     // The server's address, and that there is a way out to it, asked
     // before anything of ours is routed.
     let server = routes::resolve_ipv4(&host, port, &budget)?;
-    routes::uplink_for(server, &budget)?;
+    let uplink = routes::uplink_for(server, &budget)?;
     let setconf = build_setconf(p, server, port)?;
 
+    let ledger = Ledger::in_dir(&dirs.state);
+    let plan = Plan { tunnel: LINK.to_string(), uplink, servers: vec![server], engine_mark: Some(FWMARK) };
+    let custom = Custom::new(shape, plan, &ledger, &dirs.run, true);
     let mut tunnel = WgTunnel {
         up: Up {
             protocol: profile.protocol_name().to_string(),
@@ -206,13 +219,15 @@ pub(crate) fn connect(
             fwmark: Some(FWMARK),
             dns_protected: false,
         },
-        ledger: Ledger::in_dir(&dirs.state),
+        ledger,
         link_owed: None,
         rules: Vec::new(),
         routes: Vec::new(),
         dns: None,
         key_owed: None,
         baseline: None,
+        mark_setting: None,
+        custom,
     };
     // From here an early return drops `tunnel`, which undoes what it did.
     tunnel.bring_up(&setconf, &address, &resolver(p.dns.as_deref()), dirs, &budget)?;
@@ -268,9 +283,10 @@ impl WgTunnel {
 
         // Without this the kernel's reverse-path check cannot use the mark
         // and may drop the server's replies on a machine with strict
-        // rp_filter. wg-quick sets it the same way and leaves it set, as
-        // here: it changes nothing for packets that carry no mark.
-        let _ = std::fs::write("/proc/sys/net/ipv4/conf/all/src_valid_mark", "1");
+        // rp_filter. wg-quick sets it and leaves it set; here the old value
+        // is owed and written back at stop, so a session leaves the
+        // machine's settings as it found them.
+        self.mark_setting = split::set_sysctl(std::path::Path::new(SRC_VALID_MARK), "1", &self.ledger).unwrap_or(None);
 
         // Table 28280's one route, then the rules that send traffic to it.
         let spec = RouteSpec {
@@ -283,19 +299,12 @@ impl WgTunnel {
         routes::add(&spec, false, &self.ledger, budget)
             .map_err(|e| e.problem(&format!("route into {LINK} in table {FWMARK}")))?;
         self.routes.push(spec);
-        for args in rule_args() {
-            let owed = Owed::Rule { args: args.clone(), v6: false };
-            self.ledger.owe(owed.clone());
-            let mut all = vec!["-4", "rule", "add"];
-            all.extend(args.iter().map(String::as_str));
-            match cmd::ip(&all, budget) {
-                Ok(_) => self.rules.push(owed),
-                Err(e) => {
-                    self.ledger.settle(&owed);
-                    return Err(e.problem("add the tunnel's routing rule"));
-                }
-            }
+        // The rules that take the machine, unless only the chosen apps are
+        // to use the tunnel; then the sorting, before DNS.
+        if split::takes_everything(&self.custom.shape) {
+            self.take_everything(budget)?;
         }
+        self.custom.install(budget)?;
 
         // DNS last, once a route leads into the tunnel.
         self.dns = dns::point_at_resolver(LINK, resolver, &dirs.state, &self.ledger, budget);
@@ -347,9 +356,57 @@ impl WgTunnel {
     }
 }
 
+impl Engine for WgTunnel {
+    /// The two policy rules: the main table first with its defaults
+    /// suppressed, then everything unmarked into table 28280.
+    fn take_everything(&mut self, budget: &Budget) -> Result<(), Problem> {
+        for args in rule_args() {
+            let owed = Owed::Rule { args: args.clone(), v6: false };
+            if self.rules.contains(&owed) {
+                continue;
+            }
+            self.ledger.owe(owed.clone());
+            let mut all = vec!["-4", "rule", "add"];
+            all.extend(args.iter().map(String::as_str));
+            match cmd::ip(&all, budget) {
+                Ok(_) => self.rules.push(owed),
+                Err(e) => {
+                    self.ledger.settle(&owed);
+                    return Err(e.problem("add the tunnel's routing rule"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn release_everything(&mut self, budget: &Budget) {
+        self.remove_rules(budget);
+    }
+
+    fn custom(&mut self) -> &mut Custom {
+        &mut self.custom
+    }
+}
+
 impl Tunnel for WgTunnel {
     fn up(&self) -> &Up {
         &self.up
+    }
+
+    fn shape(&self) -> Shape {
+        self.custom.shape.clone()
+    }
+
+    fn reshape(&mut self, shape: &Shape, limits: &Limits) -> Result<(), Problem> {
+        split::reshape(self, shape, limits)
+    }
+
+    fn split(&self) -> Option<SplitState> {
+        self.custom.state()
+    }
+
+    fn probe(&self, limits: &Limits) -> Result<(), String> {
+        split::probe(LINK, limits)
     }
 
     /// From the latest handshake, as on Windows. `Down` only when the link
@@ -388,12 +445,14 @@ impl Tunnel for WgTunnel {
     /// carries nothing, so it waits for the thorough half.
     fn hard_stop(&mut self) {
         let budget = teardown();
+        self.custom.hard_stop();
         self.remove_rules(&budget);
         self.remove_routes(&budget);
     }
 
     fn finish_stop(&mut self) {
         let budget = teardown();
+        self.custom.finish_stop();
         self.remove_rules(&budget);
         self.remove_routes(&budget);
         if let Some(owed) = self.dns.take() {
@@ -404,6 +463,14 @@ impl Tunnel for WgTunnel {
         }
         self.remove_link(&budget);
         self.delete_key_file();
+        if let Some(owed) = self.mark_setting.take() {
+            if let Owed::Sysctl { path, before } = &owed {
+                match split::undo_sysctl(path, before) {
+                    Ok(()) => self.ledger.settle(&owed),
+                    Err(_) => self.mark_setting = Some(owed),
+                }
+            }
+        }
     }
 }
 

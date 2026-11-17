@@ -17,6 +17,7 @@ describe("GET /updates/:target/:arch/:currentVersion", () => {
     checkLinux: jest.fn<Promise<LinuxUpdateCheck>, [string]>(),
     linuxPackageUrl: jest.fn<Promise<string>, [LinuxPackage]>(),
     checkFor: jest.fn(),
+    downloadUrl: jest.fn<Promise<string>, [string, string]>(),
   };
 
   beforeAll(async () => {
@@ -39,6 +40,7 @@ describe("GET /updates/:target/:arch/:currentVersion", () => {
     updates.checkLinux.mockReset();
     updates.linuxPackageUrl.mockReset();
     updates.checkFor.mockReset();
+    updates.downloadUrl.mockReset();
   });
 
   it("tells an older Linux app the newer version and both packages", async () => {
@@ -55,6 +57,29 @@ describe("GET /updates/:target/:arch/:currentVersion", () => {
     expect(updates.checkLinux).toHaveBeenCalledWith("0.1.0");
     expect(updates.checkFor).not.toHaveBeenCalled();
     expect(updates.checkAndroid).not.toHaveBeenCalled();
+  });
+
+  it("adds each signed package beside the fields a 0.1.0 app reads", async () => {
+    const signed = { deb: { url: "https://example.com/api/updates/download/linux-v0.2.0/a.deb", signature: "c2ln" } };
+    updates.checkLinux.mockResolvedValue({ status: "update", version: "0.2.0", signed });
+
+    const res = await fetch(`${base}/updates/linux/x86_64/0.1.0`);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      version: "0.2.0",
+      downloadPath: "/updates/installer/linux-deb",
+      packages: { deb: "/updates/installer/linux-deb", rpm: "/updates/installer/linux-rpm" },
+      signed,
+    });
+  });
+
+  it("redirects a Linux package download through the service's check", async () => {
+    updates.downloadUrl.mockResolvedValue("https://example.com/real.deb");
+    const res = await fetch(`${base}/updates/download/linux-v0.2.0/Neoxify_0.2.0_amd64.deb`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("https://example.com/real.deb");
+    expect(updates.downloadUrl).toHaveBeenCalledWith("linux-v0.2.0", "Neoxify_0.2.0_amd64.deb");
   });
 
   it("answers 204 to a Linux app on the newest version", async () => {

@@ -26,8 +26,9 @@ use neoconnect_ipc::{ConnectProfile, OpenvpnProfile};
 use crate::cmd::{self, Budget};
 use crate::ledger::{Ledger, Owed, RouteSpec};
 use crate::routes::{Row, Uplink};
+use crate::split::{self, Custom, Engine, Plan};
 use crate::{dns, link, process, routes};
-use crate::{Dirs, Limits, Problem, Proto, Transport, Tunnel, TunnelHealth, Up};
+use crate::{Dirs, Limits, Problem, Proto, Shape, SplitState, Transport, Tunnel, TunnelHealth, Up};
 
 /// The system program, found in the system directories only.
 pub const PROGRAM: &str = "openvpn";
@@ -72,8 +73,11 @@ pub(crate) fn proto(p: &OpenvpnProfile) -> Result<Proto, Problem> {
     }
 }
 
-/// The client config, `remote` already resolved to `server`.
-pub(crate) fn build_config(p: &OpenvpnProfile, server: Ipv4Addr, port: u16) -> Result<String, Problem> {
+/// The client config, `remote` already resolved to `server`. In Custom
+/// mode (`split`) the server's `redirect-gateway` is refused, so OpenVPN
+/// never takes the machine itself; whether the tunnel takes it is then
+/// ours to decide, and to change mid-session, with routes of our own.
+pub(crate) fn build_config(p: &OpenvpnProfile, server: Ipv4Addr, port: u16, split: bool) -> Result<String, Problem> {
     let transport = match proto(p)? {
         Proto::Udp => "udp",
         Proto::Tcp => "tcp-client",
@@ -91,8 +95,10 @@ pub(crate) fn build_config(p: &OpenvpnProfile, server: Ipv4Addr, port: u16) -> R
         Some(key) => format!("<tls-crypt>\n{}\n</tls-crypt>\n", key.trim()),
         None => String::new(),
     };
+    let redirect = if split { "pull-filter ignore \"redirect-gateway\"\n" } else { "" };
     Ok(format!(
         "client\n\
+         {redirect}\
          pull-filter ignore \"tun-mtu\"\n\
          tun-mtu {tun_mtu}\n\
          mssfix {LINK_BUDGET} mtu\n\
@@ -173,11 +179,18 @@ pub(crate) struct OvpnTunnel {
     restarting_since: Option<Instant>,
     /// The server, whose route `health` watches.
     server: Ipv4Addr,
+    /// In Custom mode, the routes of ours that take the machine (a host
+    /// route to the server, then the half-defaults), when they are in.
+    own_routes: Vec<RouteSpec>,
+    uplink: Uplink,
+    /// Custom mode: the shape, and the sorting when there is one.
+    custom: Custom,
 }
 
 pub(crate) fn connect(
     profile: &ConnectProfile,
     known_nodes: &[String],
+    shape: &Shape,
     dirs: &Dirs,
     limits: &Limits,
 ) -> Result<Box<dyn Tunnel>, Problem> {
@@ -202,8 +215,11 @@ pub(crate) fn connect(
     // asked before anything of ours is routed.
     let server = routes::resolve_ipv4(&host, port, &budget)?;
     let uplink = routes::uplink_for(server, &budget)?;
-    let config = build_config(p, server, port)?;
+    let config = build_config(p, server, port, shape.is_split())?;
 
+    let ledger = Ledger::in_dir(&dirs.state);
+    let plan = Plan { tunnel: LINK.to_string(), uplink: uplink.clone(), servers: vec![server], engine_mark: None };
+    let custom = Custom::new(shape, plan, &ledger, &dirs.run, false);
     let mut tunnel = OvpnTunnel {
         up: Up {
             protocol: profile.protocol_name().to_string(),
@@ -213,7 +229,7 @@ pub(crate) fn connect(
             dns_protected: false,
         },
         child: None,
-        ledger: Ledger::in_dir(&dirs.state),
+        ledger,
         engine_routes: Vec::new(),
         link_owed: None,
         config_owed: None,
@@ -222,6 +238,9 @@ pub(crate) fn connect(
         log: dirs.run.join(LOG_FILE),
         restarting_since: None,
         server,
+        own_routes: Vec::new(),
+        uplink: uplink.clone(),
+        custom,
     };
     // From here an early return drops `tunnel`, which undoes what it did.
     tunnel.bring_up(&exe, &config, server, &uplink, dirs, &budget)?;
@@ -254,8 +273,10 @@ impl OvpnTunnel {
         // adds it early, and a helper killed before the connect returns must
         // still leave a record of it. Only when it is not there already --
         // one already on the table is not OpenVPN's to add, nor ours to take.
+        // In Custom mode the server's redirect is refused and OpenVPN adds
+        // no such route.
         let before = routes::main_table(budget);
-        if let Some(rows) = &before {
+        if let Some(rows) = before.as_ref().filter(|_| !self.custom.shape.is_split()) {
             if !routes::has_host_route(rows, server, uplink) {
                 let spec = RouteSpec::host(server, uplink);
                 self.ledger.owe(Owed::EngineRoute(spec.clone()));
@@ -292,6 +313,15 @@ impl OvpnTunnel {
         }
         self.baseline = link::counters(LINK);
 
+        // Custom mode: our own routes when the tunnel is to take the
+        // machine, then the sorting, before DNS.
+        if self.custom.shape.is_split() {
+            if split::takes_everything(&self.custom.shape) {
+                self.take_everything(budget)?;
+            }
+            self.custom.install(budget)?;
+        }
+
         // DNS once OpenVPN's routes lead into the tunnel, and not before.
         self.dns = dns::point_at(LINK, &dirs.state, &self.ledger, budget);
         self.up.dns_protected = self.dns.is_some();
@@ -304,6 +334,20 @@ impl OvpnTunnel {
                 let _ = child.kill();
             }
         }
+    }
+
+    /// Ours come out in the reverse of the order they went in: the
+    /// half-defaults before the host route that keeps the engine's own
+    /// connection out of them.
+    fn remove_own_routes(&mut self, budget: &Budget) {
+        let mut kept = Vec::new();
+        for spec in std::mem::take(&mut self.own_routes).into_iter().rev() {
+            if routes::remove(&spec, &self.ledger, budget).is_err() {
+                kept.push(spec);
+            }
+        }
+        kept.reverse();
+        self.own_routes = kept;
     }
 
     fn remove_engine_routes(&mut self, budget: &Budget) {
@@ -343,9 +387,53 @@ fn wait_until_up(child: &mut Child, log: &Path, budget: &Budget) -> Result<(), P
     }
 }
 
+impl Engine for OvpnTunnel {
+    /// What `redirect-gateway def1` would have added, as routes of ours:
+    /// the host route to the server by the uplink, then the half-defaults
+    /// into the tun. Only in Custom mode; without it the server's own
+    /// redirect does this.
+    fn take_everything(&mut self, budget: &Budget) -> Result<(), Problem> {
+        let mut wanted = vec![RouteSpec::host(self.server, &self.uplink)];
+        wanted.extend(routes::HALF_DEFAULTS.iter().map(|half| RouteSpec::into_link(half, LINK)));
+        for (index, spec) in wanted.into_iter().enumerate() {
+            if self.own_routes.contains(&spec) {
+                continue;
+            }
+            routes::add(&spec, index == 0, &self.ledger, budget)
+                .map_err(|e| e.problem(&format!("route {} for the tunnel", spec.dest)))?;
+            self.own_routes.push(spec);
+        }
+        Ok(())
+    }
+
+    fn release_everything(&mut self, budget: &Budget) {
+        self.remove_own_routes(budget);
+    }
+
+    fn custom(&mut self) -> &mut Custom {
+        &mut self.custom
+    }
+}
+
 impl Tunnel for OvpnTunnel {
     fn up(&self) -> &Up {
         &self.up
+    }
+
+    fn shape(&self) -> Shape {
+        self.custom.shape.clone()
+    }
+
+    fn reshape(&mut self, shape: &Shape, limits: &Limits) -> Result<(), Problem> {
+        split::reshape(self, shape, limits)
+    }
+
+    fn split(&self) -> Option<SplitState> {
+        self.custom.state()
+    }
+
+    fn probe(&self, limits: &Limits) -> Result<(), String> {
+        split::probe(LINK, limits)
     }
 
     /// `Down` when the process has exited or its tun is gone. `Stale`
@@ -394,16 +482,20 @@ impl Tunnel for OvpnTunnel {
     /// takes back. `ip` calls only.
     fn hard_stop(&mut self) {
         let budget = teardown();
+        self.custom.hard_stop();
         self.kill();
         if link::exists(LINK) {
             let _ = cmd::ip(&["-4", "route", "flush", "dev", LINK], &budget);
         }
+        self.remove_own_routes(&budget);
         self.remove_engine_routes(&budget);
     }
 
     fn finish_stop(&mut self) {
         let budget = teardown();
+        self.custom.finish_stop();
         self.kill();
+        self.remove_own_routes(&budget);
         if let Some(mut child) = self.child.take() {
             let _ = child.wait();
         }
@@ -460,7 +552,15 @@ mod tests {
     }
 
     fn config() -> String {
-        build_config(&profile(), Ipv4Addr::new(203, 0, 113, 5), 1194).unwrap()
+        build_config(&profile(), Ipv4Addr::new(203, 0, 113, 5), 1194, false).unwrap()
+    }
+
+    #[test]
+    fn in_custom_mode_the_servers_redirect_is_refused() {
+        assert!(!config().contains("redirect-gateway"), "without Custom mode the server's redirect takes the machine");
+        let split = build_config(&profile(), Ipv4Addr::new(203, 0, 113, 5), 1194, true).unwrap();
+        assert!(split.contains("\npull-filter ignore \"redirect-gateway\"\n"));
+        assert_eq!(split.replace("pull-filter ignore \"redirect-gateway\"\n", ""), config(), "nothing else differs");
     }
 
     #[test]
@@ -498,14 +598,14 @@ mod tests {
     #[test]
     fn a_key_that_could_close_its_block_is_refused() {
         let bad = OpenvpnProfile { key_pem: "-----BEGIN PRIVATE KEY-----\n</key>\nup /bin/sh".into(), ..profile() };
-        assert!(build_config(&bad, Ipv4Addr::new(203, 0, 113, 5), 1194).is_err());
+        assert!(build_config(&bad, Ipv4Addr::new(203, 0, 113, 5), 1194, false).is_err());
     }
 
     #[test]
     fn tcp_and_udp_are_named_as_openvpn_wants_them() {
         let tcp = OpenvpnProfile { proto: "tcp".into(), ..profile() };
         assert_eq!(proto(&tcp), Ok(Proto::Tcp));
-        assert!(build_config(&tcp, Ipv4Addr::new(203, 0, 113, 5), 443).unwrap().contains("\nproto tcp-client\n"));
+        assert!(build_config(&tcp, Ipv4Addr::new(203, 0, 113, 5), 443, false).unwrap().contains("\nproto tcp-client\n"));
         assert_eq!(proto(&profile()), Ok(Proto::Udp));
         assert!(proto(&OpenvpnProfile { proto: "icmp".into(), ..profile() }).is_err());
     }

@@ -181,6 +181,11 @@ const en = {
   "update.available": "Neoxify {version} is available.",
   "update.getIt": "Download",
   "update.openFailed": "The download page didn't open. Try again.",
+  // Linux: the helper hands the downloaded package to the system's package
+  // manager while the banner waits, and a failed install falls back to the
+  // download, said as that rather than as a plain "available".
+  "update.installing": "Installing Neoxify {version}...",
+  "update.installFailed": "Neoxify {version} didn't install. Download it and install it yourself.",
   "dash.customModeDetached": "Connected, but Custom mode didn't start. The apps you chose are going out without protection.",
   "dash.unlimited": "Unlimited",
   "support.title": "Support",
@@ -317,6 +322,10 @@ const en = {
   // fallback for a code this app does not know.
   "dash.customProblemInjectionRefused":
     "Windows is refusing the redirected packets, so the apps you chose aren't reaching the VPN. Restarting Neoxify usually fixes this.",
+  // The same code from the Linux helper, where it is the kernel's routing
+  // of the chosen apps that would not go in.
+  "dash.customProblemInjectionRefusedLinux":
+    "This computer wouldn't send the apps you chose through the VPN, so they aren't reaching it. Restarting Neoxify usually fixes this.",
   "dash.customProblemNoReplies":
     "The apps you chose are being sent through the VPN, but nothing is coming back, so their connections will hang. The VPN isn't carrying their traffic.",
   "dash.customProblemNoAppTraffic":
@@ -730,6 +739,11 @@ const en = {
   // what brings it back.
   "err.serviceUnavailableLinux": "Neoxify's background service isn't running. Restart your computer. If that doesn't help, install Neoxify again.",
   "err.engineMissing": "Part of the installation is missing. Reinstall Neoxify.",
+  // Linux: Built-in runs through the distribution's strongSwan, which the
+  // package recommends but does not require, so reinstalling Neoxify would
+  // not bring it.
+  "err.engineMissingStrongswan":
+    "Built-in needs strongSwan, which isn't installed on this computer. Install strongSwan with your system's package manager and try again, or choose another protocol.",
   "err.serverUnreachable": "Couldn't reach this server. Your network may be blocking it. Try another location.",
   "err.notCarryingTraffic": "Connected, but no traffic got through.",
   "err.allProtocolsFailed": "Neoxify tried every available protocol, and none of them carried traffic.",
@@ -859,6 +873,26 @@ const en = {
     "Open Start, type cmd, right-click Command Prompt and choose \"Run as administrator\". Then run this:",
   "repair.copyCommand": "Copy command",
   "repair.copied": "Copied",
+  // The same screen on Linux, where the helper sweeps its own leftovers:
+  // engines, DNS, routes and rules, its nftables tables, its interfaces
+  // and its control groups. No Windows to name, and the command is run
+  // in a terminal with sudo rather than as an administrator.
+  "repair.subtitleLinux": "Remove anything Neoxify has left behind on this computer.",
+  "repair.explainLinux":
+    "Neoxify finds and removes VPN engines left running, the DNS settings it points at the VPN, its routes and routing rules, its firewall rules, network interfaces it left behind, and the groups it puts apps in for Custom mode.",
+  "repair.resultCleanLinux": "Nothing was left behind. Your network settings are as your system set them.",
+  "repair.resultUnverifiedLinux":
+    "Repaired, but one check couldn't finish, so the result can't be confirmed. This usually just means the computer was slow. Try connecting again. If it still doesn't work, run the command below in a terminal and send us what it prints.",
+  "repair.resultProblemsLinux":
+    "Some of it couldn't be repaired. Restarting the computer usually clears the rest. If it doesn't, run the command below in a terminal and send us what it prints.",
+  "repair.noServiceHintLinux": "Open a terminal and run this command. It asks for your password:",
+  "repair.step.links": "Leftover VPN network interfaces",
+  "repair.step.groups": "Custom mode app groups",
+  // Linux's own words for steps that share an id with Windows but not
+  // what they look at (an NRPT rule there, resolver settings here).
+  "repair.stepLinux.dns": "DNS pointed at the VPN",
+  "repair.stepLinux.routes": "Neoxify's routes and routing rules",
+  "repair.stepLinux.firewall": "Neoxify's firewall rules",
   // Offered in the connect-failure path, where somebody who cannot
   // connect is already looking, rather than only in a settings screen
   // they would have to think to open.
@@ -1308,6 +1342,8 @@ const en = {
   // "still blocked" either, which says they were.
   "hold.unanswered": "Neoxify's service isn't answering right now, so Neoxify is checking whether other connections on this computer are blocked, as you set.",
   "hold.filtersRefused": "Neoxify couldn't block the internet while reconnecting because Windows refused the filters. Your traffic goes out without Neoxify until the VPN is back.",
+  // The same refusal from the Linux helper, whose block is a firewall table.
+  "hold.filtersRefusedLinux": "Neoxify couldn't block the internet while reconnecting because this computer refused its firewall rules. Your traffic goes out without Neoxify until the VPN is back.",
   "hold.tunnelNotPermitted": "Stopped blocking the internet so the new connection could carry traffic.",
   "hold.timedOut": "After 40 minutes of trying to reconnect, Neoxify stopped blocking the internet so this computer isn't left offline. Your traffic goes out without Neoxify until the VPN is back.",
   "hold.notCovered": "The internet isn't blocked, because the block doesn't cover Built-in (IKEv2) or Custom mode. Your traffic goes out without Neoxify until the VPN is back.",
@@ -1431,6 +1467,10 @@ const en = {
   "leak.heldAll": "other connections on this computer are kept inside the VPN and IPv6 is blocked. If that can't be set up, the main page says so.",
   "leak.notHeldLead": "Built-in (IKEv2) and Custom mode",
   "leak.notHeld": "don't keep other connections inside the VPN. The main page says so while they're in use.",
+  // Linux holds every protocol it offers, Built-in too: only Custom mode
+  // leaves other connections outside.
+  "leak.notHeldLeadLinux": "Custom mode",
+  "leak.notHeldLinux": "doesn't keep other connections inside the VPN. The main page says so while it's on.",
   "leak.reconLead": "While reconnecting,",
   "leak.recon": "traffic goes out without Neoxify until the VPN is back.",
   "plans.finishInBrowser": "Finish paying in your browser. This screen updates by itself when the payment goes through.",
@@ -1685,6 +1725,8 @@ const fa: Record<TranslationKey, string> = {
   "update.available": "نسخهٔ {version} نئوکسیفای منتشر شده است.",
   "update.getIt": "دانلود",
   "update.openFailed": "صفحهٔ دانلود باز نشد. دوباره امتحان کنید.",
+  "update.installing": "در حال نصب نئوکسیفای {version}...",
+  "update.installFailed": "نئوکسیفای {version} نصب نشد. دانلودش کنید و خودتان نصبش کنید.",
   "update.restarting": "در حال راه‌اندازی دوباره...",
   "update.connectedFirst": "برای به‌روزرسانی، اول اتصال را قطع کنید.",
   "dash.customModeDetached": "وصل شد، ولی حالت سفارشی فعال نشد. برنامه‌هایی که انتخاب کرده‌اید بدون محافظت به اینترنت وصل می‌شوند.",
@@ -1767,6 +1809,8 @@ const fa: Record<TranslationKey, string> = {
     "پروتکل Built-in از وی‌پی‌ان خود دستگاه استفاده می‌کند و نئوکسیفای هنوز نمی‌تواند جلوی اتصال‌های دیگر این کامپیوتر را بگیرد تا بیرون از آن نروند. برنامه‌هایی که مستقیم از شبکه استفاده می‌کنند، و اتصال‌هایی که پیش از وصل شدن شما باز شده بودند، ممکن است هنوز برای شبکهٔ شما دیده شوند. برای محافظت کامل، پروتکل دیگری انتخاب کنید.",
   "dash.customProblemInjectionRefused":
     "ویندوز بسته‌های هدایت‌شده را نمی‌پذیرد، برای همین برنامه‌هایی که انتخاب کرده‌اید به وی‌پی‌ان نمی‌رسند. معمولاً بستن و باز کردن دوبارهٔ نئوکسیفای مشکل را حل می‌کند.",
+  "dash.customProblemInjectionRefusedLinux":
+    "این کامپیوتر برنامه‌هایی را که انتخاب کرده‌اید از راه وی‌پی‌ان نفرستاد، برای همین به وی‌پی‌ان نمی‌رسند. معمولاً بستن و باز کردن دوبارهٔ نئوکسیفای مشکل را حل می‌کند.",
   "dash.customProblemNoReplies":
     "برنامه‌هایی که انتخاب کرده‌اید به وی‌پی‌ان فرستاده می‌شوند، ولی جوابی برنمی‌گردد و اتصالشان معطل می‌ماند. وی‌پی‌ان ترافیک آن‌ها را منتقل نمی‌کند.",
   "dash.customProblemNoAppTraffic":
@@ -1951,6 +1995,8 @@ const fa: Record<TranslationKey, string> = {
   "err.serviceUnavailable": "سرویس پس‌زمینهٔ نئوکسیفای اجرا نمی‌شود. معمولاً بستن و باز کردن دوبارهٔ برنامه مشکل را حل می‌کند. اگر نشد، نئوکسیفای را دوباره نصب کنید.",
   "err.serviceUnavailableLinux": "سرویس پس‌زمینهٔ نئوکسیفای اجرا نمی‌شود. کامپیوتر را دوباره راه‌اندازی کنید. اگر درست نشد، نئوکسیفای را دوباره نصب کنید.",
   "err.engineMissing": "بخشی از برنامه نصب نشده است. نئوکسیفای را دوباره نصب کنید.",
+  "err.engineMissingStrongswan":
+    "پروتکل Built-in به strongSwan نیاز دارد که روی این کامپیوتر نصب نیست. strongSwan را با مدیر بسته‌های سیستم نصب کنید و دوباره امتحان کنید، یا پروتکل دیگری انتخاب کنید.",
   "err.teardownStuck":
     "اتصال وی‌پی‌ان هنوز در حال بسته شدن است. اگر اینترنت شما وصل نشد، برنامه را ببندید و دوباره باز کنید.",
   "err.serverUnreachable": "به این سرور وصل نشد. شاید شبکهٔ شما آن را بسته باشد. کشور دیگری را امتحان کنید.",
@@ -2029,6 +2075,20 @@ const fa: Record<TranslationKey, string> = {
     "منوی Start را باز کنید، cmd را بنویسید، روی Command Prompt راست‌کلیک کنید و «Run as administrator» را بزنید. بعد این دستور را اجرا کنید:",
   "repair.copyCommand": "کپی دستور",
   "repair.copied": "کپی شد",
+  "repair.subtitleLinux": "هرچه نئوکسیفای روی این کامپیوتر جا گذاشته پاک می‌شود.",
+  "repair.explainLinux":
+    "نئوکسیفای این‌ها را پیدا و پاک می‌کند: موتورهای وی‌پی‌ان که هنوز باز مانده‌اند، تنظیمات DNS که به وی‌پی‌ان سپرده، مسیرها و قانون‌های مسیریابی‌اش، قانون‌های فایروالش، کارت‌های شبکه‌ای که جا گذاشته و گروه‌هایی که برنامه‌ها را برای حالت سفارشی در آن‌ها می‌گذارد.",
+  "repair.resultCleanLinux": "چیزی جا نمانده بود. تنظیمات شبکهٔ شما همان تنظیمات خود سیستم است.",
+  "repair.resultUnverifiedLinux":
+    "رفع مشکل انجام شد، ولی یکی از بررسی‌ها تمام نشد و نتیجه را نمی‌شود تأیید کرد. معمولاً دلیلش فقط کند بودن کامپیوتر است. دوباره وصل شوید. اگر باز وصل نشد، دستور زیر را در ترمینال اجرا کنید و خروجی‌اش را برای ما بفرستید.",
+  "repair.resultProblemsLinux":
+    "بخشی از مشکل رفع نشد. معمولاً با راه‌اندازی دوبارهٔ کامپیوتر بقیه هم پاک می‌شود. اگر نشد، دستور زیر را در ترمینال اجرا کنید و خروجی‌اش را برای ما بفرستید.",
+  "repair.noServiceHintLinux": "یک ترمینال باز کنید و این دستور را اجرا کنید. رمز عبور کامپیوترتان را می‌پرسد:",
+  "repair.step.links": "کارت‌های شبکهٔ وی‌پی‌ان جامانده",
+  "repair.step.groups": "گروه‌های برنامه در حالت سفارشی",
+  "repair.stepLinux.dns": "DNS سپرده‌شده به وی‌پی‌ان",
+  "repair.stepLinux.routes": "مسیرها و قانون‌های مسیریابی نئوکسیفای",
+  "repair.stepLinux.firewall": "قانون‌های فایروال نئوکسیفای",
   "repair.inlineCta": "اگر هنوز وصل نمی‌شوید، مشکل شبکه را رفع کنید",
 
   "diag.title": "اطلاعات برای پشتیبانی",
@@ -2350,6 +2410,7 @@ const fa: Record<TranslationKey, string> = {
   "hold.unconfirmed": "اتصال وی‌پی‌ان بسته شد. نئوکسیفای در حال بررسی این است که اتصال‌های دیگر این کامپیوتر، طبق تنظیم شما، مسدود شده‌اند یا نه.",
   "hold.unanswered": "سرویس نئوکسیفای الان جواب نمی‌دهد، برای همین نئوکسیفای در حال بررسی این است که اتصال‌های دیگر این کامپیوتر، طبق تنظیم شما، مسدود شده‌اند یا نه.",
   "hold.filtersRefused": "نئوکسیفای نتوانست هنگام اتصال دوباره اینترنت را مسدود کند، چون ویندوز فیلترها را نپذیرفت. تا وقتی وی‌پی‌ان برگردد، ترافیک شما بدون نئوکسیفای به اینترنت می‌رود.",
+  "hold.filtersRefusedLinux": "نئوکسیفای نتوانست هنگام اتصال دوباره اینترنت را مسدود کند، چون این کامپیوتر قانون‌های فایروالش را نپذیرفت. تا وقتی وی‌پی‌ان برگردد، ترافیک شما بدون نئوکسیفای به اینترنت می‌رود.",
   "hold.tunnelNotPermitted": "مسدودسازی اینترنت برداشته شد تا اتصال جدید بتواند ترافیک را منتقل کند.",
   "hold.timedOut": "بعد از ۴۰ دقیقه تلاش برای اتصال دوباره، نئوکسیفای مسدودسازی اینترنت را برداشت تا این کامپیوتر بی‌اینترنت نماند. تا وقتی وی‌پی‌ان برگردد، ترافیک شما بدون نئوکسیفای به اینترنت می‌رود.",
   "hold.notCovered": "اینترنت مسدود نمی‌شود، چون این مسدودسازی شامل Built-in (IKEv2) و حالت سفارشی نمی‌شود. تا وقتی وی‌پی‌ان برگردد، ترافیک شما بدون نئوکسیفای به اینترنت می‌رود.",
@@ -2467,6 +2528,8 @@ const fa: Record<TranslationKey, string> = {
   "leak.heldAll": "اتصال‌های دیگر این کامپیوتر داخل وی‌پی‌ان نگه داشته می‌شوند و IPv6 مسدود است. اگر این کار انجام نشود، صفحهٔ اصلی خبر می‌دهد.",
   "leak.notHeldLead": "Built-in (IKEv2) و حالت سفارشی",
   "leak.notHeld": "اتصال‌های دیگر را داخل وی‌پی‌ان نگه نمی‌دارند. تا وقتی از آن‌ها استفاده می‌کنید، صفحهٔ اصلی این را می‌گوید.",
+  "leak.notHeldLeadLinux": "حالت سفارشی",
+  "leak.notHeldLinux": "اتصال‌های دیگر را داخل وی‌پی‌ان نگه نمی‌دارد. تا وقتی روشن است، صفحهٔ اصلی این را می‌گوید.",
   "leak.reconLead": "هنگام اتصال دوباره،",
   "leak.recon": "تا برگشتن وی‌پی‌ان، ترافیک بدون نئوکسیفای به اینترنت می‌رود.",
   "plans.finishInBrowser": "پرداخت را در مرورگر تمام کنید. بعد از تأیید پرداخت، این صفحه خودش به‌روز می‌شود.",

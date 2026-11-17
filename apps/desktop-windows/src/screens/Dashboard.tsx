@@ -155,7 +155,7 @@ import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } f
 import { setConfinedAround } from "../lib/connected-mirrors";
 import { egressWorthAnotherLook } from "../lib/confinement-recheck";
 import { repairUnderWay } from "../lib/repair";
-import { desktopPlatform, supportsCustomMode, supportsGaming, supportsRepair } from "../lib/desktop-platform";
+import { desktopPlatform, supportsCustomMode, supportsGameCatalogue, supportsGaming, supportsRepair } from "../lib/desktop-platform";
 import { appPrefs } from "../lib/app-prefs";
 import { autoConnectDecision, autoConnectLatch } from "../lib/auto-connect";
 import {
@@ -1040,7 +1040,7 @@ export function Dashboard({
   // screen stays mounted under it.
   useEffect(() => {
     if (!onMainPage) return;
-    // Nothing to read where there is no Custom mode (Linux).
+    // Nothing to read where there is no Custom mode (the macOS shell).
     if (!supportsCustomMode()) return;
     loadSplitTunnel()
       .then((settings) => {
@@ -3783,8 +3783,8 @@ export function Dashboard({
       // their selection mid-connect and the second push overwrites the
       // first with something they no longer have on screen.
       let splitTunnelSettings: SplitTunnelSettings | null = null;
-      // Only where Custom mode exists: a Linux session sends nothing for a
-      // feature its helper does not have.
+      // Only where Custom mode exists: a desktop without it (the macOS
+      // shell) sends nothing for a feature its helper does not have.
       if (supportsCustomMode()) {
         try {
           const settings = await loadSplitTunnel();
@@ -4143,7 +4143,9 @@ export function Dashboard({
           // Recomputed per candidate rather than once before the
           // ladder: the ladder settles wherever it settles, and which
           // exits are *additional* depends on where it landed.
-          const concurrent = splitTunnelSettings
+          // Only where there is a game catalogue (Windows): on Linux Custom
+          // mode has no per-game exits, and every connect sends none.
+          const concurrent = splitTunnelSettings && supportsGameCatalogue()
             ? concurrentExitsFor(
                 candidate,
                 dialable,
@@ -4482,7 +4484,9 @@ export function Dashboard({
             // Best-effort. A failure here costs an honest `unknown`
             // placement, and failing the connection over a reporting
             // detail would be out of all proportion.
-            if (splitTunnelSettings) {
+            // The egress only places games on their exits, so there is
+            // nothing to re-send where there is no game catalogue (Linux).
+            if (splitTunnelSettings && supportsGameCatalogue()) {
               await pushSplitTunnel(
                 splitTunnelSettings,
                 exitOfRoute(routes, candidate.routeId),

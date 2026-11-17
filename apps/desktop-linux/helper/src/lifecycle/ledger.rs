@@ -148,6 +148,14 @@ impl Ledger {
         (state.live != 0).then(|| state.live_protocol.clone())
     }
 
+    /// The live session's generation, or `None` when no session is live:
+    /// what the reconnect hold's report is said against when a status is
+    /// answered without the owning thread.
+    pub fn live_generation(&self) -> Option<u64> {
+        let state = self.state();
+        (state.live != 0).then_some(state.live)
+    }
+
     /// The last session ended on its own and nothing has begun since: the
     /// one state in which "no tunnel" can be answered without asking the
     /// machine.

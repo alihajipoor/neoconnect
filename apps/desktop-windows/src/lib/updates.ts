@@ -29,9 +29,11 @@ export type UpdateState =
   | { status: "downloading"; version: string; percent: number | null }
   /** On disk and verified. Applied when the app next quits. */
   | { status: "ready"; version: string }
-  /** Newer than this build, on a platform that cannot install it itself
-   * (lib/update-notice.ts): said, with a way to the download page. */
-  | { status: "available"; version: string };
+  /** Newer than this build, and not being installed here
+   * (lib/update-notice.ts): said, with a way to the download page.
+   * `installFailed` when Linux tried to install it and could not
+   * (lib/linux-update.ts), so the notice says that too. */
+  | { status: "available"; version: string; installFailed?: boolean };
 
 /** Held here rather than in React state so it survives navigation
  * between screens -- a download that restarted every time the customer

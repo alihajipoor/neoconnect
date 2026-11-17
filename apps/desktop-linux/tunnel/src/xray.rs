@@ -26,8 +26,9 @@ use serde_json::json;
 
 use crate::cmd::{self, Budget};
 use crate::ledger::{Ledger, Owed, RouteSpec};
+use crate::split::{self, Custom, Engine, Plan};
 use crate::{dns, link, process, routes};
-use crate::{Dirs, Limits, Problem, Proto, Transport, Tunnel, TunnelHealth, Up};
+use crate::{Dirs, Limits, Problem, Proto, Shape, SplitState, Transport, Tunnel, TunnelHealth, Up};
 
 /// The engine's file name in `Dirs::bin`.
 pub const PROGRAM: &str = "xray";
@@ -356,6 +357,8 @@ pub(crate) struct XrayTunnel {
     baseline: Option<(u64, u64)>,
     /// The main server, whose route `health` watches.
     server: Ipv4Addr,
+    /// Custom mode: the shape, and the sorting when there is one.
+    custom: Custom,
 }
 
 /// How long a teardown step may take; `ip` answers in milliseconds.
@@ -367,6 +370,7 @@ pub(crate) fn connect(
     profile: &ConnectProfile,
     exits: &[ExitProfile],
     known_nodes: &[String],
+    shape: &Shape,
     dirs: &Dirs,
     limits: &Limits,
 ) -> Result<Box<dyn Tunnel>, Problem> {
@@ -415,6 +419,14 @@ pub(crate) fn connect(
         }
     }
 
+    let ledger = Ledger::in_dir(&dirs.state);
+    let plan = Plan {
+        tunnel: ADAPTER_NAME.to_string(),
+        uplink: uplinks[0].1.clone(),
+        servers: servers.clone(),
+        engine_mark: None,
+    };
+    let custom = Custom::new(shape, plan, &ledger, &dirs.run, true);
     let mut tunnel = XrayTunnel {
         up: Up {
             protocol: profile.protocol_name().to_string(),
@@ -424,13 +436,14 @@ pub(crate) fn connect(
             dns_protected: false,
         },
         child: None,
-        ledger: Ledger::in_dir(&dirs.state),
+        ledger,
         routes: Vec::new(),
         dns: None,
         link_owed: None,
         config_owed: None,
         baseline: None,
         server: main_ip,
+        custom,
     };
     // From here, an early return drops `tunnel`, which undoes what it did.
     tunnel.bring_up(&exe, &main_profile, &exit_profiles, &uplinks, dirs, &budget)?;
@@ -502,13 +515,12 @@ impl XrayTunnel {
         }
         self.baseline = link::counters(ADAPTER_NAME);
 
-        // Everything else into the tunnel.
-        for half in routes::HALF_DEFAULTS {
-            let spec = RouteSpec::into_link(half, ADAPTER_NAME);
-            routes::add(&spec, false, &self.ledger, budget)
-                .map_err(|e| e.problem(&format!("route {half} into the tunnel")))?;
-            self.routes.push(spec);
+        // Everything else into the tunnel, unless only the chosen apps
+        // are to use it; then the sorting, before DNS is pointed at it.
+        if split::takes_everything(&self.custom.shape) {
+            self.take_everything(budget)?;
         }
+        self.custom.install(budget)?;
 
         // DNS once a route leads into the tunnel, and not before: pointed
         // at 1.1.1.1 earlier, lookups would leave in clear text by the
@@ -556,9 +568,56 @@ fn wait_for_link(budget: &Budget, child: &mut Child) -> Result<(), Problem> {
     }
 }
 
+impl Engine for XrayTunnel {
+    /// The two half-defaults into the tunnel.
+    fn take_everything(&mut self, budget: &Budget) -> Result<(), Problem> {
+        for half in routes::HALF_DEFAULTS {
+            let spec = RouteSpec::into_link(half, ADAPTER_NAME);
+            if self.routes.contains(&spec) {
+                continue;
+            }
+            routes::add(&spec, false, &self.ledger, budget)
+                .map_err(|e| e.problem(&format!("route {half} into the tunnel")))?;
+            self.routes.push(spec);
+        }
+        Ok(())
+    }
+
+    fn release_everything(&mut self, budget: &Budget) {
+        let (into_tunnel, hosts): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.routes).into_iter().partition(|spec| spec.dev == ADAPTER_NAME);
+        self.routes = hosts;
+        for spec in into_tunnel {
+            if routes::remove(&spec, &self.ledger, budget).is_err() {
+                self.routes.push(spec);
+            }
+        }
+    }
+
+    fn custom(&mut self) -> &mut Custom {
+        &mut self.custom
+    }
+}
+
 impl Tunnel for XrayTunnel {
     fn up(&self) -> &Up {
         &self.up
+    }
+
+    fn shape(&self) -> Shape {
+        self.custom.shape.clone()
+    }
+
+    fn reshape(&mut self, shape: &Shape, limits: &Limits) -> Result<(), Problem> {
+        split::reshape(self, shape, limits)
+    }
+
+    fn split(&self) -> Option<SplitState> {
+        self.custom.state()
+    }
+
+    fn probe(&self, limits: &Limits) -> Result<(), String> {
+        split::probe(ADAPTER_NAME, limits)
     }
 
     /// `Down` only on proof: the engine has exited, or its interface is
@@ -605,6 +664,7 @@ impl Tunnel for XrayTunnel {
     /// on anything but `ip`, a few milliseconds each.
     fn hard_stop(&mut self) {
         let budget = teardown();
+        self.custom.hard_stop();
         if let Some(child) = self.child.as_mut() {
             if matches!(child.try_wait(), Ok(None)) {
                 let _ = child.kill();
@@ -629,6 +689,7 @@ impl Tunnel for XrayTunnel {
 
     fn finish_stop(&mut self) {
         let budget = teardown();
+        self.custom.finish_stop();
         if let Some(mut child) = self.child.take() {
             if matches!(child.try_wait(), Ok(None)) {
                 let _ = child.kill();

@@ -34,7 +34,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ReconnectPhase, ReconnectStop } from "./auto-reconnect";
 import { serviceGone, withTimeout } from "./service-call";
-import { supportsReconnectHold } from "./desktop-platform";
+import { isLinux, supportsReconnectHold } from "./desktop-platform";
 
 /** Whether "Block the internet while reconnecting" has been proved: false
  * until it has.
@@ -64,11 +64,11 @@ export const RECONNECT_HOLD_PROVEN = true;
 export const RECONNECT_HOLD_OFFERED: boolean = RECONNECT_HOLD_PROVEN || import.meta.env.VITE_RECONNECT_HOLD === "1";
 
 /** The setting as the hold acts on it: the customer's preference, in a
- * build that offers it, on a desktop whose service has a hold (not Linux's
- * first version). Every read of the preference that decides what the
- * service holds, or what the screen says about it, goes through this -- a
- * preference saved by a test build is nothing in a release, and a Linux
- * session never asks its helper for a hold it does not have. */
+ * build that offers it, on a desktop whose service has a hold (Windows and
+ * Linux, not the macOS shell). Every read of the preference that decides
+ * what the service holds, or what the screen says about it, goes through
+ * this -- a preference saved by a test build is nothing in a release, and
+ * a desktop without a hold never asks for one. */
 export function holdWanted(preference: boolean): boolean {
   return RECONNECT_HOLD_OFFERED && supportsReconnectHold() && preference;
 }
@@ -302,6 +302,7 @@ export type HoldNoteKey =
   | "hold.dnsAnywhere"
   | "hold.heldLate"
   | "hold.filtersRefused"
+  | "hold.filtersRefusedLinux"
   | "hold.tunnelNotPermitted"
   | "hold.timedOut"
   | "hold.notCovered"
@@ -321,7 +322,11 @@ export function holdNotes(hold: ReconnectHold | null, { inGap, setting }: { inGa
     if (hold.standingRefused === true) notes.push("hold.heldLate");
     return notes;
   }
-  if (hold.state === "notHeld") return [`hold.${hold.problem}`];
+  if (hold.state === "notHeld") {
+    // A refusal is Windows' on Windows and the firewall's on Linux.
+    if (hold.problem === "filtersRefused" && isLinux()) return ["hold.filtersRefusedLinux"];
+    return [`hold.${hold.problem}`];
+  }
   return [];
 }
 

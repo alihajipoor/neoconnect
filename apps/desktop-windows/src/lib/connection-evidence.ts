@@ -48,6 +48,7 @@ import type { Intent } from "./connect-intent";
 import type { EgressVerdict } from "./egress";
 import type { TranslationKey } from "./i18n";
 import { readHold } from "./reconnect-hold";
+import { isLinux } from "./desktop-platform";
 
 /** What the helper service reports about the far end.
  *
@@ -537,9 +538,13 @@ export function warnsUnconfined(
  * Built-in (IKEv2) is not confined by choice in this version -- its plan
  * waits on its own proof -- so reconnecting changes nothing there, and its
  * line says so and points at the protocols that are held. Every other
- * protocol that warns has a confinement that failed or was let go of. */
+ * protocol that warns has a confinement that failed or was let go of.
+ *
+ * On Linux, Built-in's tunnel is an interface of strongSwan's like any
+ * other engine's and the helper confines it as it does the rest, so a
+ * warning there is a confinement that failed, in the ordinary words. */
 export function unconfinedLine(status: Pick<VpnStatus, "protocol"> | null): TranslationKey {
-  return status?.protocol === "IKEV2" ? "dash.ipv4NotConfinedIkev2" : "dash.ipv4NotConfined";
+  return status?.protocol === "IKEV2" && !isLinux() ? "dash.ipv4NotConfinedIkev2" : "dash.ipv4NotConfined";
 }
 
 /** Whether the line `unconfinedLine` chose says the tunnel is not confined

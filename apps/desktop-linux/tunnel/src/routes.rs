@@ -234,6 +234,18 @@ fn run_ip(args: &[String], budget: &Budget) -> Result<String, IpError> {
 /// Owes the route, then adds it. A route that would not go in is struck
 /// off again: nothing is owed for a change that was never made.
 pub(crate) fn add(spec: &RouteSpec, replace: bool, ledger: &Ledger, budget: &Budget) -> Result<(), IpError> {
+    // `replace` takes over any route to the same prefix in the table,
+    // whoever made it, and ours would then be deleted at disconnect. A
+    // host route the customer keeps themselves is left in place instead:
+    // the uplink was chosen by asking the kernel, so it already sends the
+    // server's traffic the way ours would.
+    if replace && is_host(spec) && foreign_route_present(spec, budget) {
+        eprintln!(
+            "neoxify-tunnel: left the machine's own route to {} in place rather than replacing it",
+            spec.dest
+        );
+        return Ok(());
+    }
     let owed = Owed::Route(spec.clone());
     ledger.owe(owed.clone());
     let args = if replace { spec.replace_args() } else { spec.add_args() };
@@ -327,6 +339,34 @@ pub(crate) fn has_host_route(rows: &[Row], dest: Ipv4Addr, uplink: &Uplink) -> b
     })
 }
 
+fn is_host(spec: &RouteSpec) -> bool {
+    spec.dest.ends_with(if spec.v6 { "/128" } else { "/32" })
+}
+
+/// Whether the spec's table holds a route to exactly its prefix that
+/// does not carry our protocol: someone else's, which must not be taken
+/// over. A failed look says no: skipping the route on a guess would leave
+/// the engine's own packets to follow the half-defaults into its tunnel,
+/// and an `ip` that cannot list routes will not replace one either.
+fn foreign_route_present(spec: &RouteSpec, budget: &Budget) -> bool {
+    let mut args = Vec::new();
+    if spec.v6 {
+        args.push("-6".to_string());
+    }
+    args.extend(["-j", "route", "show", "exact", &spec.dest].map(String::from));
+    args.extend(["table".to_string(), spec.table.map(|t| t.to_string()).unwrap_or_else(|| "main".into())]);
+    match run_ip(&args, budget) {
+        Ok(text) => any_foreign(&parse_rows(&text)),
+        Err(_) => false,
+    }
+}
+
+/// Rows that are not ours. Only unicast routes count: a `throw` or
+/// `blackhole` to the same prefix is not a way out to take over.
+pub(crate) fn any_foreign(rows: &[Row]) -> bool {
+    rows.iter().any(|r| r.kind == "unicast" && r.protocol.as_deref() != Some(ROUTE_PROTO))
+}
+
 /// Whether the kernel holds this exact route now. A failed look says no:
 /// it is used only to decide whether a failed add may be struck off, and
 /// the sweep's protocol match catches anything that was wrongly struck.
@@ -348,17 +388,18 @@ fn route_present(spec: &RouteSpec) -> bool {
 /// other traffic to that server) around the tunnel.
 ///
 /// Narrow on purpose: a /32 in the main table to one of `nodes`, not on
-/// one of our interfaces, and added by us or by a VPN client of the same
-/// era (`proto 98`, `boot` -- what `ip route add` and OpenVPN write --
-/// or `static`). Never one the kernel or DHCP made.
+/// one of our interfaces, and carrying our protocol. A `boot` or `static`
+/// route to the same address may be the customer's own, or another VPN
+/// client's, and is never ours to delete; an OpenVPN route of ours is in
+/// the ledger and goes with the sweep.
 pub(crate) fn stale_node_routes(rows: &[Row], nodes: &[Ipv4Addr]) -> Vec<RouteSpec> {
     rows.iter()
         .filter(|r| {
             let host = r.dst.strip_suffix("/32").unwrap_or(&r.dst);
             let to_node = host.parse::<Ipv4Addr>().is_ok_and(|ip| nodes.contains(&ip));
-            let by_us_or_a_vpn = matches!(r.protocol.as_deref(), Some("98" | "boot" | "static"));
+            let ours = r.protocol.as_deref() == Some(ROUTE_PROTO);
             let foreign_dev = r.dev.as_deref().is_some_and(|d| !link::OURS.contains(&d));
-            to_node && by_us_or_a_vpn && foreign_dev && r.kind == "unicast"
+            to_node && ours && foreign_dev && r.kind == "unicast"
         })
         .map(|r| RouteSpec {
             dest: format!("{}/32", r.dst.strip_suffix("/32").unwrap_or(&r.dst)),
@@ -370,22 +411,49 @@ pub(crate) fn stale_node_routes(rows: &[Row], nodes: &[Ipv4Addr]) -> Vec<RouteSp
         .collect()
 }
 
-/// Removes [`stale_node_routes`] for `known` (whatever in it is an IPv4
-/// literal). Returns one line per route removed or refused.
+/// How many known servers are looked at; the app sends a few dozen.
+const MAX_KNOWN_NODES: usize = 512;
+
+/// Is this a server the app could know: an address, or a plain host name
+/// (letters, digits, hyphens and dots)? Anything else in the list is
+/// ignored rather than trusted, since it comes over the socket.
+pub(crate) fn plausible_node(node: &str) -> bool {
+    if node.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    !node.is_empty()
+        && node.len() <= 253
+        && node.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+}
+
+/// Removes [`stale_node_routes`] for `known`: the IPv4 addresses in it,
+/// once the list has been checked. Host names are accepted but nothing is
+/// looked up for them. Returns one line per route removed or refused.
 pub(crate) fn purge_stale(known: &[String], budget: &Budget) -> Vec<String> {
-    let nodes: Vec<Ipv4Addr> = known.iter().filter_map(|n| n.trim().parse().ok()).collect();
+    if known.len() > MAX_KNOWN_NODES || known.iter().any(|n| !plausible_node(n)) {
+        eprintln!("neoxify-tunnel: the list of known servers was not plausible; no leftover routes were purged");
+        return Vec::new();
+    }
+    let nodes: Vec<Ipv4Addr> = known.iter().filter_map(|n| n.parse().ok()).collect();
     if nodes.is_empty() {
         return Vec::new();
     }
     let Ok(text) = cmd::ip(&["-j", "-4", "route", "show", "table", "main"], budget) else { return Vec::new() };
     let mut lines = Vec::new();
     for spec in stale_node_routes(&parse_rows(&text), &nodes) {
-        // Deleted without our protocol: the row may have been OpenVPN's.
+        // With our protocol, so a route someone else put in its place since
+        // the listing is not the one deleted.
         let mut args = vec!["route".to_string(), "del".to_string(), spec.dest.clone()];
         if let Some(via) = &spec.via {
             args.extend(["via".to_string(), via.clone()]);
         }
-        args.extend(["dev".to_string(), spec.dev.clone()]);
+        args.extend(["dev".to_string(), spec.dev.clone(), "proto".to_string(), ROUTE_PROTO.to_string()]);
         match run_ip(&args, budget) {
             Ok(_) => lines.push(format!("removed a leftover host route to {} on {}", spec.dest, spec.dev)),
             Err(e) if e.already_gone() => {}
@@ -510,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn only_our_and_vpn_host_routes_to_known_nodes_are_stale() {
+    fn only_our_host_routes_to_known_nodes_are_stale() {
         let rows = parse_rows(MAIN);
         let nodes = [
             Ipv4Addr::new(203, 0, 113, 5),
@@ -519,8 +587,29 @@ mod tests {
             Ipv4Addr::new(198, 51, 100, 9),
         ];
         let stale: Vec<String> = stale_node_routes(&rows, &nodes).into_iter().map(|s| s.dest).collect();
-        assert_eq!(stale, ["203.0.113.5/32", "198.51.100.7/32"], "never DHCP's, never a blackhole");
+        assert_eq!(stale, ["203.0.113.5/32"], "never the customer's boot route, DHCP's, or a blackhole");
         assert!(stale_node_routes(&rows, &[Ipv4Addr::new(192, 0, 2, 99)]).is_empty(), "never an unknown address");
+    }
+
+    #[test]
+    fn known_servers_are_addresses_or_plain_host_names() {
+        for good in ["198.51.100.7", "2001:db8::1", "node-1.example.com", "localhost"] {
+            assert!(plausible_node(good), "{good}");
+        }
+        let long = "a".repeat(64);
+        for bad in ["", "198.51.100.7/32", "a b", "-x.example.com", "x..example.com", "x;rm", "x\n", long.as_str()] {
+            assert!(!plausible_node(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_route_without_our_protocol_is_someone_elses() {
+        let rows = parse_rows(MAIN);
+        let to = |dst: &str| rows.iter().filter(|r| r.dst == dst).cloned().collect::<Vec<_>>();
+        assert!(!any_foreign(&to("203.0.113.5")), "our own leftover may be replaced");
+        assert!(any_foreign(&to("198.51.100.7")), "the customer's own host route is left alone");
+        assert!(!any_foreign(&to("198.51.100.9")), "a blackhole is not a way out");
+        assert!(!any_foreign(&[]), "nothing there");
     }
 
     #[test]
