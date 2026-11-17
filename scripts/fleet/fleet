@@ -242,9 +242,12 @@ run_and_finish() {
   build_mask
   remember_args
   if ! dry; then
+    # The helper's connections are closed last: cleanup_hosts still uses
+    # them.
     # shellcheck disable=SC2064
-    trap "cleanup_hosts; trap - EXIT" EXIT
+    trap "cleanup_hosts; transport_stop; trap - EXIT" EXIT
     trap "exit 130" INT TERM
+    transport_start
     [[ -f "$RUN_DIR/timings" ]] && from=$(($(wc -l <"$RUN_DIR/timings") + 1))
     use_dump_given || return 1
   fi
@@ -331,7 +334,8 @@ case "$CMD" in
     load_checklists
     RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fleet-plancheck.XXXXXX")"
     # shellcheck disable=SC2064
-    trap "rm -rf '$RUN_DIR'" EXIT
+    trap "transport_stop; rm -rf '$RUN_DIR'" EXIT
+    transport_start
     build_mask
     { do_retire_guard_plans && ok_retire_guard_plans; } 2>&1 | mask
     exit "${PIPESTATUS[0]}"
@@ -350,10 +354,11 @@ case "$CMD" in
     load_checklists
     RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fleet-prove.XXXXXX")"
     if ! dry; then
+      # shellcheck disable=SC2064
+      trap "cleanup_hosts >/dev/null; transport_stop; rm -rf '$RUN_DIR'" EXIT
+      transport_start
       NEW_IP="$(node_field "$NAME" publicIp)" || die "cannot read $NAME from the database"
       ip_ok "$NEW_IP"
-      # shellcheck disable=SC2064
-      trap "cleanup_hosts >/dev/null; rm -rf '$RUN_DIR'" EXIT
     fi
     build_mask
     prove_server "$OPT_PLANS" 2>&1 | mask
@@ -365,7 +370,8 @@ case "$CMD" in
     load_checklists
     RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fleet-status.XXXXXX")"
     # shellcheck disable=SC2064
-    trap "rm -rf '$RUN_DIR'" EXIT
+    trap "transport_stop; rm -rf '$RUN_DIR'" EXIT
+    transport_start
     build_mask
     fleet_status "${POS[0]:-}" 2>&1 | mask
     exit "${PIPESTATUS[0]}"

@@ -55,6 +55,8 @@ describe("nothing address-like or ours is committed with the tool", () => {
   const files = [];
   const walk = (d) => {
     for (const e of readdirSync(join(ROOT, d), { withFileTypes: true })) {
+      // The installed SSH library (gitignored) is not committed with the tool.
+      if (e.isDirectory() && e.name === "node_modules") continue;
       if (e.isDirectory()) walk(join(d, e.name));
       else files.push(join(d, e.name));
     }
@@ -73,7 +75,7 @@ describe("nothing address-like or ours is committed with the tool", () => {
     }
   });
   it("every host name is somebody else's public site or an RFC 2606 example", () => {
-    const allowed = /(^|\.)(example\.(org|net|com|info)|github\.com|cloudflare\.com|cloudflare-dns\.com|letsencrypt\.org|freedesktop\.org|udp-over-tcp\.arpa|bing\.com)$/;
+    const allowed = /(^|\.)(example\.(org|net|com|info)|github\.com|cloudflare\.com|cloudflare-dns\.com|letsencrypt\.org|freedesktop\.org|registry\.npmjs\.org|udp-over-tcp\.arpa|bing\.com)$/;
     for (const f of files) {
       const text = readFileSync(join(ROOT, f), "utf8");
       for (const m of text.matchAll(/\b((?:[a-z0-9-]+\.)+(?:com|net|org|site|online|shop|website|info|arpa|io|ir))\b/g)) {

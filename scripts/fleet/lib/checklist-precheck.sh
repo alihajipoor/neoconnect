@@ -10,16 +10,25 @@
 
 PRE_PORTS="443 2053 8443"
 
+pre_access_one() { rsh "$1" "true"; }
 do_pre_access() {
-  local r fail=0
+  local r k=0 fail=0 d="$RUN_DIR/at-access"
+  # The four hosts at once: they are independent. Read back, and said, in
+  # this order.
+  dry || for r in panel relay signin new; do used "$r"; done
+  each_at_once 4 "$d" pre_access_one panel relay signin new
+  dry && return 0
   for r in panel relay signin new; do
-    if rsh "$r" "true"; then
-      dry || say "$r: key-only access works"
+    at_show "$d" "$k"
+    if [[ "$(at_rc "$d" "$k")" == 0 ]]; then
+      say "$r: key-only access works"
     else
       say "$r: NO key-only access (never sign in with a password; fix the key and run again)"
       fail=1
     fi
+    k=$((k + 1))
   done
+  rm -rf "$d"
   [[ $fail -eq 0 ]] || return 1
   dry || state_set access ok
 }
@@ -46,18 +55,29 @@ ok_pre_sink() {
   dry || [[ "$n" == 3 ]]
 }
 
+# 97: the scripts did not get there, so nothing was probed.
+pre_probe_one() {
+  rpushdir "$1" inside || return 97
+  rsh "$1" "$REMOTE_DIR/inside.sh bare $NEW_IP $PRE_PORTS"
+}
 do_pre_probe() {
-  local b out port verdict rest
+  local b out port verdict rest k=0 d="$RUN_DIR/at-probe"
+  # Both inside boxes at once (each probes on its own; the sinks serve
+  # every connection in its own thread). Read back in this order.
+  each_at_once 2 "$d" pre_probe_one relay signin
+  dry && return 0
   for b in relay signin; do
-    rpushdir "$b" inside || return 1
-    out="$(rsh "$b" "$REMOTE_DIR/inside.sh bare $NEW_IP $PRE_PORTS")" || true
-    dry && continue
+    [[ "$(at_rc "$d" "$k")" == 97 ]] && { at_show "$d" "$k"; return 1; }
+    out="$(at_out "$d" "$k")"
+    cat "$d/$k.err" >&2 2>/dev/null
+    k=$((k + 1))
     while read -r port verdict rest; do
       [[ "$port" =~ ^[0-9]+$ ]] || continue
       printf '  %-7s port %-5s %-6s %s\n' "$b" "$port" "$verdict" "$rest"
       state_set "pre_${b}_${port}" "$verdict"
     done <<<"$out"
   done
+  rm -rf "$d"
 }
 ok_pre_probe() {
   local b p
@@ -70,13 +90,26 @@ ok_pre_probe() {
   done
 }
 
+# The three hosts at once: independent, and printed in this order.
 do_pre_cleanup() {
-  # The bracket in the pattern keeps pkill from matching the shell that
-  # carries the pattern: a plain `pkill -f sink.py` once killed its own
-  # SSH session.
-  rsh new "cat $REMOTE_DIR/sink-*.log 2>/dev/null | sort | uniq -c; pkill -f '[p]ython3 $REMOTE_DIR/s[i]nk.py'; rm -f $REMOTE_DIR/sink*; true"
-  rclean relay
-  rclean signin
+  local k rc d="$RUN_DIR/at-pre-cleanup"
+  each_at_once 3 "$d" pre_cleanup_one new relay signin
+  dry && return 0
+  for k in 0 1 2; do at_show "$d" "$k"; done
+  # As before, the step's status is the last clean's.
+  rc="$(at_rc "$d" 2)"
+  rm -rf "$d"
+  return "$rc"
+}
+pre_cleanup_one() {
+  if [[ "$1" == new ]]; then
+    # The bracket in the pattern keeps pkill from matching the shell that
+    # carries the pattern: a plain `pkill -f sink.py` once killed its own
+    # SSH session.
+    rsh new "cat $REMOTE_DIR/sink-*.log 2>/dev/null | sort | uniq -c; pkill -f '[p]ython3 $REMOTE_DIR/s[i]nk.py'; rm -f $REMOTE_DIR/sink*; true"
+  else
+    rclean "$1"
+  fi
 }
 ok_pre_cleanup() {
   local n

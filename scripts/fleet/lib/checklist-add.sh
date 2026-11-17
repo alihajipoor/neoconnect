@@ -362,6 +362,9 @@ do_add_second_key() {
   rsh new "K=\$(head -1 $REMOTE_DIR/extra.pub); rm -f $REMOTE_DIR/extra.pub; [ -n \"\$K\" ] || exit 1; [ -e /root/.ssh/authorized_keys.bak-pre-fleet ] || cp -a /root/.ssh/authorized_keys /root/.ssh/authorized_keys.bak-pre-fleet; grep -qxF \"\$K\" /root/.ssh/authorized_keys || echo \"\$K\" >> /root/.ssh/authorized_keys; echo \"keys now: \$(grep -c . /root/.ssh/authorized_keys)\"" || return 1
   undo "on the new box: cp -a /root/.ssh/authorized_keys.bak-pre-fleet /root/.ssh/authorized_keys"
   dry || state_set second_key added
+  # authorized_keys changed: the next call must be a new login, not the
+  # run's kept connection, so a broken key file shows here.
+  rdrop new
 }
 ok_add_second_key() {
   local f out
@@ -415,6 +418,8 @@ ok_add_mask_upgrades() {
 do_add_image() {
   rsh new "bash /root/neoxify-installer/maintenance/provider-image.sh --apply | sed 's/^/  /'" || true
   undo "on the new box: what it changed is copied beside it as /root/*.before-neoxify-* (ufw's rules and config, /etc/hosts, the old hostname, /etc/fstab), each named in the lines above; ufw back: apt-get install ufw, allow every engine port, ufw enable; the hostname pin: rm /etc/cloud/cloud.cfg.d/99-neoxify-hostname.cfg; the timer: systemctl unmask fwupd-refresh.timer"
+  # The firewall changed: the next call is a new login (see second-key).
+  rdrop new
 }
 ok_add_image() {
   local out
@@ -436,6 +441,9 @@ ok_add_image() {
 do_add_packages() {
   rscript new node/prep.sh packages || return 1
   undo "none worth doing: the box is new; rebuild it instead"
+  # Packages and the fail2ban sshd jail: the next call is a new login
+  # (see second-key), so a lockout shows here, not at the reboot.
+  rdrop new
 }
 ok_add_packages() {
   local out
@@ -489,9 +497,10 @@ ok_add_dns() {
   expect "a public resolver answers both names with exactly the new address"
   dry && { cf doh "{l1}" "$NEW_IP"; cf doh "{l2}" "$NEW_IP"; return 0; }
   for n in l1 l2; do
-    for try in 1 2 3 4 5 6; do
+    # A minute per name, as when it asked every 10 s: asked every 2 s.
+    for try in $(seq 1 30); do
       cf doh "$(st "$n")" "$NEW_IP" >/dev/null && continue 2
-      sleep 10
+      sleep 2
     done
     say "the $n name does not resolve to the new address yet (try $try)"
     return 1
@@ -734,8 +743,13 @@ do_add_install() {
   rsh new "$REMOTE_DIR/install-drive.sh start $REMOTE_DIR/answers.tsv $PANEL_HOST:$PANEL_GRPC_PORT $PANEL_ORIGIN_NAME" || return 1
   dry && { rsh new "$REMOTE_DIR/install-drive.sh status"; return 0; }
   rm -f "$RUN_DIR/answers.tsv"
-  for _ in $(seq 1 90); do
-    sleep 10
+  # Fifteen minutes in all, as before. Over the run's kept connection a
+  # look costs a round trip, so it looks every 2 s (the end was seen up to
+  # 10 s late); over plain ssh each look is a new connection: every 10 s.
+  local every=10
+  [[ "$FLEET_TRANSPORT" == hub ]] && every=2
+  for _ in $(seq 1 $((900 / every))); do
+    sleep "$every"
     st_="$(rsh new "$REMOTE_DIR/install-drive.sh status")" || continue
     case "$st_" in
       "DONE 0"*)
@@ -988,18 +1002,73 @@ do_add_reboot() {
     say "REFUSED: customers already have credentials on this server. The reboot test is free only before that."
     return 1
   fi
+  # Which boot answers, before and after: the boot's id and its start
+  # (the box's clock), and how long it has been up (no clock at all).
+  # Nothing short of a different id and a later start counts as a reboot:
+  # sshd on the old system can still answer for a few seconds after the
+  # command, and a reboot that was refused would answer forever.
+  local boot_cmd="echo \$(cat /proc/sys/kernel/random/boot_id) \$(awk '/^btime/ {print \$2}' /proc/stat) \$(cut -d' ' -f1 /proc/uptime)"
+  local old_id old_bt id bt up t0 seen same hb tries ages row status age
+  read -r old_id old_bt _ <<<"$(rsh new "$boot_cmd")"
+  if ! dry && [[ -z "$old_id" || ! "$old_bt" =~ ^[0-9]+$ ]]; then
+    say "could not read the box's boot before the reboot"
+    return 1
+  fi
   rsh new "systemctl reboot" || true
-  dry && { rsh new "uptime -s"; return 0; }
-  sleep 20
-  for i in $(seq 1 30); do
-    if rsh new "uptime -s" 2>/dev/null; then
-      sleep 20 # units and the agent settle
-      return 0
+  # The run's connection to the box dies with the old boot, maybe without
+  # a word: close it, so the next call dials whatever answers now.
+  rdrop new
+  if dry; then
+    rsh new "$boot_cmd"
+    rsh new "timeout 90 systemctl is-system-running --wait"
+    q node-row "name=$(nn)"
+    return 0
+  fi
+  # Five minutes and twenty seconds, as the 20 s sleep and 30 tries 10 s
+  # apart allowed before; asked every 3 s, from the start.
+  t0=$SECONDS
+  for i in $(seq 1 107); do
+    sleep 3
+    if read -r id bt up _ <<<"$(rsh new "$boot_cmd" 2>/dev/null)" && [[ -n "$id" && "$id" != "$old_id" && "$bt" =~ ^[0-9]+$ && "$bt" -gt "$old_bt" && "$up" =~ ^[0-9.]+$ ]]; then
+      seen=$EPOCHSECONDS
+      break
     fi
-    sleep 10
+    # The old boot still answering: its connection is closed, so the
+    # next try is a new login, as every try was before.
+    same=""
+    [[ -n "$id" && "$id" == "$old_id" ]] && { same=1; rdrop new; }
+    id=""
+    ((SECONDS - t0 > 320)) && break
   done
-  say "the box did not come back in five minutes (try $i)"
-  return 1
+  if [[ -z "${seen:-}" ]]; then
+    if [[ -n "${same:-}" ]]; then say "the box answers, but it never rebooted: the same boot as before the command (try $i)"; else say "the box did not come back as a new boot in five minutes (try $i)"; fi
+    return 1
+  fi
+  say "rebooted: a new boot, up ${up%.*} s"
+  # The units: until the start-up is over (running, or degraded, which
+  # add.verify's checks then name), not a fixed 20 s.
+  rsh new "timeout 90 systemctl is-system-running --wait" | sed 's/^/  system: /'
+  # The agent: a heartbeat the panel received after this boot began.
+  # The boot began at most `up` seconds before `seen` on this PC's clock,
+  # so a heartbeat younger than (now - seen + up) is from this boot; one
+  # second is given away to rounding. Three minutes, asked every 3 s.
+  t0=$SECONDS
+  for tries in $(seq 1 60); do
+    ages=$((EPOCHSECONDS - seen + ${up%.*} - 1))
+    row="$(q node-row "name=$(nn)")" || return 1
+    IFS='|' read -r _ _ _ status age _ <<<"$row"
+    if [[ "$status" == ONLINE && "$age" =~ ^[0-9]+$ && "$age" -lt "$ages" ]]; then
+      hb=$age
+      break
+    fi
+    ((SECONDS - t0 > 180)) && break
+    sleep 3
+  done
+  if [[ -z "${hb:-}" ]]; then
+    say "no heartbeat from the agent since the reboot, in three minutes: panel status ${status:-?}, last heartbeat ${age:-never} s ago (try $tries)"
+    return 1
+  fi
+  say "the agent reported after the reboot: heartbeat $hb s ago"
 }
 ok_add_reboot() {
   expect "every check of add.verify again, on the rebooted box, and the UDP-over-TCP answer again"
@@ -1009,13 +1078,23 @@ ok_add_reboot() {
 
 # ---------------------------------------------------------------- part P: proof
 
+# 97: the scripts did not get there, so nothing was probed.
+inside_probe_one() {
+  rpushdir "$1" inside || return 97
+  printf '%s %s 2053\n%s %s 8443\n' "$id" "$NEW_IP" "$id" "$NEW_IP" | rpipe "$1" "$REMOTE_DIR/inside.sh probe"
+}
 do_add_inside_probe() {
-  local b id out port line dn up
+  local b id out port line dn up k=0 d="$RUN_DIR/at-inside-probe"
   id="$(need node_id)" || return 1
+  # Both inside boxes at once: each probes the server on its own. Read
+  # back, and decided, in this order.
+  each_at_once 2 "$d" inside_probe_one relay signin
+  dry && return 0
   for b in relay signin; do
-    rpushdir "$b" inside || return 1
-    out="$(printf '%s %s 2053\n%s %s 8443\n' "$id" "$NEW_IP" "$id" "$NEW_IP" | rpipe "$b" "$REMOTE_DIR/inside.sh probe")" || true
-    dry && continue
+    [[ "$(at_rc "$d" "$k")" == 97 ]] && { at_show "$d" "$k"; return 1; }
+    out="$(at_out "$d" "$k")"
+    cat "$d/$k.err" >&2 2>/dev/null
+    k=$((k + 1))
     while read -r line; do
       port="$(sed -n 's/.*"port":\([0-9]*\).*/\1/p' <<<"$line")"
       [[ -n "$port" ]] || continue
@@ -1029,6 +1108,7 @@ do_add_inside_probe() {
       printf '  %-7s port %-5s %-6s (down %s, up %s)\n' "$b" "$port" "$(st "inside_${b}_${port}")" "$dn" "$up"
     done <<<"$out"
   done
+  rm -rf "$d"
 }
 ok_add_inside_probe() {
   local b p held=0
@@ -1075,10 +1155,29 @@ do_add_e2e_direct() {
   pscript nx-e2e-temp.sh gen-direct "$key" "$(nn)" | sed 's/^/  /' || return 1
   rsh_to panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh adu $key" new "umask 077; mkdir -p $REMOTE_DIR; cat > $REMOTE_DIR/adu.json; /usr/local/bin/xray api adu -s 127.0.0.1:10085 $REMOTE_DIR/adu.json 2>&1 | tail -1; shred -u $REMOTE_DIR/adu.json" || return 1
   undo "the temporary users live only in the new server's running Xray; add.temp-off removes them (or: xray api rmu per user, or any Xray restart)"
-  for p in $NODE_PROTOS; do
-    out="$(rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh env $key $p | $PANEL_ENV$REMOTE_DIR/nx-e2e-run.sh $REMOTE_DIR/xray '$(nn) $p from outside'")" || true
-    dry || e2e_record "e2e_direct_$p" "$out"
+  # shellcheck disable=SC2086
+  e2e_tunnels "$RUN_DIR/at-e2e-direct" e2e_direct_one e2e_direct_ $NODE_PROTOS
+}
+e2e_direct_one() { rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh env $key $1 | $PANEL_ENV$REMOTE_DIR/nx-e2e-run.sh $REMOTE_DIR/xray '$(nn) $1 from outside'"; }
+
+# e2e_tunnels <dir> <function> <state prefix> <protocol>...: one tunnel
+# per protocol, E2E_AT_ONCE at a time on the host that dials them
+# (nx-e2e-run.sh takes its local port under a lock, across ten ports),
+# each recorded, and shown, in the protocols' order. Only tunnels with
+# the run's own temporary users go here: those are in no subscription,
+# so no device limit sees several at once.
+E2E_AT_ONCE=3
+e2e_tunnels() {
+  local d="$1" fn="$2" pre="$3" k=0 p
+  shift 3
+  each_at_once "$E2E_AT_ONCE" "$d" "$fn" "$@"
+  dry && return 0
+  for p in "$@"; do
+    cat "$d/$k.err" >&2 2>/dev/null
+    e2e_record "$pre$p" "$(at_out "$d" "$k")"
+    k=$((k + 1))
   done
+  rm -rf "$d"
 }
 ok_add_e2e_direct() {
   local p bad=0
@@ -1092,12 +1191,11 @@ do_add_e2e_inside() {
   local p out key
   key="d-$(nn)"
   rpushdir relay relay || return 1
-  for p in $NODE_PROTOS; do
-    out="$(rsh_to panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh env $key $p" relay "NX_HEALTH=https://$PANEL_ORIGIN_NAME/api $REMOTE_DIR/nx-e2e-run.sh /usr/local/bin/xray '$(nn) $p from inside'")" || true
-    dry || e2e_record "e2e_inside_$p" "$out"
-  done
+  # shellcheck disable=SC2086
+  e2e_tunnels "$RUN_DIR/at-e2e-inside" e2e_inside_one e2e_inside_ $NODE_PROTOS
   say "a temporary client beside the relay box's own Xray, which is not touched; nothing was sent to the sign-in box"
 }
+e2e_inside_one() { rsh_to panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh env $key $1" relay "NX_HEALTH=https://$PANEL_ORIGIN_NAME/api $REMOTE_DIR/nx-e2e-run.sh /usr/local/bin/xray '$(nn) $1 from inside'"; }
 ok_add_e2e_inside() {
   local p bad=0 must="REALITY SS" passed=""
   expect "from inside the country, straight to the server: REALITY and Shadowsocks pass always; the three TLS-name protocols too, unless the node zone is known to be blocked inside. When the relay box cannot reach this exit directly (bare-box test held from it, or --hop yes) nothing can pass here: the readings are shown, and the proof from inside is add.e2e-relay, through the hop"
@@ -1335,12 +1433,13 @@ ok_add_relay_routes() {
   local rows try bad
   expect "four relay routes to this exit, each asserted on both ends in the last three minutes with no error; the relay's Xray is the same process"
   [[ "$(st relay_set none)" == none ]] && ! dry && return 0
-  for try in 1 2 3 4 5 6; do
+  # Two minutes, as when it asked every 20 s: asked every 5 s.
+  for try in $(seq 1 24); do
     rows="$(q relay-asserted "name=$(nn)")" || return 1
     dry && break
     bad="$(awk -F'|' '$2 != "t" || $3 !~ /^[0-9]+$/ || $3 > 180 || $4 !~ /^[0-9]+$/ || $4 > 180 || $5 != "" || $6 != "" {n++} END {print n + 0}' <<<"$rows")"
     [[ "$(grep -c . <<<"$rows")" == 4 && "$bad" == 0 ]] && break
-    sleep 20
+    sleep 5
   done
   relay_pid_same || return 1
   dry && return 0
@@ -1385,12 +1484,11 @@ do_add_e2e_relay() {
   fi
   rsh_to panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh adu $key" relay "$REMOTE_DIR/relay.sh adu" || return 1
   undo "the temporary users live only in the relay's running Xray; this step removes them and counts them out before it ends (by hand: relay.sh rmu <tag> <email>, the pairs from nx-e2e-temp.sh rmu $key on the panel host)"
-  for p in $RELAY_PROTOS; do
-    out="$(rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh env $key $p | $PANEL_ENV$REMOTE_DIR/nx-e2e-run.sh $REMOTE_DIR/xray 'relay to $(nn) $p'")" || true
-    dry || e2e_record "e2e_relay_$p" "$out"
-  done
+  # shellcheck disable=SC2086
+  e2e_tunnels "$RUN_DIR/at-e2e-relay" e2e_relay_one e2e_relay_ $RELAY_PROTOS
   temp_users_settle "$key" relay relay_temp_before
 }
+e2e_relay_one() { rsh panel "$PANEL_ENV$REMOTE_DIR/nx-e2e-temp.sh env $key $1 | $PANEL_ENV$REMOTE_DIR/nx-e2e-run.sh $REMOTE_DIR/xray 'relay to $(nn) $1'"; }
 ok_add_e2e_relay() {
   local p bad=0
   expect "through the relay box, REALITY, VLESS-TLS, Trojan and Shadowsocks each exit on the NEW server's address with 256 KB both ways; the set's four inbounds on the relay hold exactly the users they held before the test users went in; the relay's Xray is the same process"
@@ -1731,12 +1829,13 @@ ok_add_canary_provision() {
   local out routes creds nack try
   expect "the test account holds one ACTIVE credential, issued through the canary plan, on every route of the new server the plan holds, and every command to the server is acknowledged"
   [[ "$OPT_NO_PLANS" == 1 ]] && return 0
-  for try in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  # Two minutes, as when it asked every 10 s: asked every 3 s.
+  for try in $(seq 1 40); do
     out="$(q canary-provision "name=$(nn)" "email=$(canary_email)" "plan=$(canary_plan)")" || return 1
     dry && return 0
     routes="$(sed -n 's/^routes|//p' <<<"$out")" creds="$(sed -n 's/^creds|//p' <<<"$out")" nack="$(sed -n 's/^not-acked|//p' <<<"$out")"
     [[ "${routes:-0}" -gt 0 && "$creds" == "$routes" && "$nack" == 0 ]] && break
-    sleep 10
+    sleep 3
   done
   say "routes of this server in '$(canary_plan)': $routes; the test account's credentials on them: $creds; commands not acknowledged: $nack (try $try)"
   [[ "${routes:-0}" -gt 0 && "$creds" == "$routes" && "$nack" == 0 ]]
@@ -1861,12 +1960,13 @@ ok_add_provision() {
   local out have want nack try
   expect "one shared credential per direct route for every active subscription that should have one, and every command to the new server acknowledged"
   [[ "$OPT_NO_PLANS" == 1 ]] && return 0
-  for try in 1 2 3 4 5 6 7 8; do
+  # Two minutes, as when it asked every 15 s: asked every 3 s.
+  for try in $(seq 1 40); do
     out="$(q provision "name=$(nn)")" || return 1
     dry && break
     have="$(sed -n 's/^have|//p' <<<"$out")" want="$(sed -n 's/^want|//p' <<<"$out")" nack="$(sed -n 's/^not-acked|//p' <<<"$out")"
     [[ "$have" -ge "$want" && "$want" -gt 0 && "$nack" == 0 ]] && break
-    sleep 15
+    sleep 3
   done
   rsh new "for t in vless-in vless-tls-in vless-ws-in trojan-in shadowsocks-in; do printf '%s=%s ' \$t \"\$(/usr/local/bin/xray api inboundusercount -s 127.0.0.1:10085 -tag \$t 2>/dev/null | grep -o '\"count\": *[0-9]*' | grep -o '[0-9]*\$')\"; done; echo; echo \"wg_peers=\$(wg show wg0 peers | wc -l) ccd=\$(ls /etc/openvpn/ccd 2>/dev/null | wc -l)\"" | sed 's/^/  on the server: /'
   dry && return 0
@@ -1993,18 +2093,33 @@ EOF
 }
 ok_add_owner_after() { expect "the owner has the list (printed, and in owner-todo.txt in the run directory); nothing is waited for"; return 0; }
 
-do_add_cleanup() {
-  local r
-  for r in panel relay signin new; do rclean "$r" || true; done
-  rsh new "rm -rf /root/nx-install; echo build-notes-removed" || true
+# The four hosts at once, both for the clean and for its check: they are
+# independent. Shown, and judged, in this order.
+add_cleanup_one() {
+  rclean "$1" || true
+  [[ "$1" == new ]] && { rsh new "rm -rf /root/nx-install; echo build-notes-removed" || true; }
+  return 0
 }
+do_add_cleanup() {
+  local k d="$RUN_DIR/at-cleanup-step"
+  each_at_once 4 "$d" add_cleanup_one panel relay signin new
+  dry && return 0
+  for k in 0 1 2 3; do at_show "$d" "$k"; done
+  rm -rf "$d"
+}
+add_cleanup_check_one() { rsh "$1" "test ! -e $REMOTE_DIR && echo clean"; }
 ok_add_cleanup() {
-  local r n bad=0
+  local r k=0 bad=0 d="$RUN_DIR/at-cleanup-check"
   expect "no scratch file, token or test config left on the panel host, the inside boxes or the new server; the relay's Xray is the same process as at the start"
-  for r in panel relay signin new; do
-    n="$(rsh "$r" "test ! -e $REMOTE_DIR && echo clean")" || true
-    dry || [[ "$n" == clean ]] || { say "$r still has $REMOTE_DIR"; bad=1; }
-  done
+  each_at_once 4 "$d" add_cleanup_check_one panel relay signin new
+  if ! dry; then
+    for r in panel relay signin new; do
+      cat "$d/$k.err" >&2 2>/dev/null
+      [[ "$(at_out "$d" "$k")" == clean ]] || { say "$r still has $REMOTE_DIR"; bad=1; }
+      k=$((k + 1))
+    done
+    rm -rf "$d"
+  fi
   relay_pid_same || bad=1
   return $bad
 }

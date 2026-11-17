@@ -1,0 +1,8 @@
+{
+  "name": "neoxify-fleet",
+  "private": true,
+  "description": "scripts/fleet: the server checklist tool. Its one dependency is the SSH client the run's connection helper uses (lib/ssh-hub.mjs).",
+  "dependencies": {
+    "ssh2": "1.17.0"
+  }
+}

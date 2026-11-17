@@ -195,6 +195,12 @@ jobs:
       # matching, the relay-hop file edits, and the jq that guards a
       # plan edit on the panel host (this runner has jq; the operator's
       # PC does not).
+      # The run's connection helper has one dependency, pinned with its
+      # integrity hashes; without it the transport tests skip. No install
+      # scripts and no optional native parts.
+      - name: Fleet tool's one dependency
+        run: npm ci --prefix scripts/fleet --omit=optional --ignore-scripts
+
       - name: Fleet checklists are complete, and a dry run touches nothing
         run: node --test scripts/fleet/test/*.test.mjs
 

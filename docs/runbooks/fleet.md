@@ -191,13 +191,66 @@ the go-live plan edits are not in them):
   `retire.plans` 151 s (five plans), `retire.offline` 73 s,
   `retire.hop` 69 s, `retire.relay-routes` 51 s.
 
+`add spain-1` (2026-11-16), run straight through, took 1814 s. Read from
+its run log, about 62% of that was SSH handshakes: some 480 connections
+at 2.2 to 2.6 s each (about 4 s to the inside boxes), against about
+500 s of real work and about 100 s of fixed sleeps.
+
 The installer alone is five minutes, so a whole `add` is not a
-five-minute job: about 20 to 25 minutes of steps when nothing fails,
-plus the app proof of the three protocols until those are scripted.
-Steps that could run side by side and do not yet: the five direct test
-tunnels (one after another today), the tunnels from outside and from
-inside (different hosts), the inside probe from the two inside boxes,
-the reputation and reverse-DNS readouts. Nothing runs in parallel yet.
+five-minute job. What was changed after the Spain run (2026-11-17), and
+is **not yet measured on a real add**:
+
+- **One kept connection per host** for the whole run (next section). A
+  call on a kept connection measured 1.3 s on a real server, against
+  about 2.5 s for a new connection each time.
+- **The reboot is proven, not waited out.** The step reads the boot id
+  and start time first, polls every 3 s (same 320 s ceiling) until a
+  different boot answers, waits for the system to finish starting, then
+  for a panel heartbeat newer than that boot (180 s ceiling). Before, the
+  old boot's answer was accepted. The fixed sleeps are gone.
+- **Polls ask more often, with the same ceilings:** DNS every 2 s, relay
+  routes every 5 s, heartbeats and both provision checks every 3 s, the
+  installer every 2 s.
+- **Side by side inside one step:** the access check, both inside-box
+  probes, the three cleanups, and the temporary-user test tunnels (3 at
+  a time). Tunnels on panel-issued credentials stay one at a time,
+  because of the device limit. The order of the steps is unchanged.
+
+The estimate from those numbers is 15 to 17 minutes for an `add`. It is
+an estimate: say the measured time after the next real add, and until
+then quote the Spain figure.
+
+### One kept connection per host
+
+`lib/ssh-hub.mjs` is a helper the run starts and stops. It holds one SSH
+connection per host and gives every remote call its own channel, so the
+exit status and both output streams are exactly what plain `ssh` gives
+(the tests compare them byte for byte). OpenSSH's own connection sharing
+does not work under Git Bash, and Windows' `ssh.exe` has none.
+
+- It trusts a host key only when it matches, byte for byte, what
+  `ssh-keygen -F` finds in the same known_hosts files. A first contact,
+  a changed key, or anything it cannot handle goes to plain `ssh` with
+  the same arguments.
+- It listens on loopback only. Both ends prove they hold the run's
+  random token before a command line or any input crosses; the token is
+  never on a command line or in a log.
+- A command is never sent twice. A quiet connection is checked with a
+  keepalive before it is reused; once a command may have gone out, a
+  failure is exit 255, as `ssh` reports a lost connection, not a retry.
+- **The inside boxes stay on plain `ssh`** (`FLEET_HUB_INSIDE=1` moves
+  them to the helper). The helper's SSH library has no post-quantum key
+  exchange and does not look like OpenSSH on the wire, and those paths
+  cross the restricted network. The panel host and the exits do lose the
+  post-quantum exchange on the helper.
+- `FLEET_SSH=ssh` runs everything the old way, one connection per call.
+  The tool also does that by itself when the helper cannot start, when
+  its library is missing or the wrong version, or when it dies.
+- The run log names the transport, and for each step the remote calls
+  and new connections it made.
+- After a step that touches sshd, keys or the firewall, the next call
+  is a new login on purpose: a kept connection would not prove the box
+  still takes one.
 
 ### Clean on every host, every time
 
@@ -242,6 +295,13 @@ mkdir -p ~/.neoxify && cp scripts/fleet/fleet.env.example ~/.neoxify/fleet.env
 The tool refuses to read that file from inside the repository. It needs
 `ssh`, `tar` and `node` on the PC; `jq` and `python3` are only needed on
 the hosts, which have them.
+
+Once per checkout, for the kept connections (without it the tool says
+so and runs on plain `ssh`, slower but the same):
+
+```bash
+npm ci --prefix scripts/fleet --omit=optional --ignore-scripts
+```
 
 See any checklist without touching anything:
 

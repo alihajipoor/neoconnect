@@ -244,7 +244,11 @@ refuse_unproven() { # <what is refused> <the unproven step ids, one per line>
 # printed and kept in the run directory (one line per try, every pass).
 step_end() {
   local s=$((SECONDS - $3))
-  echo "  took ${s}s"
+  # The remote calls and new connections the step made (lib/remote.sh,
+  # when it is loaded): where the time of a real run went.
+  TRANSPORT_NOTE=""
+  declare -F transport_step_end >/dev/null && transport_step_end "$1"
+  echo "  took ${s}s${TRANSPORT_NOTE}"
   dry || printf '%s|%s|%s|%s\n' "$1" "$2" "$s" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$RUN_DIR/timings"
 }
 
@@ -323,6 +327,7 @@ run_checklist() {
     fi
 
     t0=$SECONDS
+    declare -F transport_step_begin >/dev/null && transport_step_begin
     if [[ -n "${STEP_PRIOR[$id]:-}" ]]; then
       miss="$(unproven "$id")"
       if [[ -n "$miss" ]]; then

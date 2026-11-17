@@ -63,8 +63,36 @@ rsh() {
     [[ "${T_SSH:-ok}" == ok ]]
     return
   fi
+  # The access check: T_ACCESS_FAIL names a role that refuses the key.
+  if [[ "$2" == true && "$1" == "${T_ACCESS_FAIL:-none}" ]]; then return 255; fi
   # What the new box answers, for add.dest and add.image.
   case "$2" in
+    # The bare-box probe from an inside box: T_PROBE_<BOX> is its lines.
+    *"inside.sh bare"*)
+      local pv="T_PROBE_${1^^}"
+      printf '%s\n' "${!pv:-443 PASS 262144/262144}"
+      ;;
+    # A tunnel of the run's temporary users: T_E2E_FAIL is the one
+    # protocol whose tunnel fails.
+    *nx-e2e-run.sh*)
+      local label
+      label="$(sed -n "s/.*nx-e2e-run.sh [^ ]* '\([^']*\)'.*/\1/p" <<<"$2")"
+      if [[ -n "${T_E2E_FAIL:-}" && "$label" == *" $T_E2E_FAIL "* ]]; then
+        printf '%s\n' "$label | EXIT-NONE | down 000 0B 10.0s | up 000 0B 10.0s" "E2E-FAIL $label"
+      else
+        printf '%s\n' "$label | EXIT-MATCH | down 200 262144B 0.5s | up 200 262144B 0.5s" "E2E-PASS $label"
+      fi
+      ;;
+    # Which boot answers (add.reboot): "<boot id> <btime> <uptime>", the
+    # first read T_BOOT_BEFORE, every later one T_BOOT_AFTER.
+    *random/boot_id*)
+      if [[ ! -e "$RUN_DIR/boot-read" ]]; then
+        : >"$RUN_DIR/boot-read"
+        echo "${T_BOOT_BEFORE:-aaaa 1000 900.25}"
+      else
+        echo "${T_BOOT_AFTER:-bbbb 2000 30.5}"
+      fi
+      ;;
     *reality-dest-audit.sh*) echo "${T_AUDIT:-OK    www.example.org             AS64500 EXAMPLE in ZZ}" ;;
     *"agent.json && echo enrolled"*) echo "${T_ENROLLED:-}" ;;
     *"provider-image.sh"*) printf '%s\n' "${T_IMAGE:-ok      ufw: not active, none of its chains loaded}" ;;
@@ -151,7 +179,17 @@ node_field() {
 }
 q() {
   case "$1" in
-    node-row) echo "${T_NODE_ROW:-}" ;;
+    # T_HB_AGO: the last heartbeat came that many seconds before the first
+    # read, and none since: its age grows as the clock does, as the
+    # panel's would.
+    node-row)
+      if [[ -n "${T_HB_AGO:-}" ]]; then
+        [[ -e "$RUN_DIR/hb-at" ]] || echo $((EPOCHSECONDS - T_HB_AGO)) >"$RUN_DIR/hb-at"
+        echo "id-1|STANDALONE|de-germany|ONLINE|$((EPOCHSECONDS - $(cat "$RUN_DIR/hb-at")))|v1|t|www.example.org:443|t|t"
+      else
+        echo "${T_NODE_ROW:-}"
+      fi
+      ;;
     plan-holds) echo "${T_PLAN_HOLDS:-Pro|0|f|8}" ;;
     provision) printf 'have|%s\nwant|0\nnot-acked|0\n' "${T_HAVE:-0}" ;;
     route-ids) echo "${T_ROUTE_IDS:-}" ;;

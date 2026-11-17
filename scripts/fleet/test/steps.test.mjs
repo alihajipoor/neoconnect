@@ -329,6 +329,76 @@ describe("add.hop, run again after it stopped halfway", () => {
   });
 });
 
+// Review finding: the reboot step took any answer for the rebooted box
+// (sshd of the old boot can answer for seconds after the command, and a
+// refused reboot answers forever), and the panel's 90 s heartbeat check
+// could pass on a heartbeat from before the reboot.
+describe("add.reboot: a new boot, then a heartbeat from it", () => {
+  const row = (status, age) => `id-1|STANDALONE|de-germany|${status}|${age}|v1|t|www.example.org:443|t|t`;
+  it("passes on a new boot id with a later start, and a heartbeat younger than the new boot", () => {
+    const r = run("do_add_reboot", { T_NODE_ROW: row("ONLINE", 4) });
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /rebooted: a new boot, up 30 s/);
+    assert.match(r.out, /the agent reported after the reboot: heartbeat 4 s ago/);
+    assert.match(calls(), /random\/boot_id[\s\S]*systemctl reboot[\s\S]*random\/boot_id[\s\S]*is-system-running --wait/);
+  });
+  it("fails when the same boot keeps answering: the reboot never happened", () => {
+    const r = run("do_add_reboot", { T_BOOT_AFTER: "aaaa 1000 960.0", T_NODE_ROW: row("ONLINE", 4) });
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /never rebooted: the same boot as before the command/);
+    assert.doesNotMatch(r.out, /agent reported/);
+  });
+  it("a different id with no later start is not taken for a reboot", () => {
+    const r = run("do_add_reboot", { T_BOOT_AFTER: "bbbb 1000 30.5", T_NODE_ROW: row("ONLINE", 4) });
+    assert.equal(r.code, 1, r.out);
+  });
+  it("fails on a heartbeat older than the new boot, which the 90 s check alone would have passed", () => {
+    // Up 30 s: a heartbeat 45 s old is from before this boot, and stays so
+    // however long the step waits.
+    const r = run("do_add_reboot", { T_HB_AGO: "45" });
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /no heartbeat from the agent since the reboot/);
+  });
+  it("fails while the panel has the server offline", () => {
+    const r = run("do_add_reboot", { T_NODE_ROW: row("OFFLINE", 2) });
+    assert.equal(r.code, 1, r.out);
+  });
+});
+
+// The same work for several hosts, or several tunnels on one host, now
+// runs at once inside a step. What the step decides and prints must be
+// what it was one after another: each result under its own name, in the
+// same order.
+describe("work done at once inside a step", () => {
+  it("add.access: every host tried, the one refusing named, in order", () => {
+    const r = run("do_pre_access", { T_ACCESS_FAIL: "signin" });
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /panel: key-only access works[\s\S]*relay: key-only access works[\s\S]*signin: NO key-only access[\s\S]*new: key-only access works/);
+    assert.equal(stateOf("access"), undefined);
+    assert.equal(run("do_pre_access").code, 0);
+    assert.equal(stateOf("access"), "ok");
+  });
+  it("pre.probe: both boxes probed, each reading kept under its own box, relay's printed first", () => {
+    const r = run("do_pre_probe", { T_PROBE_RELAY: "443 PASS a\n2053 HELD b\n8443 PASS c", T_PROBE_SIGNIN: "443 CLOSED d\n2053 PASS e\n8443 PASS f" });
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(
+      ["relay_443", "relay_2053", "relay_8443", "signin_443", "signin_2053", "signin_8443"].map((k) => stateOf(`pre_${k}`)),
+      ["PASS", "HELD", "PASS", "CLOSED", "PASS", "PASS"],
+    );
+    assert.match(r.out, /relay +port 8443[\s\S]*signin +port 443 /);
+  });
+  it("tunnels a few at a time: one failure among five is that protocol's alone", () => {
+    const r = spawnSync(BASH, [HARNESS, "eval", "key=d-germany-4; e2e_tunnels \"$RUN_DIR/at-t\" e2e_direct_one e2e_direct_ REALITY TLS WS TROJAN SS"], {
+      encoding: "utf8",
+      env: { ...process.env, T_RUN: dir, T_FIX: fix, T_E2E_FAIL: "WS" },
+    });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(["REALITY", "TLS", "WS", "TROJAN", "SS"].map((p) => stateOf(`e2e_direct_${p}`)), ["pass", "pass", "fail", "pass", "pass"]);
+    assert.match(r.stdout, /REALITY from outside \| EXIT-MATCH[\s\S]*TLS[\s\S]*WS from outside \| EXIT-NONE[\s\S]*TROJAN[\s\S]*SS from outside \| EXIT-MATCH/);
+    assert.equal((calls().match(/nx-e2e-run\.sh/g) || []).length, 5, "each tunnel dialled once");
+  });
+});
+
 describe("retire.reach: when is a server gone?", () => {
   const row = (status, age) => `id-1|STANDALONE|de-germany|${status}|${age}|v1|t|www.example.org:443|t|t`;
   beforeEach(() => fixtures({}));
