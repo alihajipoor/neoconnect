@@ -2,7 +2,6 @@ import { load, type Store } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
 import { exitsForGames, groupMembers, type GameExitGroup } from "./game-apps";
 import { CUSTOM_MODE_CHANGE_CAP_MS, statusDisturbances } from "./status-disturbance";
-import { supportsGameCatalogue } from "./desktop-platform";
 
 /** Custom mode: route only the chosen applications through the tunnel.
  *
@@ -311,9 +310,13 @@ export async function pushSplitTunnel(
     // asks `exitsForGames` for the same answer when the selection
     // changes, which is when they are.
     //
-    // None where there is no game catalogue (Linux): a game group saved
-    // there could only have come from a file this build did not write.
-    exits: supportsGameCatalogue() ? exitsForGames(settings.games, settings.apps).exits : [],
+    // This line is what scripts/check-exit-groups.sh looks for, word for
+    // word, so it is the same on every platform. Linux has no game
+    // catalogue and writes no game group; if one arrives from a copied
+    // settings file, the Linux helper accepts and ignores `exits`
+    // (apps/desktop-linux/helper/src/custom.rs), and the Dashboard never
+    // asks for a second exit there.
+    exits: exitsForGames(settings.games, settings.apps).exits,
     // The other half of the comparison, and the reason it travels with
     // the selection rather than separately: two values that have to
     // agree should not be able to arrive out of step.

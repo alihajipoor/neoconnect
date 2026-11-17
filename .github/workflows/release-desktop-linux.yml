@@ -59,13 +59,14 @@ jobs:
       # 4.1 and GTK for the window, rpm so the bundler can write the .rpm at
       # all, and patchelf and file for the bundler's own steps. unzip and
       # curl are for fetch-binaries, which downloads the pinned Xray build.
-      # minisign checks the updater signatures with a tool that is not ours.
+      # (minisign, which checks the updater signatures with a tool that is
+      # not ours, has no package on 22.04: see the signing step.)
       - name: Install build packages
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev \
-            pkg-config build-essential file rpm patchelf unzip curl minisign
+            pkg-config build-essential file rpm patchelf unzip curl
 
       # Without the key the packages would build and publish unsigned, and
       # every 0.2.0 app would be offered an update it can only open a web
@@ -190,10 +191,19 @@ jobs:
           for pkg in "$out"/*.deb "$out"/*.rpm; do
             pnpm exec tauri signer sign "$pkg"
             test -s "$pkg.sig"
-            base64 -d "$pkg.sig" > "$keydir/minisig"
-            minisign -V -q -p "$keydir/updater.pub" -x "$keydir/minisig" -m "$pkg"
-            echo "signed and verified: $(basename "$pkg")"
+            base64 -d "$pkg.sig" > "$keydir/$(basename "$pkg").minisig"
           done
+          # Ubuntu 22.04, which the packages have to be built on, has no
+          # minisign package; 24.04 has. A throwaway container gets the
+          # packages and the public key read-only, and no environment of
+          # this job: the signing key never enters it.
+          docker run --rm -v "$out:/pkgs:ro" -v "$keydir:/keys:ro" ubuntu:24.04 bash -euc '
+            apt-get update -qq >/dev/null
+            apt-get install -y -qq --no-install-recommends minisign >/dev/null
+            for pkg in /pkgs/*.deb /pkgs/*.rpm; do
+              minisign -V -q -p /keys/updater.pub -x "/keys/$(basename "$pkg").minisig" -m "$pkg"
+              echo "signed and verified: $(basename "$pkg")"
+            done'
           rm -rf "$keydir"
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

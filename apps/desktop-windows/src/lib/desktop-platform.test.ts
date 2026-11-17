@@ -233,12 +233,14 @@ describe("the guarded call sites", () => {
     expect(source("./linux-update.ts")).not.toMatch(/plugin-updater/);
   });
 
-  it("the Dashboard sends no per-game exits where there is no catalogue", () => {
+  it("the Dashboard asks for no second exit where there is no catalogue, and the wire is filled as on Windows", () => {
     expect(dash).toContain("const concurrent = splitTunnelSettings && supportsGameCatalogue()");
     expect(dash).toMatch(/if \(splitTunnelSettings && supportsGameCatalogue\(\)\) \{\s+await pushSplitTunnel\(/);
-    expect(source("./split-tunnel.ts")).toContain(
-      "exits: supportsGameCatalogue() ? exitsForGames(settings.games, settings.apps).exits : []",
-    );
+    // The exits on the wire come from exitsForGames and nowhere else, on
+    // every platform: scripts/check-exit-groups.sh fails the build on any
+    // other spelling of this line. The Linux helper ignores them.
+    expect(source("./split-tunnel.ts")).toContain("exits: exitsForGames(settings.games, settings.apps).exits,");
+    expect(source("./split-tunnel.ts")).not.toContain("supportsGameCatalogue");
   });
 
   it("the Dashboard sends no split-tunnel, gaming or probe request without the feature, and offers no repair", () => {
