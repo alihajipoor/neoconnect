@@ -239,8 +239,15 @@ export function CustomModeCard() {
       // Naming one here would be guessing, and the service reports a
       // preference it cannot compare as unknown, which is true.
       await pushSplitTunnel(next);
-    } catch {
+    } catch (error) {
       // The service may not be running yet; connect re-sends anyway.
+      // On Linux an OpenVPN session cannot switch Custom mode on or off in
+      // place: the helper keeps the new choice for the next connect and
+      // the live tunnel keeps the old one. Said, so the switch does not
+      // show a state the connection is not in.
+      if (isLinux() && String(error).includes("needs a reconnect")) {
+        setNotice(t("settings.customAppliesOnReconnect"));
+      }
     }
     // The selection just changed, so which programs the service can
     // answer for changed with it.

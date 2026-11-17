@@ -287,13 +287,21 @@ pub fn running_processes(uid: u32) -> Vec<Running> {
     sorting::running(uid)
 }
 
-/// Put a process and everything it has started into the control group
-/// whose sockets the reconnect hold lets through, and return the group's
-/// path relative to the cgroup root (what `netguard::HoldPlan::app_group`
-/// takes). The helper calls this for the app itself when a hold is
-/// wanted. Programs started later by the app inherit the group.
+/// Put a process and its own helper processes (its web view's) into the
+/// control group whose sockets the reconnect hold lets through, and return
+/// the group's path relative to the cgroup root (what
+/// `netguard::HoldPlan::app_group` takes). The helper calls this for the
+/// app itself when a hold is wanted. Programs started later by the app
+/// inherit the group, which is why the app opens links in a scope of its own.
 pub fn adopt_app(pid: u32) -> Result<String, String> {
     sorting::adopt_app(pid)
+}
+
+/// The user a session belongs to: Custom mode sorts only that user's
+/// programs. `None` or root sorts every matching program, for root's own
+/// tools.
+pub fn set_session_owner(uid: Option<u32>) {
+    sorting::set_owner(uid)
 }
 
 /// Is there a way out to the internet for this profile's server right

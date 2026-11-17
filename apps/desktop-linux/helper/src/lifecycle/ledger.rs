@@ -41,6 +41,18 @@ pub struct GuardFacts {
     pub problem: Option<String>,
 }
 
+/// What the owning thread last read back about Custom mode, for a status
+/// answered without it. Saying "not active" there instead was a claim
+/// nobody had checked: in the VM a status answered while the owning
+/// thread was busy for a second told the app Custom mode had stopped
+/// intercepting in the middle of a session that was sorting correctly.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SplitFacts {
+    pub active: bool,
+    pub problem: Option<(String, neoconnect_ipc::SplitTunnelProblemCode)>,
+    pub restart_needed: Vec<String>,
+}
+
 #[derive(Default)]
 struct LedgerState {
     /// The session that is live, or 0 when none is.
@@ -53,6 +65,8 @@ struct LedgerState {
     ended: Option<Ended>,
     /// The live session's leak protection, and the generation it is for.
     guard: Option<(u64, GuardFacts)>,
+    /// The live session's Custom mode as last read, and its generation.
+    split: Option<(u64, SplitFacts)>,
 }
 
 pub struct Ledger {
@@ -113,6 +127,7 @@ impl Ledger {
         state.latest = generation;
         state.ended = None;
         state.guard = None;
+        state.split = None;
         generation
     }
 
@@ -124,6 +139,7 @@ impl Ledger {
         if state.live == generation {
             state.live = 0;
             state.guard = None;
+            state.split = None;
         }
     }
 
@@ -185,6 +201,25 @@ impl Ledger {
     pub fn guard(&self) -> Option<GuardFacts> {
         let state = self.state();
         match &state.guard {
+            Some((generation, facts)) if *generation == state.live && state.live != 0 => Some(facts.clone()),
+            _ => None,
+        }
+    }
+
+    /// Notes what the owning thread just read back about the live
+    /// session's Custom mode (`None`: not in Custom mode). Ignored for a
+    /// generation that is not the live one.
+    pub fn note_split(&self, generation: u64, facts: Option<SplitFacts>) {
+        let mut state = self.state();
+        if generation != 0 && state.live == generation {
+            state.split = facts.map(|f| (generation, f));
+        }
+    }
+
+    /// The live session's Custom mode as the owning thread last read it.
+    pub fn split(&self) -> Option<SplitFacts> {
+        let state = self.state();
+        match &state.split {
             Some((generation, facts)) if *generation == state.live && state.live != 0 => Some(facts.clone()),
             _ => None,
         }
@@ -267,6 +302,25 @@ mod tests {
         ledger.close(g);
         assert_eq!(ledger.guard(), None);
         assert_eq!(ledger.live_protocol(), None);
+    }
+
+    #[test]
+    fn custom_modes_last_reading_belongs_to_the_live_session_only() {
+        let ledger = Ledger::new();
+        let g = ledger.begin("IKEV2");
+        let facts = SplitFacts { active: true, problem: None, restart_needed: vec!["firefox".into()] };
+        ledger.note_split(g + 1_000_000, Some(facts.clone()));
+        assert_eq!(ledger.split(), None, "another generation's reading was taken");
+        ledger.note_split(g, Some(facts.clone()));
+        assert_eq!(ledger.split(), Some(facts.clone()));
+        ledger.note_split(g, None);
+        assert_eq!(ledger.split(), None, "Custom mode turned off");
+        ledger.note_split(g, Some(facts));
+        ledger.close(g);
+        assert_eq!(ledger.split(), None);
+        let next = ledger.begin("IKEV2");
+        assert_eq!(ledger.split(), None, "a new session starts with no reading");
+        ledger.close(next);
     }
 
     #[test]

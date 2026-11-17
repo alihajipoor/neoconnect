@@ -126,6 +126,13 @@ pub fn covers(profile: &ConnectProfile, split: bool) -> bool {
 pub struct Arming {
     pub ifaces: Vec<String>,
     pub servers: Vec<Ipv4Addr>,
+    /// The machine's own resolvers as read when the session was armed.
+    /// They stand in when a read at the drop finds none: an uplink that
+    /// went away takes its DNS servers with it, and with none to name the
+    /// hold would open port 53 to anywhere -- the proof's capture saw an
+    /// ordinary program's lookups to any server leave the uplink in the
+    /// clear from the moment the uplink came back until the reconnect.
+    pub resolvers: Vec<IpAddr>,
 }
 
 /// Why a hold is let go of.
@@ -301,6 +308,11 @@ impl Hold {
                 state.table = Table::Nothing;
                 if state.holding {
                     crate::say!("neoxify-helper: the tunnel that came up under the hold could not be confined, so nothing is held over it");
+                    // No table of ours stands now, so the hold is let go of
+                    // and says why: still reporting it held would tell the
+                    // app the internet is blocked when nothing blocks it.
+                    let detail = format!("the tunnel came back but its leak protection would not go in: {err}");
+                    self.let_go_locked(state, Release::Failed(ReconnectHoldProblem::FiltersRefused, detail));
                 }
                 Err(err)
             }
@@ -642,6 +654,15 @@ impl Hold {
                 plan.servers.push(*server);
             }
         }
+        // Only where the plan names none: what `refreshed` falls back on
+        // when the machine shows none now.
+        if plan.resolvers.is_empty() {
+            for r in &arming.resolvers {
+                if plan.resolvers.len() < MAX_RESOLVERS && !r.is_unspecified() && !r.is_loopback() && !plan.resolvers.contains(r) {
+                    plan.resolvers.push(*r);
+                }
+            }
+        }
         plan.engine_fwmark = Some(WIREGUARD_MARK);
         plan
     }
@@ -684,6 +705,9 @@ fn widen(mut arming: Arming, before: &Arming) -> Arming {
         if !arming.servers.contains(s) && arming.servers.len() < MAX_NODES {
             arming.servers.push(*s);
         }
+    }
+    if arming.resolvers.is_empty() {
+        arming.resolvers = before.resolvers.clone();
     }
     arming
 }

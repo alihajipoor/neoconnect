@@ -295,3 +295,94 @@ pub fn programs(dirs: &Dirs) -> Vec<(String, bool)> {
     }
     out
 }
+
+/// The first line the tunnel writes into `/etc/resolv.conf` when it takes
+/// the machine's DNS that way (`tunnel`'s `dns.rs`), and where it keeps
+/// what the file said before (`Dirs::state`).
+const OUR_RESOLV_CONF: &str = "# Written by Neoxify while connected";
+const RESOLV_CONF_BACKUP: &str = "/var/lib/neoxify/resolv.conf.backup";
+
+/// The machine's own resolvers, for the reconnect hold to let lookups
+/// through to: never a tunnel's. netguard reads them from resolv.conf and
+/// from resolved's list of upstream servers, and while a tunnel of ours
+/// stands both name the tunnel's resolver too -- resolved lists every
+/// link's servers, and in resolv.conf mode the file is ours until the
+/// thorough half of a stop puts it back. A hold goes in before the tunnel
+/// it holds for is taken down, so read that way it let an ordinary
+/// program's lookups to the tunnel's resolver (1.1.1.1) out of the uplink
+/// in the clear after a reconnect's teardown: the proof's capture caught
+/// one. A look that fails falls back to netguard's reading.
+pub fn own_resolvers() -> Vec<std::net::IpAddr> {
+    let etc = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    if etc.starts_with(OUR_RESOLV_CONF) {
+        if let Ok(backup) = std::fs::read_to_string(RESOLV_CONF_BACKUP) {
+            return servers_in(backup.lines().filter_map(|l| l.trim().strip_prefix("nameserver")));
+        }
+    }
+    let managed_by_resolved = Path::new(RESOLVED_SOCKET).exists()
+        && (etc.lines().any(|l| matches!(l.split_whitespace().nth(1), Some("127.0.0.53" | "127.0.0.54")))
+            || std::fs::read_link("/etc/resolv.conf").is_ok_and(|t| t.starts_with("/run/systemd/resolve")));
+    if managed_by_resolved {
+        if let Ok(out) = run("resolvectl", &["dns"], LOOK_WAIT) {
+            if out.status.success() {
+                return resolved_servers_not_ours(&String::from_utf8_lossy(&out.stdout));
+            }
+        }
+    }
+    neoxify_netguard::machine_resolvers()
+}
+
+/// From `resolvectl dns`: the global servers and every link's, except the
+/// links that are tunnels of ours (IKEv2's is `ipsecN`).
+pub fn resolved_servers_not_ours(text: &str) -> Vec<std::net::IpAddr> {
+    servers_in(text.lines().filter_map(|line| {
+        let (label, servers) = line.split_once(':')?;
+        let name = label.split_once('(').and_then(|(_, rest)| rest.strip_suffix(')'));
+        let ours = name.is_some_and(|n| OUR_LINKS.contains(&n) || n.starts_with("ipsec"));
+        (!ours).then_some(servers)
+    }))
+}
+
+/// Addresses in lists of servers as resolv.conf and resolvectl write them:
+/// "1.1.1.1#name" (a name for TLS), "fe80::1%2" (a scope), "[::1]:53".
+/// Loopback and anything that is not an address are left out.
+fn servers_in<'a>(lists: impl Iterator<Item = &'a str>) -> Vec<std::net::IpAddr> {
+    let mut out = Vec::new();
+    for word in lists.flat_map(str::split_whitespace) {
+        let word = word.strip_prefix('[').map_or(word, |w| w.split(']').next().unwrap_or(w));
+        let word = word.split('#').next().unwrap_or(word).split('%').next().unwrap_or(word);
+        if let Ok(ip) = word.parse::<std::net::IpAddr>() {
+            if !ip.is_loopback() && !ip.is_unspecified() && !out.contains(&ip) {
+                out.push(ip);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tunnels_own_resolver_is_never_the_machines() {
+        let text = "Global: 192.0.2.53\nLink 2 (enp0s3): 198.51.100.1 198.51.100.2#dns.example.com fe80::1%2\n\
+                    Link 7 (neoconnect0): 1.1.1.1\nLink 8 (neoxify-wg): 192.0.2.99\nLink 9 (ipsec0): 192.0.2.98\nLink 3 (wlan0):\n";
+        let got: Vec<String> = resolved_servers_not_ours(text).iter().map(|ip| ip.to_string()).collect();
+        assert_eq!(got, ["192.0.2.53", "198.51.100.1", "198.51.100.2", "fe80::1"]);
+    }
+
+    #[test]
+    fn the_machines_resolver_is_kept_when_it_is_also_the_tunnels() {
+        let text = "Global:\nLink 2 (enp0s3): 1.1.1.1\nLink 7 (neoconnect0): 1.1.1.1\n";
+        let got: Vec<String> = resolved_servers_not_ours(text).iter().map(|ip| ip.to_string()).collect();
+        assert_eq!(got, ["1.1.1.1"]);
+    }
+
+    #[test]
+    fn servers_are_read_in_every_form_they_are_written() {
+        let got: Vec<String> =
+            servers_in([" 192.0.2.1", " [2001:db8::1]:53 127.0.0.53 bogus"].into_iter()).iter().map(|ip| ip.to_string()).collect();
+        assert_eq!(got, ["192.0.2.1", "2001:db8::1"]);
+    }
+}

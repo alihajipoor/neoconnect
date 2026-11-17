@@ -15,7 +15,7 @@ use crate::backend::{transport, Backend};
 use crate::hold::{self, Arming, Hold, Release, LET_GO_SAID_WITHIN};
 use crate::lifecycle::budget::{ABANDONED, CONNECT_BUDGET};
 use crate::lifecycle::cancel::CancelToken;
-use crate::lifecycle::ledger::{GuardFacts, Ledger};
+use crate::lifecycle::ledger::{GuardFacts, Ledger, SplitFacts};
 use crate::lifecycle::teardown::{self, HardStopReport, HardStopSteps};
 use crate::traffic::{Counters, Meter};
 
@@ -197,7 +197,9 @@ impl Session {
         let mut servers = self.known.clone();
         servers.extend(up.transports.iter().map(|t| t.ip));
         servers.extend(dialled);
-        let arming = Arming { ifaces: up.ifaces.clone(), servers };
+        // Read with the tunnel up, which `machine_resolvers` leaves out.
+        let resolvers = if hold::covers(profile, split) { self.backend.machine_resolvers() } else { Vec::new() };
+        let arming = Arming { ifaces: up.ifaces.clone(), servers, resolvers };
         let holdable = hold::covers(profile, false);
         if holdable && !split {
             self.hold.arm(generation, arming.clone());
@@ -322,7 +324,14 @@ impl Session {
             return Ok(());
         }
         let limits = Limits { deadline: Instant::now() + RESHAPE_BUDGET, cancel: token.flag() };
-        live.tunnel.reshape(&shape, &limits).map_err(|p| p.to_string())?;
+        if let Err(problem) = live.tunnel.reshape(&shape, &limits) {
+            // The live tunnel keeps its earlier shape, but the next connect
+            // takes the new one: OpenVPN answers a switch between the full
+            // tunnel and Custom mode with "needs a reconnect", and without
+            // this the reconnect it asks for came back up in the old shape.
+            self.shape = shape;
+            return Err(problem.to_string());
+        }
         let now_split = shape.is_split();
         self.shape = shape;
         if live.split == now_split {
@@ -504,6 +513,14 @@ impl Session {
             if health != TunnelHealth::Down {
                 let traffic = live.tunnel.counters().map(|(rx, tx)| live.meter.read(now, Counters { rx, tx }));
                 let split = live.tunnel.split();
+                self.ledger.note_split(
+                    live.generation,
+                    split.as_ref().map(|s| SplitFacts {
+                        active: s.active,
+                        problem: s.problem.clone(),
+                        restart_needed: s.restart_needed.clone(),
+                    }),
+                );
                 let (problem, code) = match split.as_ref().and_then(|s| s.problem.clone()) {
                     Some((sentence, code)) => (Some(sentence), Some(code)),
                     None => (None, None),

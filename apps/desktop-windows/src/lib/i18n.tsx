@@ -380,6 +380,9 @@ const en = {
   // customer clicked a Persian button and got an English dropdown.
   "settings.customFileFilter": "Programs",
   "settings.customPickFile": "Browse for a program",
+  // Linux, OpenVPN: switching Custom mode on or off takes a reconnect, and
+  // until then the connection keeps the earlier setting.
+  "settings.customAppliesOnReconnect": "This change takes effect when you reconnect. Until then the connection keeps its earlier setting.",
   "settings.customRunningTitle": "Running apps",
   "settings.customRunningEmpty": "Nothing to show. Try browsing for the program instead.",
   "settings.customSearchEmpty": "No app matches that.",
@@ -1853,6 +1856,7 @@ const fa: Record<TranslationKey, string> = {
   "settings.customPickRunning": "انتخاب از برنامه‌های باز",
   "settings.customFileFilter": "برنامه‌ها",
   "settings.customPickFile": "پیدا کردن فایل برنامه",
+  "settings.customAppliesOnReconnect": "این تغییر بعد از اتصال دوباره اعمال می‌شود. تا آن موقع اتصال با تنظیم قبلی ادامه می‌دهد.",
   "settings.customRunningTitle": "برنامه‌های باز",
   "settings.customRunningEmpty": "چیزی برای نمایش نیست. فایل برنامه را خودتان پیدا کنید.",
   "settings.customSearchEmpty": "برنامه‌ای با این نام پیدا نشد.",

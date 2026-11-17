@@ -112,8 +112,10 @@ impl Backend for System {
         neoxify_netguard::apply_hold(plan)
     }
 
+    // Not netguard's reading alone: that names the tunnel's own resolver
+    // while a tunnel of ours stands (`machine::own_resolvers`).
     fn machine_resolvers(&self) -> Vec<IpAddr> {
-        neoxify_netguard::machine_resolvers()
+        crate::machine::own_resolvers()
     }
 
     fn adopt_app(&self, pid: u32) -> Result<String, String> {

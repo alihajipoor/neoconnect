@@ -28,6 +28,7 @@ mod apps;
 mod autostart;
 mod linux_requests;
 mod notify;
+mod opener_scope;
 mod update;
 mod vpn;
 
@@ -66,6 +67,9 @@ fn webview_version(state: tauri::State<WebviewVersion>) -> Option<String> {
 }
 
 pub fn run() {
+    // First, while this is the only thread: it changes PATH, so that what
+    // the app opens is not let through the reconnect hold with it.
+    opener_scope::install();
     let launch_url = std::env::args().find(|a| a.starts_with("neoconnect://"));
     let webview = tauri::webview_version().ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
 

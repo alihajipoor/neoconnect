@@ -121,6 +121,13 @@ pub(crate) fn ruleset(mode: Mode, plan: &Plan) -> String {
     }
     s += "\t\tip daddr @servers return\n";
     s += "\t\tip daddr { 224.0.0.0/4, 255.255.255.255 } return\n";
+    // A packet the kernel sends for a connection on its own, with no
+    // socket behind it -- the reset answering a late segment after the
+    // program closed -- belongs to no control group, so it would take the
+    // main table: out of the uplink, carrying the tunnel's address and
+    // naming the destination (seen in the VM's capture). It goes the way
+    // its connection was sorted instead.
+    s += &format!("\t\tct mark {{ {APP_MARK}, {DNS_MARK} }} meta mark set ct mark return\n");
     s += &format!(
         "\t\tmeta nfproto ipv4 meta l4proto {{ tcp, udp }} th dport 53 meta mark set {DNS_MARK} ct mark set {DNS_MARK} return\n"
     );
@@ -279,6 +286,10 @@ impl Split {
             return Err(Problem::EngineMissing("nft".into()));
         }
         sorting::ensure_group(SPLIT_GROUP).map_err(Problem::Failed)?;
+        // Before this session's rules go in: anything an earlier session or
+        // a crashed helper left in the group would be routed as one of this
+        // session's chosen apps.
+        sorting::evict_all();
 
         let mut split = Split {
             mode,
@@ -840,6 +851,8 @@ mod tests {
             let apps = s.find("meta mark set 28281").unwrap();
             assert!(dns < apps, "{mode:?}: a lookup is a lookup before it is an app's packet");
             assert!(s.find("ip daddr @servers return").unwrap() < dns, "the engine's own traffic is never moved");
+            let restore = s.find("ct mark { 28281, 28282 } meta mark set ct mark return").unwrap();
+            assert!(restore < dns, "{mode:?}: a packet with no socket goes the way its connection was sorted");
             assert!(s.contains("oifname { \"lo\", \"neoconnect0\" } accept"));
             assert!(s.contains("meta l4proto { tcp, udp } th dport 53 drop"));
             assert!(s.contains("type filter hook postrouting priority filter"), "judged after re-routing");

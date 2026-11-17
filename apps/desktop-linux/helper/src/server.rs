@@ -286,6 +286,10 @@ async fn handle_connection(stream: UnixStream, shared: Shared) -> std::io::Resul
                     Some(refusal) => refusal,
                     None => dispatch(request, &shared, &caller).await,
                 },
+                Ok(request) if changes_the_session(&request) => match not_the_owner(&shared, &caller) {
+                    Some(refusal) => refusal,
+                    None => dispatch(request, &shared, &caller).await,
+                },
                 Ok(request) => dispatch(request, &shared, &caller).await,
                 Err(err) => Response::Error { message: malformed(&err) },
             };
@@ -323,11 +327,43 @@ pub(crate) fn claim_session(shared: &Shared, caller: &Caller, pinned: &mut Optio
             return Some(Response::Error { message: ANOTHER_USERS_SESSION.to_string() });
         }
         *owner = Some(Owner { uid, pid });
+        // Custom mode sorts this user's programs and nobody else's.
+        neoxify_tunnel::set_session_owner(Some(uid));
     }
     if let Some(watch) = pinned.take().filter(|w| Some(w.pid) == pid) {
         watch_the_app(shared, watch);
     }
     None
+}
+
+/// The requests that change or end a session in place. Each is refused
+/// to another user while a session stands, as a Connect is: otherwise a
+/// second account could turn off the owner's reconnect hold, reshape their
+/// Custom mode, or tear their tunnel down while the owner is told it holds.
+pub(crate) fn changes_the_session(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Disconnect
+            | Request::DisconnectForReconnect
+            | Request::SetSplitTunnel { .. }
+            | Request::SetReconnectHold { .. }
+            | Request::ReleaseReconnectHold
+            | Request::ProbeSplitTunnel
+            | Request::Repair
+    )
+}
+
+/// The refusal for a caller who is not the standing session's owner, or
+/// `None` when they may go ahead: no session standing, their own, or root's
+/// own tools.
+pub(crate) fn not_the_owner(shared: &Shared, caller: &Caller) -> Option<Response> {
+    let Caller::App { uid, .. } = caller else { return None };
+    // A hold being held stands for the owner's session too: it is their
+    // drop that the internet is blocked over.
+    let session_standing =
+        shared.ledger.live_protocol().is_some() || shared.ledger.is_connecting() || shared.hold.holding();
+    let someone_else = shared.owner().is_some_and(|o| o.uid != *uid);
+    (session_standing && someone_else).then(|| Response::Error { message: ANOTHER_USERS_SESSION.to_string() })
 }
 
 fn trim(line: &[u8]) -> &[u8] {
@@ -443,15 +479,30 @@ async fn status_without_the_thread(shared: &Shared) -> Response {
     let Some(_iface) = seen else {
         return nothing(TunnelHealth::Unknown, held);
     };
+    // An interface of ours with no session live is a stop still finishing
+    // or a leftover, not a connection: WireGuard's link goes in the slow
+    // half of a stop, up to 1.6 s after a Disconnect or a reconnect's
+    // teardown has been answered, and the app polls the status in that
+    // gap. The owning thread's own status says the same of it.
+    if shared.ledger.live_generation().is_none() {
+        return nothing(TunnelHealth::Unknown, held);
+    }
     let guard = shared.ledger.guard();
+    // Custom mode as the owning thread last read it back from the kernel,
+    // as the leak protection is: "not active" here would be a claim nobody
+    // checked, and the app tells the customer their apps are not sorted on it.
+    let split = shared.ledger.split().unwrap_or_default();
+    let (split_problem, split_code) = match split.problem {
+        Some((sentence, code)) => (Some(sentence), Some(code)),
+        None => (None, None),
+    };
     Response::State {
         connected: true,
         protocol: shared.ledger.live_protocol(),
         health: TunnelHealth::Unknown,
-        // Not read without the owning thread: nothing rather than a guess.
-        split_tunnel_active: false,
-        split_tunnel_problem: None,
-        split_tunnel_restart_needed: Vec::new(),
+        split_tunnel_active: split.active,
+        split_tunnel_problem: split_problem,
+        split_tunnel_restart_needed: split.restart_needed,
         ipv6_blocked: guard.as_ref().is_some_and(|g| g.ipv6_blocked),
         // Protected only on the session's own record; with none, unproven.
         tunnel_dns_unprotected: !guard.as_ref().is_some_and(|g| g.dns_protected),
@@ -459,7 +510,7 @@ async fn status_without_the_thread(shared: &Shared) -> Response {
         confinement_problem: guard.and_then(|g| g.problem),
         reconnect_hold: held,
         traffic: None,
-        split_tunnel_problem_code: None,
+        split_tunnel_problem_code: split_code,
         session_secs: None,
     }
 }
@@ -753,9 +804,9 @@ pub async fn dispatch_linux(request: LinuxRequest, shared: &Shared, caller: &Cal
             Err(_) => error("could not tell how this install was made".to_string()),
         },
         LinuxRequest::InstallUpdate { package, signature } => {
-            if !matches!(caller, Caller::App { .. }) {
+            let Caller::App { uid: owner, .. } = *caller else {
                 return error("only the Neoxify app may install an update".to_string());
-            }
+            };
             if shared.ledger.live_protocol().is_some() || shared.ledger.is_connecting() {
                 return error("an update cannot be installed while connected; disconnect first".to_string());
             }
@@ -778,7 +829,7 @@ pub async fn dispatch_linux(request: LinuxRequest, shared: &Shared, caller: &Cal
                     let Some(kind) = kind else {
                         return Err(reason.unwrap_or_else(|| "this install cannot update itself".to_string()));
                     };
-                    update::install(&dir, kind, &package, &signature)
+                    update::install(&dir, kind, &package, &signature, Some(owner))
                 })
                 .await;
             installing.store(false, Ordering::SeqCst);

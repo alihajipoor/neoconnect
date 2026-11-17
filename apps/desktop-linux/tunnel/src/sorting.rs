@@ -23,7 +23,7 @@
 use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -45,15 +45,21 @@ const MAX_APP_LEN: usize = 4096;
 
 /// How often the watcher scans `/proc` whatever it has been told.
 ///
-/// New programs are learned from the kernel as they start: the netlink
-/// process connector reports every exec, and the program is moved within
-/// a fraction of a millisecond, before it has finished loading. Polling
-/// alone was tried first and was not enough: in the VM a chosen curl
-/// started after connect had its connection out the machine's own way
-/// before a 250 ms scan reached it. The scan stays, as the net for an
-/// event the kernel dropped (its socket buffer can overflow) and for a
-/// machine where the connector cannot be opened. Anything a sorted
-/// program starts is sorted by the kernel at fork, with no wait at all.
+/// A socket stays in the control group it was created in, so a chosen
+/// program has to be in the group before it opens its first socket, and
+/// nothing that learns of a program after it has started is fast enough
+/// for that. Two ways were tried in the VM and both lost the race to a
+/// curl that connects as soon as it starts: a 250 ms scan, and the netlink
+/// process connector, which reports an exec only once it has happened and
+/// whose move into the group then takes the kernel 2 to 15 ms. So the
+/// chosen programs' files carry a fanotify exec-permission mark (the
+/// gate): the kernel holds each exec of one until the helper has moved
+/// the process and answered, so the program's first instruction already
+/// runs in the group. The connector and the scan stay, as the net for
+/// what the gate cannot mark (a Flatpak app, a snap that was updated to a
+/// new revision mid-session) or a kernel without fanotify; a process they
+/// sort late while it holds a connection is reported as needing a restart.
+/// Anything a sorted program starts is sorted by the kernel at fork.
 pub(crate) const TICK: Duration = Duration::from_millis(250);
 
 pub(crate) const NO_UNIFIED: &str =
@@ -185,20 +191,76 @@ pub(crate) fn chosen_map(apps: &[String]) -> HashMap<String, String> {
 pub(crate) fn identity_of(pid: u32) -> Option<String> {
     let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
     let exe = exe.to_str()?;
-    if other_mount_namespace(pid) {
-        if let Some(app) = std::fs::read_to_string(format!("/proc/{pid}/root/.flatpak-info"))
-            .ok()
+    if other_mount_namespace(pid) && !fuse_backed(pid, "/.flatpak-info") {
+        if let Some(app) = read_capped(&format!("/proc/{pid}/root/.flatpak-info"), MAX_FLATPAK_INFO)
+            .and_then(|bytes| String::from_utf8(bytes).ok())
             .and_then(|text| flatpak_identity(&text))
         {
             return Some(app);
         }
     }
     if exe.starts_with("/tmp/.mount_") {
-        if let Some(image) = std::fs::read(format!("/proc/{pid}/environ")).ok().and_then(|e| appimage(&e)) {
+        if let Some(image) = read_capped(&format!("/proc/{pid}/environ"), MAX_ENVIRON).and_then(|e| appimage(&e)) {
             return Some(image);
         }
     }
     Some(normalize(exe))
+}
+
+/// A real `/.flatpak-info` is a few hundred bytes.
+const MAX_FLATPAK_INFO: u64 = 8192;
+/// The kernel's own limit on the arguments and environment together.
+const MAX_ENVIRON: u64 = 2 * 1024 * 1024;
+
+/// Reads at most `cap` bytes of a regular file, without following a link
+/// in its last part and without waiting on it. Root reads these files out
+/// of any process's view of the filesystem, which that process controls:
+/// a FIFO there would block the read for ever and `/dev/zero` would grow
+/// it without end, and the sorting holds its lock while it reads, so
+/// either would stop Custom mode, and the connect that starts it, dead.
+pub(crate) fn read_capped(path: &str, cap: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOCTTY)
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.file_type().is_file() {
+        return None;
+    }
+    let mut out = Vec::new();
+    file.take(cap).read_to_end(&mut out).ok()?;
+    Some(out)
+}
+
+/// Whether the mount that holds `path` in a process's own view is a FUSE
+/// filesystem. Its server is any program the user runs, and it can leave
+/// a lookup or a read unanswered for ever, which no open flag prevents, so
+/// the sorting does not look inside one. `/proc/<pid>/mountinfo` is the
+/// kernel's own list and never waits on anyone.
+fn fuse_backed(pid: u32, path: &str) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/mountinfo")) {
+        Ok(text) => mount_fs_type(&text, path).is_none_or(|fs| fs.starts_with("fuse")),
+        Err(_) => true,
+    }
+}
+
+/// The filesystem type of the mount `path` is on, from a mountinfo table:
+/// the last mount (the one on top) at the longest mount point that holds it.
+pub(crate) fn mount_fs_type<'a>(mountinfo: &'a str, path: &str) -> Option<&'a str> {
+    let mut best: Option<(usize, &str)> = None;
+    for line in mountinfo.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let Some(point) = fields.get(4) else { continue };
+        let Some(dash) = fields.iter().position(|f| *f == "-") else { continue };
+        let Some(fs) = fields.get(dash + 1) else { continue };
+        let holds = *point == "/" || path == *point || path.strip_prefix(point).is_some_and(|rest| rest.starts_with('/'));
+        if holds && best.is_none_or(|(len, _)| point.len() >= len) {
+            best = Some((point.len(), fs));
+        }
+    }
+    best.map(|(_, fs)| fs)
 }
 
 fn other_mount_namespace(pid: u32) -> bool {
@@ -310,8 +372,32 @@ fn cgroup_of(pid: u32) -> Option<String> {
 /// A process of the customer's own session, which is all the sorting
 /// ever moves. A user manager (`user@N.service/init.scope`) is in the
 /// session's slice too but is never moved: it would take every app with it.
+///
+/// The app's own group (for the reconnect hold) is movable too: a chosen
+/// program the app started where its opener could not give it a scope of
+/// its own would otherwise never be sorted, and leave the tunnel in "only
+/// chosen apps".
 pub(crate) fn movable(cgroup: &str) -> bool {
-    cgroup.starts_with("/user.slice/") && !cgroup.ends_with("/init.scope")
+    (cgroup.starts_with("/user.slice/") && !cgroup.ends_with("/init.scope")) || cgroup == format!("/{APP_GROUP}")
+}
+
+/// The user whose session Custom mode belongs to. Only that user's
+/// processes are sorted: one person's choice of apps must not move
+/// another person's programs out of their own session and route them.
+/// Root's own tools (no owner, or root) sort whatever matches.
+static OWNER: AtomicU32 = AtomicU32::new(NO_OWNER);
+const NO_OWNER: u32 = u32::MAX;
+
+pub(crate) fn set_owner(uid: Option<u32>) {
+    OWNER.store(uid.unwrap_or(NO_OWNER), Ordering::SeqCst);
+}
+
+fn owned(pid: u32) -> bool {
+    owned_by(OWNER.load(Ordering::SeqCst), uid_of(pid))
+}
+
+pub(crate) fn owned_by(owner: u32, uid: Option<u32>) -> bool {
+    owner == NO_OWNER || owner == 0 || uid == Some(owner)
 }
 
 /// Moves one process (all its threads) into a group, by its path below
@@ -341,8 +427,13 @@ pub(crate) fn running(uid: u32) -> Vec<Running> {
     out
 }
 
-/// The reconnect hold's group for the app and everything it has started
-/// (its web view's network process makes its connections).
+/// The reconnect hold's group for the app and the parts of it that run as
+/// processes of their own (its web view's processes, whose network
+/// process makes the interface's connections). Nothing else the app has
+/// started goes in: the hold lets this group go anywhere, and a browser
+/// the app opened a link in is not the app. What the app starts later
+/// inherits the group, so the app runs its opener in a scope of its own
+/// (the app's `opener_scope.rs`).
 pub(crate) fn adopt_app(pid: u32) -> Result<String, String> {
     if pid <= 1 || pid == std::process::id() {
         return Err(format!("process {pid} cannot be moved"));
@@ -352,8 +443,12 @@ pub(crate) fn adopt_app(pid: u32) -> Result<String, String> {
     if !procs.iter().any(|p| p.pid == pid) {
         return Err(format!("process {pid} is not running"));
     }
+    let app_exe = exe_of(pid);
     for (each, _) in with_descendants(&procs, &[(pid, String::new())]) {
         if cgroup_of(each).is_some_and(|cg| cg.ends_with("/init.scope")) {
+            continue;
+        }
+        if each != pid && !app_own(app_exe.as_deref(), exe_of(each).as_deref()) {
             continue;
         }
         match move_into(APP_GROUP, each) {
@@ -364,6 +459,110 @@ pub(crate) fn adopt_app(pid: u32) -> Result<String, String> {
         }
     }
     Ok(APP_GROUP.to_string())
+}
+
+fn exe_of(pid: u32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()?.to_str().map(str::to_string)
+}
+
+/// Whether a process the app started is part of the app: another process
+/// of the app's own program, or one of WebKitGTK's helper processes.
+pub(crate) fn app_own(app_exe: Option<&str>, exe: Option<&str>) -> bool {
+    let Some(exe) = exe.map(|e| e.strip_suffix(DELETED).unwrap_or(e)) else { return false };
+    if app_exe.map(|a| a.strip_suffix(DELETED).unwrap_or(a)) == Some(exe) {
+        return true;
+    }
+    let (dir, name) = exe.rsplit_once('/').unwrap_or(("", exe));
+    name.starts_with("WebKit") && (dir.contains("/webkit2gtk-") || dir.contains("/webkitgtk-"))
+}
+
+/// Moves every process still in the chosen apps' group out of it: into
+/// its parent's group when that is a session group, else into a scope of
+/// its own in its user's slice. Called before a session's table goes in,
+/// for whatever an earlier session or a crashed helper left behind, and
+/// when a session ends, for what its sorted programs started meanwhile.
+/// A process left in the group would be routed as a chosen app by the next
+/// session's rules, whatever that session chose.
+pub(crate) fn evict_all() {
+    let Ok(text) = std::fs::read_to_string(Path::new(CGROUP_ROOT).join(SPLIT_GROUP).join("cgroup.procs")) else {
+        return;
+    };
+    let target = format!("/{SPLIT_GROUP}");
+    let parents: HashMap<u32, u32> = processes().into_iter().map(|p| (p.pid, p.ppid)).collect();
+    for pid in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
+        let parent_group = parents.get(&pid).and_then(|ppid| cgroup_of(*ppid));
+        // A session group only: never the app's, which the hold lets through.
+        if let Some(group) = parent_group.filter(|g| *g != target && movable(g) && g.starts_with("/user.slice/")) {
+            if move_into(&group, pid).is_ok() {
+                continue;
+            }
+        }
+        rehome(pid);
+    }
+}
+
+/// Into a new systemd scope in the process's user's slice, so it is back
+/// in its user's tree (their limits apply, and logging out ends it) when
+/// the group it came from is gone: systemd removes a scope once it is
+/// empty, and a scope's directory cannot be made again by hand.
+fn rehome(pid: u32) -> bool {
+    let (Some(uid), Some((_, start))) = (
+        uid_of(pid),
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|t| parse_stat(&t)),
+    ) else {
+        return false;
+    };
+    let asked = std::process::Command::new("busctl")
+        .args(rehome_args(pid, start, uid))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !asked {
+        eprintln!("neoxify-helper: process {pid} could not be given a scope of its own and stays in {SPLIT_GROUP}");
+        return false;
+    }
+    // systemd moves it as the scope's job runs, just after the call returns.
+    let target = format!("/{SPLIT_GROUP}");
+    for _ in 0..40 {
+        if cgroup_of(pid).is_none_or(|g| g != target) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
+/// systemd's StartTransientUnit for a scope holding one process, as
+/// `busctl` arguments. The name carries the start time so a reused pid
+/// never collides with an earlier scope.
+pub(crate) fn rehome_args(pid: u32, start: u64, uid: u32) -> Vec<String> {
+    [
+        "--timeout=3",
+        "call",
+        "org.freedesktop.systemd1",
+        "/org/freedesktop/systemd1",
+        "org.freedesktop.systemd1.Manager",
+        "StartTransientUnit",
+        "ssa(sv)a(sa(sv))",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .chain([
+        format!("neoxify-returned-{pid}-{start}.scope"),
+        "fail".into(),
+        "2".into(),
+        "PIDs".into(),
+        "au".into(),
+        "1".into(),
+        pid.to_string(),
+        "Slice".into(),
+        "s".into(),
+        format!("user-{uid}.slice"),
+        "0".into(),
+    ])
+    .collect()
 }
 
 // ---------------------------------------------------------------------
@@ -389,7 +588,24 @@ struct SortState {
     already_running: HashMap<String, Vec<(u32, u64)>>,
     /// Apps chosen since the last look, whose first sighting is recorded.
     newly_chosen: HashSet<String>,
+    /// Processes just sorted at their start, looked at again shortly
+    /// after: a launcher (GLib, gnome-shell) asks systemd for the new
+    /// program's own scope as it starts it, and systemd's move can land
+    /// just after ours, taking it out of the group with its first sockets.
+    recheck: Vec<Recheck>,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct Recheck {
+    pid: u32,
+    start: u64,
+    /// How many looks are done; the next is due at `RECHECKS[done]` after `since`.
+    done: usize,
+    since: std::time::Instant,
+}
+
+/// When a process sorted at its start is looked at again.
+const RECHECKS: [Duration; 3] = [Duration::from_millis(20), Duration::from_millis(100), Duration::from_millis(300)];
 
 struct Shared {
     stop: AtomicBool,
@@ -400,6 +616,8 @@ struct Shared {
 pub(crate) struct Sorter {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    gate: Option<Arc<ExecGate>>,
+    gate_thread: Option<JoinHandle<()>>,
 }
 
 impl Sorter {
@@ -408,29 +626,64 @@ impl Sorter {
         ensure_group(SPLIT_GROUP)?;
         let state = SortState { apps: apps.to_vec(), newly_chosen: apps.iter().cloned().collect(), ..Default::default() };
         let shared = Arc::new(Shared { stop: AtomicBool::new(false), state: Mutex::new(state) });
-        tick(&mut shared.state.lock().unwrap_or_else(|e| e.into_inner()));
-        let watched = shared.clone();
+        // The gate and the listener are both in place before the first
+        // scan, so a chosen program started while the scan runs is caught
+        // by one of them rather than left for the next scan.
+        let gate = ExecGate::open()
+            .inspect_err(|e| eprintln!("neoxify-helper: no exec gate ({e}); chosen apps started from now on may be sorted late"))
+            .ok()
+            .map(Arc::new);
+        if let Some(gate) = &gate {
+            gate.mark_only(apps);
+        }
         // Opened here, not in the thread, so it listens before this returns.
         let listener = ExecListener::open()
             .inspect_err(|e| eprintln!("neoxify-helper: no exec notifications ({e}); chosen apps are found by scanning"))
             .ok();
+        tick(&mut shared.state.lock().unwrap_or_else(|e| e.into_inner()));
+        let gate_thread = match &gate {
+            Some(gate) => {
+                let (gate, watched) = (gate.clone(), shared.clone());
+                Some(
+                    std::thread::Builder::new()
+                        .name("neoxify-gate".into())
+                        .spawn(move || {
+                            while !watched.stop.load(Ordering::SeqCst) {
+                                let wait = next_recheck(&watched.state, TICK);
+                                gate.serve(wait, Some(&watched.state));
+                                recheck_due(&mut watched.state.lock().unwrap_or_else(|e| e.into_inner()));
+                            }
+                            // Stopped: no exec may wait on a gate nobody
+                            // serves any more, so the marks go and what is
+                            // already queued is let through unsorted.
+                            gate.unmark_all();
+                            gate.serve(Duration::ZERO, None);
+                        })
+                        .map_err(|e| format!("could not start watching for chosen apps: {e}"))?,
+                )
+            }
+            None => None,
+        };
+        let watched = shared.clone();
         let thread = std::thread::Builder::new()
             .name("neoxify-sorter".into())
             .spawn(move || {
                 let mut scanned = std::time::Instant::now();
                 while !watched.stop.load(Ordering::SeqCst) {
-                    let wait = TICK.saturating_sub(scanned.elapsed());
+                    let wait = next_recheck(&watched.state, TICK.saturating_sub(scanned.elapsed()));
                     match &listener {
                         Some(listener) => {
                             let started = listener.wait(wait);
-                            if !started.is_empty() {
-                                let mut state = watched.state.lock().unwrap_or_else(|e| e.into_inner());
-                                for pid in started {
-                                    on_exec(&mut state, pid);
-                                }
+                            let mut state = watched.state.lock().unwrap_or_else(|e| e.into_inner());
+                            for pid in started {
+                                on_exec(&mut state, pid);
                             }
+                            recheck_due(&mut state);
                         }
-                        None => std::thread::sleep(wait),
+                        None => {
+                            std::thread::sleep(wait);
+                            recheck_due(&mut watched.state.lock().unwrap_or_else(|e| e.into_inner()));
+                        }
                     }
                     if watched.stop.load(Ordering::SeqCst) {
                         break;
@@ -442,7 +695,7 @@ impl Sorter {
                 }
             })
             .map_err(|e| format!("could not start watching for chosen apps: {e}"))?;
-        Ok(Sorter { shared, thread: Some(thread) })
+        Ok(Sorter { shared, thread: Some(thread), gate, gate_thread })
     }
 
     /// A new list. Processes moved for an app no longer chosen go back
@@ -462,6 +715,13 @@ impl Sorter {
         }
         state.apps = apps.to_vec();
         state.newly_chosen.extend(added);
+        // Marked before the scan, for the same reason as at start. The
+        // gate thread waits for this lock to sort, so it answers an exec of
+        // a newly chosen app only once this has finished; that holds the
+        // exec for the length of one scan at most.
+        if let Some(gate) = &self.gate {
+            gate.mark_only(apps);
+        }
         tick(&mut state);
     }
 
@@ -483,6 +743,9 @@ impl Sorter {
     /// The fast half: stop looking. Nothing new is moved after this.
     pub(crate) fn stop(&self) {
         self.shared.stop.store(true, Ordering::SeqCst);
+        if let Some(gate) = &self.gate {
+            gate.unmark_all();
+        }
     }
 
     /// The thorough half: wait for the watcher, and put every process we
@@ -493,11 +756,21 @@ impl Sorter {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        if let Some(thread) = self.gate_thread.take() {
+            let _ = thread.join();
+        }
+        // Closing the gate lets through any exec still waiting on it.
+        self.gate = None;
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         for (pid, moved) in std::mem::take(&mut state.moved) {
             put_back(pid, &moved);
         }
         state.already_running.clear();
+        state.recheck.clear();
+        drop(state);
+        // What the sorted programs started is in the group too, by birth,
+        // and was never in `moved`.
+        evict_all();
     }
 }
 
@@ -514,21 +787,23 @@ fn alive(pid: u32, start: u64) -> bool {
         .is_some_and(|(_, s)| s == start)
 }
 
-/// Back to where it was, if it is the same process, still in our group,
-/// and the group it came from still exists (systemd removes an emptied
-/// scope; then it stays with us, which routes nothing once the table goes).
+/// Back to where it was, if it is the same process and still in our group.
+/// systemd removes a scope once it is empty, so the group it came from may
+/// be gone; it then gets a scope of its own rather than staying with us,
+/// where the next session's rules would route it as a chosen app.
 fn put_back(pid: u32, moved: &Moved) {
     if !alive(pid, moved.start) || cgroup_of(pid).as_deref() != Some(&format!("/{SPLIT_GROUP}")) {
         return;
     }
-    if Path::new(CGROUP_ROOT).join(moved.from.trim_start_matches('/')).is_dir() {
-        let _ = move_into(&moved.from, pid);
+    if Path::new(CGROUP_ROOT).join(moved.from.trim_start_matches('/')).is_dir() && move_into(&moved.from, pid).is_ok() {
+        return;
     }
+    rehome(pid);
 }
 
 /// A program has just started (an exec): into the group if it is chosen.
 fn on_exec(state: &mut SortState, pid: u32) {
-    if state.wanted.is_empty() || pid <= 1 || pid == std::process::id() {
+    if state.wanted.is_empty() || pid <= 1 || pid == std::process::id() || !owned(pid) {
         return;
     }
     let Some(app) = identity_of(pid).and_then(|id| state.wanted.get(&id).cloned()) else { return };
@@ -540,8 +815,85 @@ fn on_exec(state: &mut SortState, pid: u32) {
         return;
     };
     if move_into(SPLIT_GROUP, pid).is_ok() {
+        late_with_connections(state, pid, start, &app);
         state.moved.insert(pid, Moved { start, from: cgroup, app });
+        state.recheck.push(Recheck { pid, start, done: 0, since: std::time::Instant::now() });
     }
+}
+
+/// How long the watcher may wait before the next look again is due.
+fn next_recheck(state: &Mutex<SortState>, longest: Duration) -> Duration {
+    let state = state.lock().unwrap_or_else(|e| e.into_inner());
+    state
+        .recheck
+        .iter()
+        .filter_map(|r| RECHECKS.get(r.done).map(|after| after.saturating_sub(r.since.elapsed())))
+        .fold(longest, Duration::min)
+}
+
+/// The looks again that are due: a process taken out of the group since it
+/// was sorted (by systemd placing it in its launcher's new scope) goes
+/// back in, and the scope it was taken into is where it returns at the end.
+fn recheck_due(state: &mut SortState) {
+    let target = format!("/{SPLIT_GROUP}");
+    let mut pending = std::mem::take(&mut state.recheck);
+    pending.retain_mut(|r| {
+        let Some(after) = RECHECKS.get(r.done) else { return false };
+        if r.since.elapsed() < *after {
+            return true;
+        }
+        r.done += 1;
+        if !alive(r.pid, r.start) {
+            return false;
+        }
+        let Some(cgroup) = cgroup_of(r.pid) else { return false };
+        if cgroup != target && movable(&cgroup) && move_into(SPLIT_GROUP, r.pid).is_ok() {
+            if let Some(moved) = state.moved.get_mut(&r.pid) {
+                moved.from = cgroup;
+                let app = moved.app.clone();
+                late_with_connections(state, r.pid, r.start, &app);
+            }
+        }
+        r.done < RECHECKS.len()
+    });
+    state.recheck.append(&mut pending);
+}
+
+/// A process sorted after it had started (by the connector or the scan,
+/// not the gate) may already have opened connections, and those stay
+/// where they were made. If it holds one, it is reported with the
+/// programs that were running when they were chosen, so the app can say
+/// it needs a restart rather than claim it is fully sorted.
+fn late_with_connections(state: &mut SortState, pid: u32, start: u64, app: &str) {
+    if holds_inet_socket(pid) {
+        let entry = state.already_running.entry(app.to_string()).or_default();
+        if !entry.contains(&(pid, start)) {
+            entry.push((pid, start));
+        }
+    }
+}
+
+/// Whether a process has an IPv4 or IPv6 socket open: its socket
+/// descriptors against its network namespace's own socket tables.
+fn holds_inet_socket(pid: u32) -> bool {
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else { return false };
+    let inodes: HashSet<u64> = fds
+        .filter_map(|e| e.ok())
+        .filter_map(|e| std::fs::read_link(e.path()).ok())
+        .filter_map(|l| l.to_str()?.strip_prefix("socket:[")?.strip_suffix(']')?.parse().ok())
+        .collect();
+    if inodes.is_empty() {
+        return false;
+    }
+    ["tcp", "tcp6", "udp", "udp6", "raw", "raw6"].iter().any(|table| {
+        std::fs::read_to_string(format!("/proc/{pid}/net/{table}"))
+            .is_ok_and(|text| socket_inodes(&text).iter().any(|i| inodes.contains(i)))
+    })
+}
+
+/// The inode column of a `/proc/net/{tcp,udp,raw}[6]` table.
+pub(crate) fn socket_inodes(table: &str) -> Vec<u64> {
+    table.lines().skip(1).filter_map(|l| l.split_whitespace().nth(9)?.parse().ok()).collect()
 }
 
 /// One look: every process running a chosen program, and everything it
@@ -559,28 +911,238 @@ fn tick(state: &mut SortState) {
     } else {
         procs
             .iter()
-            .filter(|p| p.pid > 1 && p.pid != me)
+            .filter(|p| p.pid > 1 && p.pid != me && owned(p.pid))
             .filter_map(|p| wanted.get(&identity_of(p.pid)?).map(|app| (p.pid, app.clone())))
             .collect()
     };
     let target = format!("/{SPLIT_GROUP}");
-    for (pid, app) in with_descendants(&procs, &roots) {
+    let sorted = with_descendants(&procs, &roots);
+    let mut born_inside = Vec::new();
+    for (pid, app) in &sorted {
+        let (pid, app) = (*pid, app.clone());
         let Some(proc_) = by_pid.get(&pid) else { continue };
-        if pid == me {
+        if pid == me || !owned(pid) {
             continue;
         }
         let Some(cgroup) = cgroup_of(pid) else { continue };
-        if cgroup == target || !movable(&cgroup) {
+        if cgroup == target {
+            // Started by a sorted program, so in the group from birth and
+            // never moved by us: recorded with its ancestor's origin, so it
+            // goes back with it when the app stops being chosen.
+            if !state.moved.contains_key(&pid) {
+                born_inside.push((pid, proc_.start, app));
+            }
+            continue;
+        }
+        if !movable(&cgroup) {
             continue;
         }
         if move_into(SPLIT_GROUP, pid).is_ok() {
             state.moved.insert(pid, Moved { start: proc_.start, from: cgroup, app: app.clone() });
             if state.newly_chosen.contains(&app) {
                 state.already_running.entry(app).or_default().push((pid, proc_.start));
+            } else {
+                late_with_connections(state, pid, proc_.start, &app);
             }
         }
     }
+    for (pid, start, app) in born_inside {
+        let mut at = by_pid.get(&pid).map(|p| p.ppid);
+        let mut from = None;
+        for _ in 0..64 {
+            let Some(parent) = at else { break };
+            if let Some(moved) = state.moved.get(&parent) {
+                from = Some(moved.from.clone());
+                break;
+            }
+            at = by_pid.get(&parent).map(|p| p.ppid);
+        }
+        // With no sorted ancestor on record it is left to the sweep of the
+        // group when the session ends (`evict_all`).
+        if let Some(from) = from {
+            state.moved.insert(pid, Moved { start, from, app });
+        }
+    }
     state.newly_chosen.clear();
+}
+
+// ---------------------------------------------------------------------
+// The exec gate
+
+/// The files whose exec the gate holds: each chosen app's program, where
+/// it really is on disk. A Flatpak app is a directory, not a program, and
+/// is left to the connector and the scan.
+fn gate_files(apps: &[String]) -> HashSet<PathBuf> {
+    apps.iter()
+        .filter(|app| flatpak_parts(app).is_none())
+        .filter_map(|app| std::fs::canonicalize(app).ok())
+        .filter(|path| path.is_file())
+        .collect()
+}
+
+/// A fanotify group holding an exec-permission mark on each chosen
+/// program. Root only. While it is open the kernel waits for an answer
+/// before letting any exec of a marked file go on, and lets everything
+/// through once it is closed, so a helper that dies cannot leave a
+/// program unable to start.
+struct ExecGate {
+    fd: OwnedFd,
+    marked: Mutex<HashSet<PathBuf>>,
+}
+
+/// `struct fanotify_event_metadata`: its size, and where `mask`, `fd` and
+/// `pid` sit in it.
+const FAN_META_LEN: usize = 24;
+
+impl ExecGate {
+    fn open() -> std::io::Result<Self> {
+        // SAFETY: a plain system call; the descriptor it returns is owned
+        // from here on.
+        let raw = unsafe {
+            libc::fanotify_init(
+                libc::FAN_CLASS_CONTENT | libc::FAN_CLOEXEC | libc::FAN_NONBLOCK,
+                (libc::O_RDONLY | libc::O_CLOEXEC | libc::O_LARGEFILE) as libc::c_uint,
+            )
+        };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: just returned to us, and not owned elsewhere.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        Ok(ExecGate { fd, marked: Mutex::new(HashSet::new()) })
+    }
+
+    fn mark(&self, path: &Path, flags: libc::c_uint) -> std::io::Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| std::io::ErrorKind::InvalidInput)?;
+        // SAFETY: a live, NUL-terminated path and a descriptor we own.
+        let rc = unsafe { libc::fanotify_mark(self.fd.as_raw_fd(), flags, libc::FAN_OPEN_EXEC_PERM, libc::AT_FDCWD, c.as_ptr()) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Marks exactly the programs of `apps`: new ones added, ones no
+    /// longer chosen removed.
+    fn mark_only(&self, apps: &[String]) {
+        let want = gate_files(apps);
+        let mut marked = self.marked.lock().unwrap_or_else(|e| e.into_inner());
+        for gone in marked.difference(&want).cloned().collect::<Vec<_>>() {
+            let _ = self.mark(&gone, libc::FAN_MARK_REMOVE);
+            marked.remove(&gone);
+        }
+        for path in want {
+            if marked.contains(&path) {
+                continue;
+            }
+            match self.mark(&path, libc::FAN_MARK_ADD) {
+                Ok(()) => {
+                    marked.insert(path);
+                }
+                Err(e) => eprintln!("neoxify-helper: could not gate a chosen app ({e}); it may be sorted late"),
+            }
+        }
+    }
+
+    fn unmark_all(&self) {
+        let mut marked = self.marked.lock().unwrap_or_else(|e| e.into_inner());
+        for path in marked.drain() {
+            let _ = self.mark(&path, libc::FAN_MARK_REMOVE);
+        }
+    }
+
+    /// Answers every exec waiting on the gate, waiting up to `timeout` for
+    /// the first. With `state`, each process is moved into the group
+    /// before its exec is let go on; without it (stopping), it is only
+    /// let go. Every event is answered "allow" whatever happens: the gate
+    /// decides where a program's traffic goes, never whether it may run.
+    fn serve(&self, timeout: Duration, state: Option<&Mutex<SortState>>) {
+        let mut pfd = libc::pollfd { fd: self.fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        // SAFETY: one pollfd owned by this frame.
+        let ready = unsafe { libc::poll(&mut pfd, 1, timeout.as_millis().min(1000) as libc::c_int) };
+        if ready <= 0 {
+            return;
+        }
+        let mut buf = [0u8; 4096];
+        loop {
+            // SAFETY: a live buffer of the length given.
+            let got = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            if got <= 0 {
+                break;
+            }
+            for (mask, fd, pid) in gate_events(&buf[..got as usize]) {
+                if fd < 0 {
+                    continue;
+                }
+                // SAFETY: the kernel opened this descriptor for us with
+                // the event; it is ours to close.
+                let file = unsafe { OwnedFd::from_raw_fd(fd) };
+                if let Some(state) = state {
+                    if let Ok(path) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
+                        on_gate(&mut state.lock().unwrap_or_else(|e| e.into_inner()), pid, &path);
+                    }
+                }
+                if mask & libc::FAN_OPEN_EXEC_PERM != 0 {
+                    let answer = libc::fanotify_response { fd, response: libc::FAN_ALLOW };
+                    // SAFETY: a live struct of the size given.
+                    unsafe {
+                        libc::write(
+                            self.fd.as_raw_fd(),
+                            (&answer as *const libc::fanotify_response).cast(),
+                            std::mem::size_of::<libc::fanotify_response>(),
+                        );
+                    }
+                }
+                drop(file);
+            }
+        }
+    }
+}
+
+/// `(mask, fd, pid)` of each event in one read from a fanotify group.
+pub(crate) fn gate_events(buf: &[u8]) -> Vec<(u64, i32, u32)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at + FAN_META_LEN <= buf.len() {
+        let len = u32::from_ne_bytes(buf[at..at + 4].try_into().unwrap_or_default()) as usize;
+        if len < FAN_META_LEN || at + len > buf.len() {
+            break;
+        }
+        let mask = u64::from_ne_bytes(buf[at + 8..at + 16].try_into().unwrap_or_default());
+        let fd = i32::from_ne_bytes(buf[at + 16..at + 20].try_into().unwrap_or_default());
+        let pid = i32::from_ne_bytes(buf[at + 20..at + 24].try_into().unwrap_or_default());
+        out.push((mask, fd, pid.max(0) as u32));
+        at += len;
+    }
+    out
+}
+
+/// A chosen program is being started by `pid`: into the group now, while
+/// the kernel holds the exec. The process still shows the program it is
+/// replacing, so the app is named from the file being started.
+fn on_gate(state: &mut SortState, pid: u32, file: &Path) {
+    if pid <= 1 || pid == std::process::id() || !owned(pid) {
+        return;
+    }
+    let Some(file) = file.to_str() else { return };
+    let id = normalize(file);
+    let app = state.wanted.get(&id).cloned().unwrap_or(id);
+    let Some(cgroup) = cgroup_of(pid) else { return };
+    if cgroup == format!("/{SPLIT_GROUP}") || !movable(&cgroup) {
+        return;
+    }
+    let Some((_, start)) = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|t| parse_stat(&t)) else {
+        return;
+    };
+    if move_into(SPLIT_GROUP, pid).is_ok() {
+        // Sockets it already holds were made by the program it is
+        // replacing (an exec keeps open descriptors), and stay where they
+        // were made.
+        late_with_connections(state, pid, start, &app);
+        state.moved.insert(pid, Moved { start, from: cgroup, app });
+        state.recheck.push(Recheck { pid, start, done: 0, since: std::time::Instant::now() });
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -741,6 +1303,42 @@ mod tests {
     }
 
     #[test]
+    fn gate_events_are_read_from_fanotifys_layout() {
+        let event = |mask: u64, fd: i32, pid: i32| {
+            let mut m = Vec::new();
+            m.extend((FAN_META_LEN as u32).to_ne_bytes());
+            m.extend([3u8, 0]); // version, reserved
+            m.extend((FAN_META_LEN as u16).to_ne_bytes());
+            m.extend(mask.to_ne_bytes());
+            m.extend(fd.to_ne_bytes());
+            m.extend(pid.to_ne_bytes());
+            m
+        };
+        let mut two = event(libc::FAN_OPEN_EXEC_PERM, 7, 4242);
+        two.extend(event(libc::FAN_OPEN_EXEC_PERM, 8, 4300));
+        assert_eq!(
+            gate_events(&two),
+            vec![(libc::FAN_OPEN_EXEC_PERM, 7, 4242), (libc::FAN_OPEN_EXEC_PERM, 8, 4300)]
+        );
+        assert!(gate_events(&two[..20]).is_empty(), "a short read");
+        let mut bad = event(libc::FAN_OPEN_EXEC_PERM, 7, 1);
+        bad[0] = 200;
+        assert!(gate_events(&bad).is_empty(), "a length past the end");
+    }
+
+    #[test]
+    fn socket_inodes_are_read_from_procs_tables() {
+        // `/proc/net/udp` and `/proc/net/tcp` on Ubuntu 24.04, addresses replaced.
+        let udp = "   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n\
+                    \x20 312: 3500007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 21654 2 0000000000000000 0\n";
+        assert_eq!(socket_inodes(udp), vec![21654]);
+        let tcp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+                   \x20  0: 0F02000A:D2B4 010200C6:01BB 01 00000000:00000000 00:00000000 00000000  1000        0 98765 1 0000000000000000 20 4 30 10 -1\n";
+        assert_eq!(socket_inodes(tcp), vec![98765]);
+        assert!(socket_inodes("").is_empty());
+    }
+
+    #[test]
     fn plain_full_paths_are_apps() {
         for ok in [
             "/usr/bin/curl",
@@ -859,7 +1457,80 @@ mod tests {
         assert!(!movable("/user.slice/user-1000.slice/user@1000.service/init.scope"), "the user manager");
         assert!(!movable("/init.scope"));
         assert!(!movable("/system.slice/neoxify-helper.service"));
-        assert!(!movable("/neoxify.app"), "the Neoxify app itself");
+        assert!(movable("/neoxify.app"), "a chosen app the Neoxify app started");
+        assert!(!movable("/neoxify.app/x"));
+        assert!(!movable("/neoxify.split"));
         assert_eq!(parse_cgroup("12:pids:/x\n"), None, "a v1-only line is not a v2 group");
+    }
+
+    #[test]
+    fn only_the_session_owners_processes_are_sorted() {
+        assert!(owned_by(1000, Some(1000)));
+        assert!(!owned_by(1000, Some(1001)), "another user's matching program");
+        assert!(!owned_by(1000, None), "a process whose owner could not be read");
+        assert!(owned_by(0, Some(1001)), "root's own tools");
+        assert!(owned_by(NO_OWNER, Some(1001)));
+    }
+
+    #[test]
+    fn a_sandbox_file_that_could_stall_root_is_not_read() {
+        use std::os::unix::fs::symlink;
+        let dir = std::env::temp_dir().join(format!("nx-capped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("fifo");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: a live NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        // A FIFO nobody writes to: a plain read would wait for ever.
+        assert_eq!(read_capped(fifo.to_str().unwrap(), 8192), None);
+        // A device that never ends: a plain read would fill memory.
+        assert_eq!(read_capped("/dev/zero", 8192), None);
+        let real = dir.join("real");
+        std::fs::write(&real, vec![b'x'; 20000]).unwrap();
+        assert_eq!(read_capped(real.to_str().unwrap(), 8192).map(|b| b.len()), Some(8192), "read to the cap only");
+        let link = dir.join("link");
+        symlink(&real, &link).unwrap();
+        assert_eq!(read_capped(link.to_str().unwrap(), 8192), None, "a link in the last part");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_fuse_root_is_not_looked_into() {
+        // `/proc/<pid>/mountinfo` of a sandbox, shortened.
+        let flatpak = "100 90 0:50 / / rw,nosuid - tmpfs tmpfs rw\n\
+                       101 100 0:51 /info /.flatpak-info ro - tmpfs tmpfs rw\n\
+                       102 100 0:52 / /usr ro - ext4 /dev/sda2 rw\n";
+        assert_eq!(mount_fs_type(flatpak, "/.flatpak-info"), Some("tmpfs"));
+        let fuse_root = "200 190 0:60 / / rw - fuse.trap trap rw\n";
+        assert_eq!(mount_fs_type(fuse_root, "/.flatpak-info"), Some("fuse.trap"));
+        let fuse_file = "100 90 0:50 / / rw - tmpfs tmpfs rw\n101 100 0:61 / /.flatpak-info rw - fuse trap rw\n";
+        assert_eq!(mount_fs_type(fuse_file, "/.flatpak-info"), Some("fuse"));
+        // `/.flatpak-infox` is not inside a mount at `/.flatpak-info`.
+        assert_eq!(mount_fs_type(fuse_file, "/.flatpak-infox"), Some("tmpfs"));
+        assert_eq!(mount_fs_type("", "/.flatpak-info"), None);
+    }
+
+    #[test]
+    fn only_the_app_and_its_web_view_join_the_holds_group() {
+        let app = Some("/usr/bin/neoxify");
+        assert!(app_own(app, Some("/usr/bin/neoxify")));
+        assert!(app_own(app, Some("/usr/bin/neoxify (deleted)")), "the app replaced on disk by an update");
+        assert!(app_own(app, Some("/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess")));
+        assert!(app_own(app, Some("/usr/libexec/webkit2gtk-4.1/WebKitWebProcess")));
+        assert!(!app_own(app, Some("/usr/lib/firefox/firefox")), "a browser it opened a link in");
+        assert!(!app_own(app, Some("/usr/bin/xdg-open")));
+        assert!(!app_own(app, Some("/tmp/WebKitNetworkProcess")), "a WebKit name outside WebKit's directory");
+        assert!(!app_own(app, None));
+    }
+
+    #[test]
+    fn a_stranded_process_gets_a_scope_in_its_users_slice() {
+        let args = rehome_args(4242, 98765, 1000);
+        assert_eq!(args[5], "StartTransientUnit");
+        assert_eq!(
+            &args[7..],
+            ["neoxify-returned-4242-98765.scope", "fail", "2", "PIDs", "au", "1", "4242", "Slice", "s", "user-1000.slice", "0"]
+        );
     }
 }

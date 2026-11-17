@@ -88,8 +88,12 @@ pub fn open_package(path: &str) -> Result<File, String> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOCTTY)
         .open(path)
+        // The two a customer can meet named in words, not in the system's
+        // ("entity not found").
         .map_err(|e| match e.raw_os_error() {
             Some(libc::ELOOP) => "the update's file is a link, which is not accepted".to_string(),
+            Some(libc::ENOENT) => "the downloaded update is no longer there; download it again".to_string(),
+            Some(libc::EACCES | libc::EPERM) => "the helper is not allowed to read the downloaded update".to_string(),
             _ => format!("the update's file could not be opened: {}", e.kind()),
         })?;
     let meta = file.metadata().map_err(|e| format!("the update's file could not be read: {}", e.kind()))?;
@@ -103,6 +107,18 @@ pub fn open_package(path: &str) -> Result<File, String> {
         return Err(format!("the update's file is larger than {} MB", MAX_PACKAGE_BYTES / (1024 * 1024)));
     }
     Ok(file)
+}
+
+/// Refuses a package that is not the asking user's own file.
+pub fn owned_by(file: &File, owner: Option<u32>) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    // Root may read every file anyway, so a root caller learns nothing new.
+    let Some(uid) = owner.filter(|uid| *uid != 0) else { return Ok(()) };
+    let meta = file.metadata().map_err(|e| format!("the update's file could not be read: {}", e.kind()))?;
+    if meta.uid() != uid {
+        return Err("the update's file is not one you downloaded".to_string());
+    }
+    Ok(())
 }
 
 /// The root-only directory updates are copied into, made if missing,
@@ -179,6 +195,9 @@ fn decode_text(b64: &str, what: &str) -> Result<String, String> {
 /// base64 of a minisign public-key file. Only prehashed signatures, the
 /// kind the signer makes.
 pub fn verify(path: &Path, signature: &str, pubkey: &str) -> Result<(), String> {
+    if signature.trim().is_empty() {
+        return Err("the update came without its signature, so it was not installed".to_string());
+    }
     let key = minisign_verify::PublicKey::decode(&decode_text(pubkey, "updater key")?)
         .map_err(|_| "the updater key compiled into the helper is unreadable".to_string())?;
     let sig = minisign_verify::Signature::decode(&decode_text(signature, "signature")?)
@@ -272,12 +291,19 @@ struct Record {
 }
 
 /// Everything after the caller and the tunnel were checked.
-pub fn install(dir: &Path, kind: PackageKind, package: &str, signature: &str) -> Result<(), String> {
+///
+///  is the asking user: the package must be their own file. Root
+/// opens it, and without this a caller could name any file on the machine
+/// and have root copy it. Whether a named file exists still shows in the
+/// answer (and whether it is empty or over the size limit); its contents
+/// and exact size do not.
+pub fn install(dir: &Path, kind: PackageKind, package: &str, signature: &str, owner: Option<u32>) -> Result<(), String> {
     let shown = Path::new(package).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let file = open_package(package)?;
+    owned_by(&file, owner)?;
     prepare_dir(dir)?;
     let copy = dir.join(copy_name(kind));
-    let bytes = copy_into(file, &copy)?;
+    copy_into(file, &copy)?;
     let checked = verify(&copy, signature, UPDATER_PUBKEY)
         .and_then(|()| identity(kind, &copy))
         .and_then(|(name, version)| acceptable(&name, &version, crate::VERSION).map(|()| version));
@@ -285,7 +311,7 @@ pub fn install(dir: &Path, kind: PackageKind, package: &str, signature: &str) ->
         Ok(version) => version,
         Err(why) => {
             let _ = std::fs::remove_file(&copy);
-            crate::say!("neoxify-helper: an update ({shown}, {bytes} bytes) was refused: {why}");
+            crate::say!("neoxify-helper: an update ({shown}) was refused: {why}");
             return Err(why);
         }
     };
@@ -481,6 +507,15 @@ mod tests {
         std::fs::File::create(&big).unwrap().set_len(MAX_PACKAGE_BYTES + 1).unwrap();
         assert!(open_package(big.to_str().unwrap()).unwrap_err().contains("larger"));
         assert!(open_package("relative.deb").is_err());
+        // Only the asking user's own file is taken.
+        // SAFETY: a plain system call with no arguments.
+        let me = unsafe { libc::getuid() };
+        assert!(owned_by(&open_package(real.to_str().unwrap()).unwrap(), Some(me)).is_ok());
+        if me != 0 {
+            assert!(owned_by(&open_package(real.to_str().unwrap()).unwrap(), Some(me + 1)).unwrap_err().contains("not one you"));
+        }
+        assert!(owned_by(&open_package(real.to_str().unwrap()).unwrap(), Some(0)).is_ok(), "root's own tools");
+        assert!(owned_by(&open_package(real.to_str().unwrap()).unwrap(), None).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

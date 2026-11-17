@@ -550,6 +550,40 @@ async fn another_users_app_cannot_replace_a_live_session() {
     assert!(server::claim_session(&d.shared, &Caller::Trusted, &mut no_watch).is_none());
 }
 
+/// Nor can another user's app turn off the owner's reconnect hold, reshape
+/// their Custom mode, run Repair on them or end their tunnel; the owner and
+/// root's tools can, and with no session standing anyone may.
+#[tokio::test]
+async fn another_users_app_cannot_change_a_live_session() {
+    let d = start("otherchange", World::default()).await;
+    let mut no_watch = None;
+    let alice = Caller::App { pid: 4242, uid: 1000 };
+    let bob = Caller::App { pid: 4343, uid: 1001 };
+    let changes = [
+        Request::Disconnect,
+        Request::DisconnectForReconnect,
+        Request::SetSplitTunnel { config: SplitTunnelConfig::default() },
+        Request::SetReconnectHold { enabled: false },
+        Request::ReleaseReconnectHold,
+        Request::ProbeSplitTunnel,
+        Request::Repair,
+    ];
+    assert!(changes.iter().all(server::changes_the_session));
+    assert!(!server::changes_the_session(&Request::Status), "a status changes nothing");
+    assert!(!server::changes_the_session(&Request::ListRunningApps), "already limited to the caller's own");
+
+    assert!(server::claim_session(&d.shared, &alice, &mut no_watch).is_none());
+    assert!(server::not_the_owner(&d.shared, &bob).is_none(), "no session standing yet");
+    d.shared.ledger.begin("WIREGUARD");
+    let refused = server::not_the_owner(&d.shared, &bob);
+    assert!(
+        matches!(&refused, Some(Response::Error { message }) if message.contains("another user")),
+        "{refused:?}"
+    );
+    assert!(server::not_the_owner(&d.shared, &alice).is_none());
+    assert!(server::not_the_owner(&d.shared, &Caller::Trusted).is_none());
+}
+
 /// Every request the shared interface can send gets an answer it can
 /// live with, with no tunnel up.
 #[tokio::test]
@@ -794,10 +828,13 @@ async fn a_second_connect_replaces_the_first() {
 }
 
 /// A status while the owning thread is busy with something else comes
-/// back from the machine's own look, never as a verified "down".
+/// back from the machine's own look, never as a verified "down". And an
+/// interface of ours with no session live -- a stop still finishing -- is
+/// not a connection.
 #[tokio::test]
 async fn status_is_answered_while_the_owning_thread_is_busy() {
     let d = start("busy", World { visible: Some("neoconnect0".into()), ..Default::default() }).await;
+    assert_eq!(d.ask(&connect()).await["status"], "ok");
     let (release, parked) = std::sync::mpsc::channel::<()>();
     let busy = d.shared.engines.run(move |_: &mut Session, _: &CancelToken| {
         let _ = parked.recv_timeout(Duration::from_secs(30));
@@ -811,6 +848,18 @@ async fn status_is_answered_while_the_owning_thread_is_busy() {
     let state = d.ask(&Request::Status).await;
     assert_eq!(state["connected"], false);
     assert_eq!(state["health"]["state"], "unknown", "a look that proved nothing was answered as down");
+    release.send(()).unwrap();
+    busy.await.unwrap();
+
+    assert_eq!(d.ask(&Request::Disconnect).await["status"], "ok");
+    d.world().visible = Some("neoxify-wg".into());
+    let (release, parked) = std::sync::mpsc::channel::<()>();
+    let busy = d.shared.engines.run(move |_: &mut Session, _: &CancelToken| {
+        let _ = parked.recv_timeout(Duration::from_secs(30));
+    });
+    let state = d.ask(&Request::Status).await;
+    assert_eq!(state["connected"], false, "a link still being taken down was called a connection: {state}");
+    assert_eq!(state["health"]["state"], "unknown", "{state}");
     release.send(()).unwrap();
     busy.await.unwrap();
 }
@@ -1086,13 +1135,42 @@ async fn a_hold_nothing_follows_or_that_holds_too_long_is_let_go() {
     let world: WorldRef = Arc::new(Mutex::new(World::default()));
     let hold = Hold::with_limits(Arc::new(Fake(Arc::clone(&world))), Duration::from_millis(200), Duration::from_secs(3600));
     hold.set_wanted(true);
-    assert!(hold.arm(7, Arming { ifaces: vec!["neoconnect0".into()], servers: vec![Ipv4Addr::new(192, 0, 2, 1)] }));
+    assert!(hold.arm(7, Arming { ifaces: vec!["neoconnect0".into()], servers: vec![Ipv4Addr::new(192, 0, 2, 1)], ..Default::default() }));
     assert!(hold.engage(7, "test"));
     hold.followed();
     std::thread::sleep(Duration::from_millis(250));
     hold.tend(None);
     assert!(!hold.holding());
     assert!(matches!(hold.report(None), Some(ReconnectHold::NotHeld { problem: ReconnectHoldProblem::TimedOut, .. })));
+}
+
+/// A tunnel that lands under the hold but cannot be confined leaves no
+/// table of ours, so the hold is let go of and says so, rather than
+/// reporting a hold in force with nothing in force.
+#[test]
+fn a_landing_that_cannot_be_confined_lets_go_and_says_so() {
+    let world: WorldRef = Arc::new(Mutex::new(World::default()));
+    let hold = Hold::new(Arc::new(Fake(Arc::clone(&world))));
+    hold.set_wanted(true);
+    hold.arm(8, Arming::default());
+    assert!(hold.engage(8, "test"));
+    world.lock().unwrap().guard_fails = true;
+    let plan = Plan {
+        tunnel_ifaces: vec!["neoconnect0".into()],
+        transports: Vec::new(),
+        engine_fwmark: None,
+        block_ipv6: true,
+        confine_dns: true,
+        confine_ipv4: true,
+        lan: Vec::new(),
+    };
+    assert!(hold.confine(&plan).is_err());
+    assert!(!hold.holding(), "still holding with no table in force");
+    assert!(
+        matches!(hold.report(None), Some(ReconnectHold::NotHeld { problem: ReconnectHoldProblem::FiltersRefused, .. })),
+        "{:?}",
+        hold.report(None)
+    );
 }
 
 /// A let-go the app cannot predict is said in a status first.
@@ -1135,6 +1213,21 @@ fn unread_resolvers_are_said_and_a_network_going_down_keeps_them() {
     assert!(hold.engage(5, "test"));
     assert!(matches!(hold.report(None), Some(ReconnectHold::Holding { dns_anywhere: true, .. })));
     assert!(world.lock().unwrap().hold_in.as_ref().unwrap().dns_anywhere);
+
+    // The uplink gone at the drop, so none read then: the resolvers the
+    // session was armed with are named, and port 53 stays closed to the
+    // rest of the world.
+    let world: WorldRef = Arc::new(Mutex::new(World { resolvers: Vec::new(), ..Default::default() }));
+    let hold = Hold::new(Arc::new(Fake(Arc::clone(&world))));
+    hold.set_wanted(true);
+    let armed = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 53));
+    hold.arm(6, Arming { resolvers: vec![armed], ..Default::default() });
+    assert!(hold.engage(6, "test"));
+    assert!(matches!(hold.report(None), Some(ReconnectHold::Holding { dns_anywhere: false, .. })));
+    let w = world.lock().unwrap();
+    let plan = w.hold_in.as_ref().unwrap();
+    assert!(!plan.dns_anywhere);
+    assert_eq!(plan.resolvers, vec![armed]);
 }
 
 // ---------------------------------------------------------------------
@@ -1204,6 +1297,10 @@ async fn custom_mode_changes_in_place_or_keeps_the_earlier_state() {
     assert_eq!(reply["status"], "error");
     assert!(reply["message"].as_str().unwrap().contains("refused the rules"), "{reply}");
     assert_eq!(d.world().shape_now, Shape::AllExcept(vec!["/usr/bin/curl".into()]), "a refused change changed something");
+    // A refusal says "reconnect" (OpenVPN, full tunnel to Custom mode), so
+    // the reconnect has to come up in the shape that was refused.
+    assert_eq!(d.ask(&connect()).await["status"], "ok");
+    assert_eq!(d.world().shape_now, Shape::OnlySelected(vec!["/usr/bin/zed".into()]), "the reconnect kept the old shape");
 
     d.world().reshape_fails = false;
     assert_eq!(d.ask(&Request::SetSplitTunnel { config: SplitTunnelConfig::default() }).await["status"], "ok");
