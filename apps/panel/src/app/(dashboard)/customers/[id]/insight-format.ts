@@ -194,14 +194,14 @@ export function supportText(attempt: CustomerAttemptDetail): string {
       .join(", ");
     lines.push(`Landed on: ${landed}${attempt.sessionSeconds !== null ? `, up ${duration(attempt.sessionSeconds)}` : ""}`);
   }
-  if (attempt.reason) lines.push(`App said: ${attempt.reason}`);
+  if (attempt.reason) lines.push(`App said: ${maskAddresses(attempt.reason)}`);
   if (attempt.rungs.length > 0) {
     lines.push("Tried, in order:");
     attempt.rungs.forEach((rung, i) => {
       const carried = rung.carried === true ? ", carried traffic" : rung.carried === false ? ", carried nothing" : "";
       const speed = speedText(rung.downKbps, rung.upKbps);
       lines.push(
-        `  ${i + 1}. ${rung.server ?? "unknown server"} ${rung.protocol ? protocolLabel(rung.protocol) : "unknown protocol"}: ${rung.result}${carried}${speed ? `, about ${speed}` : ""}`,
+        `  ${i + 1}. ${rung.server ?? "unknown server"} ${rung.protocol ? protocolLabel(rung.protocol) : "unknown protocol"}: ${maskAddresses(rung.result)}${carried}${speed ? `, about ${speed}` : ""}`,
       );
     });
   }
@@ -211,13 +211,38 @@ export function supportText(attempt: CustomerAttemptDetail): string {
     if (trace.entries.length > 0) {
       lines.push("API trace:");
       for (const e of trace.entries) {
-        lines.push(`  ${e.leg ?? "-"} ${e.target} ${e.outcome ?? "-"}${e.ms !== null ? ` ${e.ms} ms` : ""}`);
+        lines.push(
+          `  ${e.leg ?? "-"} ${maskAddresses(e.target)} ${e.outcome ? maskAddresses(e.outcome) : "-"}${e.ms !== null ? ` ${e.ms} ms` : ""}`,
+        );
       }
     }
     if (trace.cut > 0) lines.push(`  (${trace.cut} more not kept)`);
-    if (trace.probe) lines.push(`Probe: ${trace.probe}`);
+    if (trace.probe) lines.push(`Probe: ${maskAddresses(trace.probe)}`);
   }
   return lines.join("\n");
+}
+
+const BRACKETED_IPV6 = /\[[0-9a-f:.%\w]*:[0-9a-f:.%\w]*\](?::\d{1,5})?/gi;
+/** Runs of hex groups and colons, optionally ending in a dotted quad
+ * (::ffff:192.0.2.1). Only those with "::" or at least three colons are
+ * addresses, so a clock time (10:00:00) is left alone. */
+const IPV6 = /(?<![\w:.])(?:[0-9a-f]{0,4}:){2,7}(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f]{0,4})(?![\w:])/gi;
+const IPV4 = /\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b/g;
+/** Dotted names ending in a letters-only label, with an optional port.
+ * Server display names ("germany-3") have no dot and stay. */
+const HOSTNAME = /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b(?::\d{1,5})?/gi;
+
+/** Text with every IPv4 and IPv6 address and every hostname (with any
+ * port) replaced by "<address>". The copied text goes into support
+ * threads customers read, and our server addresses never go to
+ * customers; the report id stays so an engineer can open the full
+ * report in the panel. */
+export function maskAddresses(text: string): string {
+  return text
+    .replace(BRACKETED_IPV6, "<address>")
+    .replace(IPV6, (match) => (match.includes("::") || match.split(":").length >= 4 ? "<address>" : match))
+    .replace(IPV4, "<address>")
+    .replace(HOSTNAME, "<address>");
 }
 
 function utc(iso: string): string {

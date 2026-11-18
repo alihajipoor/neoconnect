@@ -157,9 +157,47 @@ describe("copy for support", () => {
       }),
     );
     expect(text).toContain("Received: 2026-11-18 12:30:00 UTC");
-    expect(text).toContain("API trace:\n  req api.example.com:443 timeout 8000 ms\n  (2 more not kept)");
-    expect(text).toContain("Probe: tcp api.example.com:443 timeout");
+    expect(text).toContain("API trace:\n  req <address> timeout 8000 ms\n  (2 more not kept)");
+    expect(text).toContain("Probe: tcp <address> timeout");
     expect(text).not.toContain("Tried, in order");
+  });
+
+  it("masks every server address and hostname, keeping the report id and server names", () => {
+    const text = supportText(
+      attempt({
+        id: "rep-42",
+        server: "germany-3",
+        protocol: "XRAY_VLESS_REALITY",
+        reason: "tried 3 of 4 available\nStealth: dial tcp 192.0.2.7:2053: i/o timeout\nFast: dial udp [2001:db8::7]:443 refused",
+        rungs: [
+          {
+            protocol: "XRAY_VLESS_REALITY",
+            result: "handshake with 2001:db8:0:1::5 failed at 10:00:05",
+            server: "germany-3",
+            carried: false,
+            downKbps: null,
+            upKbps: null,
+          } as CustomerAttemptDetail["rungs"][number],
+        ],
+        apiTrace: {
+          entries: [
+            { leg: "door", target: "door.example.net:2053", outcome: "reset by 192.0.2.8", ms: 120 },
+            { leg: "req", target: "https://api.example.com/v1/config", outcome: "timeout", ms: 8000 },
+          ],
+          probe: "tcp door.example.net:2053 ok, tcp 192.0.2.9:443 timeout",
+          noneDialled: false,
+          cut: 0,
+        },
+      }),
+    );
+    expect(text.split("\n")[0]).toBe("Report rep-42");
+    expect(text).toContain("Landed on: germany-3, Xray VLESS+REALITY");
+    expect(text).toContain("App said: tried 3 of 4 available\nStealth: dial tcp <address>: i/o timeout\nFast: dial udp <address> refused");
+    expect(text).toContain("1. germany-3 Xray VLESS+REALITY: handshake with <address> failed at 10:00:05");
+    expect(text).toContain("  door <address> reset by <address> 120 ms");
+    expect(text).toContain("  req https://<address>/v1/config timeout 8000 ms");
+    expect(text).toContain("Probe: tcp <address> ok, tcp <address> timeout");
+    for (const leak of ["192.0.2", "2001:db8", "example.net", "example.com", ":2053"]) expect(text).not.toContain(leak);
   });
 
   it("treats a gap of a minute or less as the same moment", () => {
