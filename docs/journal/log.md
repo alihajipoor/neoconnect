@@ -10476,3 +10476,218 @@ commit and not on the notes commit above it, whose message skips CI.
 - The helper keeps a 20 MB copy of the package after a good install.
 - Never run: the rpm update from inside the app on a real machine, an
   install interrupted halfway, an install while apt's lock is held.
+
+## 2026-11-18 — Phones: lookups, QUIC, the own-mirror false failure, the iOS memory blow-up, and the guards against it coming back
+
+**Status:** done — merged as `6d61c01a`, released as `android-v0.2.42` (the Play upload waits for the owner) and iOS 1.0.3 (23) submitted with a manual release. **Nothing in this entry has run on a real iPhone at the time of writing.**
+**Touches:** `apps/mobile/src/lib/xray-config.ts`, `tunnel-evidence.ts`, `run-diagnostics.ts`, `screens/Dashboard.tsx`; `apps/mobile/plugins/vpn/xray/` (`gate_darwin.go`, `diagnostics.go`, `patches/ios-*.patch`, the darwin load tests); `apps/desktop-windows/src/lib/egress.ts` (one optional `hedgeMs`, unused by the desktop); `.github/workflows/ci-engine-memory.yml`
+
+**The report.** A customer on an iPhone (0.2.41) said Instagram and
+WhatsApp loaded badly on Stealth and Shadowsocks while Telegram was
+excellent. Measured before anything was changed, on the Android emulator
+with 0.2.41 and live tunnels to a Germany exit on a ~182 ms line (second
+figure with 100 ms more delay):
+
+- Stealth: a DNS lookup from a new source port cost 868 / 1196 ms, 4-5
+  round trips, because each UDP flow opens a new VLESS connection with a
+  full REALITY handshake. On an already-open socket, 184 / 299 ms.
+  Parallel lookups did not help; a second server showed the same.
+- Shadowsocks: 193 / 301 ms. VPN off: 15 ms.
+- QUIC (UDP 443) on Stealth: silence, 10 of 10, no error back, and a
+  wasted dial to the server for every attempt. Answered on Shadowsocks.
+
+That fits the complaint: Telegram uses fixed IPv4 addresses over TCP;
+Meta's apps resolve many media hostnames and use QUIC. The desktop had
+the DNS fix since 0.9.49 (port 53 to a `dns` outbound); the phones never
+got it -- the 11-12 lesson again: what the desktop engine gets, the
+phones need too.
+
+**Ruled out.** That platforms limit our exits: a check from every exit
+against Instagram, WhatsApp, Telegram, Google, YouTube and others found
+nothing slowed or refused (only logged-out browser refusals that the
+panel host, with no VPN traffic, gets too). That a squeezed line was the
+whole story: the lookup and QUIC costs above are the app's own, and a
+fast line pays them too.
+
+**Defects, how each was proven, what was done.**
+
+- *A server handshake per lookup on Stealth.* Port 53 now goes to a `dns`
+  outbound; A is answered by the engine's resolver from its cache;
+  upstream goes through the proxy, never direct: DNS over HTTPS to
+  1.1.1.1 with a 2 s limit, then TCP to 8.8.8.8, asked in turn. Not the
+  desktop's `tcp://` alone: xray-core's TCP name server dials a new
+  connection per query, which through the proxy is the handshake again
+  (read in its source). AAAA and HTTPS/SVCB come back empty at once (IPv4
+  only; the nodes refuse IPv6 anyway); other types are passed on through
+  the proxy. Emulator: 868 -> 186 ms (1196 -> 286 with the delay), cache
+  hits 1 ms, no leak, ten Wi-Fi/mobile switches per protocol with no
+  lookup lost. First tried with both resolvers asked at once: a dead
+  kept-open DoH connection then lost one lookup in three after a switch,
+  and xray-core's parallel mode gives no reply at all in some failure
+  cases; asking in turn fixed that. **Costs that remain:** with both
+  servers down a lookup still gets no reply (the app waits its own ~5 s);
+  in-turn mode also asks the TCP server on every NXDOMAIN or empty
+  answer, so a name with no address costs 0.6-1.1 s (a regression on
+  Shadowsocks, for negative answers only). The clean fix is a small core
+  patch (a real NXDOMAIN is final; SERVFAIL instead of silence); not done.
+- *QUIC on Vision.* Carrying it with the client-side flow
+  `xtls-rprx-vision-udp443` works (answered, 0.86-0.92 s per new flow),
+  but puts all QUIC into one TCP stream, with an effect on throttled
+  lines nobody has measured. Shipped instead: UDP 443 refused on the
+  phone on Vision flows (`VISION_QUIC = "drop-locally"`), which keeps what
+  apps saw before (no QUIC, so TCP) minus the wasted dial. Shadowsocks
+  carries QUIC. `"carry"` stays one constant away.
+- *"Up but not carrying traffic" on a healthy server* (the first iPhone
+  run of the branch: France first, every rung failed; another location
+  worked at once). When the pre-connect reading came from the API mirror
+  hosted on the server being connected to, the check asked that mirror
+  through that server's own tunnel, and the TLS handshake ended in EOF.
+  Proven on the emulator by forcing the baseline onto that mirror: build 2
+  never connected (17-18 tunnelled checks to it); the fix connected on the
+  first rung 5 of 5. **The node-side cause is ours and must stay:** the
+  self-loop guard (`installer/lib/agent.sh` `install_self_loop_guard`,
+  `installer/maintenance/no-self-loop.sh`) resets new TCP from Xray's
+  user to the node's own address. The phone now treats the rung's server
+  as "skip its endpoints" for every engine, retakes a baseline that came
+  from there, and puts that server's mirrors last for API calls while its
+  tunnel is up -- only once a rung has landed (a review finding, below).
+  An older bug than the DNS work; it probably made working servers look
+  dead for real customers on filtered networks.
+- *The health poll had no ceiling.* With the tunnel silently dead the app
+  said "You're protected" for about 185 s, on 0.2.41 and the branch
+  alike: after the baseline's endpoint the poll walked ~20 endpoints one
+  after another, 6-7 s each. Now: the baseline's endpoint 6 s, the rest
+  hedged within 8 s, and a second look at once before "Not carrying
+  traffic". Emulator: reported in 17-31 s across the builds; the worst
+  case by design is about 40 s.
+- *iOS memory.* The owner's phone, build 22: the extension died 30 s after
+  a clean Stealth connect at a 49.2 MiB peak (no stop reason; it
+  reconnected in 7 s, so he noticed nothing). 0.2.41 peaked around 16 MiB
+  in the field. On the Mac (the same Go engine, phys_footprint read as
+  iOS reads it -- a Mac process, NOT an iPhone), a phone-like load -- 20
+  new names a second as A, AAAA and HTTPS from fresh ports, dropped QUIC,
+  8 downloads and 4 uploads -- blew past the limit on the old config as
+  much as on the new: the TUN inbound keeps every UDP flow (a 1024-packet
+  queue and its goroutines) until its outbound gives up, 300 s, and every
+  lookup is a new flow; refused QUIC was held 30-90 s by the blackhole.
+  So this also explains drops on the released build. Peak footprint / Go
+  heap, MiB, real lookups, 60 s:
+
+  | | 0.2.41 config, Stealth | 0.2.41, SS | new config, Stealth | new, SS |
+  |---|---|---|---|---|
+  | before the fix | 261 / 179 | 166 / 118 | 159 / 96 | 175 / 113 |
+  | after | 41 / 20 | 35 / 19 | 31 / 14 | 33 / 17 |
+
+  Fix: the DNS outbound on its own policy level (10 s idle; Android gets
+  this too) and iOS-only xray-core patches through
+  `scripts/xray-core-patch.sh`: `ios-udp-flows` (a 256-packet queue; a
+  lookup's flow ends 2 s after its answer, an unanswered flow after 15 s,
+  an answered one after 120 s idle -- the floor calls on hold and games
+  need --; at most 64 flows and 512 lookups; the blackhole lets go of an
+  ended flow) and `ios-dns-close` (a DoH connection whose handshake failed
+  is closed, not left for 300 s).
+- *TCP floods.* After all that, an unpaced flood of new connections still
+  reached 107 MiB (Stealth) and 400 MiB (Shadowsocks, ~350 KiB per
+  connection). A fixed cap cannot fit both, so `ios-memory-gate` plus
+  `gate_darwin.go`: the engine reads its own footprint 20 times a second;
+  from 40 MiB new TCP connections are admitted at 20 a second (100
+  otherwise); at 46 MiB new connections are reset and new UDP flows
+  dropped (lookups excepted) and the runtime is asked to give memory
+  back; it reopens 1 MiB lower after 1 s; if memory stays at the mark for
+  3 s it closes the idlest quarter of connections every 2 s. How often it
+  closed, for how long, what it refused and what it shed go into the
+  heartbeat and the diagnostics line beside the memory peak (iOS only).
+  The gate alone was not enough: between two readings a flood got
+  thousands of connections in (165 MiB), and a burst let in as it
+  reopened took Shadowsocks from 45 to 52 MiB; the admission rate is what
+  holds the floods, at 40.7 MiB or less.
+- *Shadowsocks never passed a site's close to the app* (emulator: body in
+  2 s, connection still open past 30 s). A no-op `Close()` and no
+  half-close on the sing-box bridge inside xray-core
+  (`common/singbridge/pipe.go`), phone side. `ios-ss-close` adds the
+  half-close and gives the other direction 2 s, as other outbounds get.
+  It mattered for memory too: each lookup's TCP fallback held a
+  Shadowsocks connection for 300 s. iOS only.
+
+**Guards added.** `TestEngineMemoryBudget` (`engine_dnsload_darwin_test.go`)
+runs every config the app's builder writes (`testdata/app-configs.json`,
+so a new config is covered without anyone adding it) through app-open
+(with DoH refused, so every lookup takes the slower fallback), stalled
+uploads, slow readers, a TCP flood, a UDP flood, and a flood beside 8 long
+transfers. Budget `EngineFootprintBudget` = 47 MiB. It also fails if the
+gate closes under an ordinary load, if a transfer is cut off, or if it
+measured nothing (too few samples, no footprint, no bytes moved, too few
+lookups answered -- a deliberately broken run went red). Final three
+runs: worst 42.8 MiB (Shadowsocks app-open, DoH refused); the gate never
+closed. It runs in `.github/workflows/ci-engine-memory.yml` on macOS for
+pushes to main, `claude/**` and `rig/**` and for PRs that touch the
+engine, its patches or the config builder: about ten minutes. Unit tests:
+`xray-config.test.ts` (DNS shape, order, timeouts, lookup level, the
+Vision rule), `own-mirror.test.ts`, `poll-bound.test.ts`,
+`tunnel-evidence.test.ts`, `run-diagnostics.test.ts`, `gate_darwin_test.go`,
+`app_configs_test.go` (every generated config builds in the engine).
+
+**What the two reviews changed.** The first (of the DNS build): parallel
+resolvers replaced by DoH then TCP in turn, and QUIC dropped instead of
+carried. The second (of everything up to the gate) found: the endpoint
+order -- and with it the backup route and "doors first" -- ended for a
+rung that was dialled and then rejected (now only a landed tunnel
+counts); the memory test could pass without measuring; a race at engine
+stop could leave the gate closed for the next run; the gate could stay
+closed for minutes (it reopened only at 39 MiB while normal loads sit near
+42); a relay rung's exit refuses its own mirror too, and any one dead
+endpoint condemned a rung (the check now asks the rest; an answer through
+the tunnel lands "Connected, not confirmed"; only silence, or the bare
+line's own address from any endpoint, is held against it); one silent
+poll flipped the status (now two in a row); 30 s UDP idle broke calls on
+hold.
+
+**Not proven, and left.**
+- Nothing has run on a real iPhone: the engine patches, the gate, the
+  memory figures (a Mac process), the DNS gain where it should matter
+  most. The App Store release is manual for that reason.
+- The NXDOMAIN fallback cost and the no-reply case above.
+- "Connected, not confirmed" when the first endpoint asked is silent in a
+  working tunnel: honest, but a calmer state than "protected" for no fault
+  of the tunnel. Idea: accept a reading equal to the server's known exit
+  address from any endpoint.
+- The TCP-flood path is held by the admission rate and the gate only; the
+  gate's closing and shedding are proven by unit tests, not inside a
+  running engine.
+- Desktop parity: Windows and Linux probably still pay a handshake per
+  lookup on Stealth (`tcp://` resolvers) and still drop QUIC after a
+  wasted dial; unmeasured. Desktop Xray is not exposed to the own-mirror
+  fault (its server is routed around the tunnel); desktop WireGuard is
+  unmeasured.
+- Android keeps the Shadowsocks close bug (the fix is an iOS patch).
+- IPv6 on Android was answered separately the same day (captures on our
+  own AVD: nothing leaves outside the tunnel except sockets bound to an
+  interface), on branch `claude/android-ipv6-check`, not merged with this.
+- The real Instagram and WhatsApp apps, a restricted or lossy line, a real
+  Android phone (whose Private DNS may already keep one connection open).
+
+**Method, to save time next time.**
+- The emulator probe: a static Go program pushed to `/data/local/tmp`
+  (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`, `chmod 755` after every push).
+  The DNS and QUIC runs used modes for sequential, parallel and
+  same-socket lookups, QUIC packets and TLS GETs; those lived in a session
+  scratchpad and are gone. A smaller rebuilt set (`hold`, `get`, `udp`;
+  `NX_DEV=wlan0` binds to an interface) is kept outside the repo in
+  `C:\Users\aliha\Claude\vm\android\ipv6-check\tools\`, with `emu.sh`
+  (reads the WebView's text with `uiautomator dump`, taps by exact text,
+  picks country and protocol).
+- To make a run take a chosen baseline (the own-mirror proof), block the
+  other endpoints for the app's uid only, so the rest of the device and
+  the probe are untouched; run the probe as a given uid with
+  `su <uid> ./probe`. A probe as shell (uid 2000) is not "another app":
+  Android does not close its sockets at connect.
+- `adb emu network delay` does nothing on this emulator. Use `adb root`,
+  then `tc qdisc add dev wlan0 root netem delay 100ms`, and remove it
+  after.
+- Our own AVD is `nx_test` on port 5556 (`ANDROID_SERIAL=emulator-5556`),
+  made from `medium_phone`'s config. `medium_phone` belongs to other
+  sessions that are using it: never start, stop or send adb commands to
+  it, and count their emulator as one of the two heavy jobs allowed.
+- Read a tester's own report rows before believing "it seems fine": the
+  memory kill on the owner's phone was in his diagnostics, not in what he
+  saw.
