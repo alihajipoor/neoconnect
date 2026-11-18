@@ -301,7 +301,7 @@ again in `dns_list` (`device_facts.rs`, which Windows and both phones go
 through), and once more in the shared TypeScript. A router's global IPv6
 resolver that is not EUI-64 is kept: it carries the household's prefix,
 which the server already sees as the report's source address.
-| `net.privateDns`, `privateDnsHost` | **never** (Android only) | Android 9+: `isPrivateDnsActive` / `privateDnsServerName` -- "host" with the host when a name is set, "auto" when active without one, "off" when not active (so automatic mode that found no DNS-over-TLS server reads "off"); left out before Android 9 | **never**: iOS has no such setting | **never** (Android only) |
+| `net.privateDns`, `privateDnsHost` | **never** (Android only) | Android 9+: the setting, `Settings.Global` `private_dns_mode` -- "off", "opportunistic" as "auto", "hostname" as "host" with the host from `privateDnsServerName` when active, else from `private_dns_specifier` when readable. When the setting cannot be read: "host" (with the host) or "auto" only when `isPrivateDnsActive` says so, otherwise "unknown" -- never "off" on a guess, since "Automatic" (the default) is not active on a network that offers no DNS-over-TLS; left out before Android 9 | **never**: iOS has no such setting | **never** (Android only) |
 
 The Windows uplink is chosen among adapters that are up, can be physical
 (Wi-Fi, Ethernet, mobile broadband, PPP) and have a default gateway,
@@ -379,8 +379,11 @@ report queue), `service-check.ts`, `diagnostics-bundle.ts`,
   it carries before pressing Send.
 
 - **Details on every CONNECT, SIGN_IN, REGISTER and SESSION report**:
-  `device` (from `device_facts`, asked once a run, with the app's
-  interface language) and `net` (the same command, at most every 30 s).
+  `device` (from `device_facts`, with the app's interface language:
+  `model`, `os` and `osVersion` kept from the first good read of the run;
+  `memFreeMb`, `lowPower` and `dataSaver` read again with the network) and
+  `net` (the same command, at most every 30 s; a failed read sends neither
+  an old network nor old free-memory and saver readings).
   On a successful CONNECT, on SESSION and on SERVICE_CHECK also `tunnel`:
   the mode (`full`, `custom`, `gaming`) and the resolvers the app sets
   inside the tunnel, set afresh when a rung lands (proven or not), and on
@@ -410,8 +413,12 @@ report queue), `service-check.ts`, `diagnostics-bundle.ts`,
   no `sessionSeconds` (so it is never read as ten minutes of health), with
   `details.sessionEnd` -- `disconnected` (the customer's press), `lost`
   (a drop, or the health checks giving up), `replaced` (another route took
-  over), `unknown` (the plan's device limit took it down) -- for a session
-  of at least 60 s from its first passing check, once. A stopped pass ends
+  over), `unknown` (the plan's device limit took it down) -- with the
+  `routeId` and `protocol` (the label the connect's own report used) of
+  the session, and `seconds` counted from when the app showed "Connected"
+  for that tunnel (its first passing check when that time is not known;
+  the ten-minute report still counts from the first passing check), for a
+  session of at least 60 s by that count, once. A stopped pass ends
   it as `disconnected`. From the live tracker (`session-report.ts`), never
   from the local session log, which stays on the device. `app_closed` is
   never sent: a killed app sends nothing.
