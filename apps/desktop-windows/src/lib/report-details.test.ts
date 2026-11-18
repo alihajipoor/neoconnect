@@ -200,13 +200,67 @@ describe("what a connect measured", () => {
 
   it("adds the tunnel's settings to connects and sessions, and the caller's own on top", async () => {
     invoke.mockRejectedValue("missing");
-    rd.noteTunnel({ mode: "full", dns: ["1.1.1.1"] });
+    rd.landTunnel({ mode: "full", dns: ["1.1.1.1"] });
     rd.noteTunnel({ ipv6Blocked: true });
     expect(await rd.collectDetails("SESSION", { sessionEnd: { cause: "disconnected", seconds: 61 } })).toEqual({
       tunnel: { mode: "full", dns: ["1.1.1.1"], ipv6Blocked: true },
       sessionEnd: { cause: "disconnected", seconds: 61 },
     });
+    expect(await rd.collectDetails("CONNECT", undefined, "SUCCESS")).toEqual({
+      tunnel: { mode: "full", dns: ["1.1.1.1"], ipv6Blocked: true },
+    });
     expect(await rd.collectDetails("SIGN_IN")).toBeUndefined();
+  });
+
+  it("names no tunnel on a failed connect, which landed nothing", async () => {
+    invoke.mockRejectedValue("missing");
+    rd.landTunnel({ mode: "full", splitTunnel: false });
+    expect(await rd.collectDetails("CONNECT", { errorKind: "allFailed" }, "FAILURE")).toEqual({ errorKind: "allFailed" });
+  });
+
+  it("never carries an older session's settings into a new landing", async () => {
+    invoke.mockRejectedValue("missing");
+    rd.landTunnel({ mode: "full", dns: ["192.0.2.1"] });
+    rd.noteTunnel({ splitTunnel: false, ipv6Blocked: true });
+    // OpenVPN: no resolvers known to this layer, and Custom mode now.
+    rd.landTunnel({ mode: "custom", dns: undefined });
+    expect(rd.currentTunnel()).toEqual({ mode: "custom" });
+    rd.clearTunnel();
+    expect(rd.currentTunnel()).toBeUndefined();
+    // A status poll answering after the teardown starts nothing.
+    rd.noteTunnel({ ipv6Blocked: true });
+    expect(rd.currentTunnel()).toBeUndefined();
+  });
+
+  it("takes the tunnel as it was when the report was made, not after a teardown", async () => {
+    invoke.mockResolvedValue(FACTS);
+    rd.landTunnel({ mode: "full" });
+    const pending = rd.collectDetails("SESSION", { sessionEnd: { cause: "disconnected", seconds: 90 } });
+    rd.clearTunnel();
+    expect((await pending)?.tunnel).toEqual({ mode: "full" });
+  });
+
+  it("is put away when a new pass begins, however recent", async () => {
+    invoke.mockRejectedValue("missing");
+    rd.noteEgress("throughTunnel", 900);
+    rd.clearMeasurements();
+    expect(await rd.collectDetails("CONNECT", undefined, "FAILURE")).toBeUndefined();
+  });
+});
+
+describe("the device's resolvers", () => {
+  it("never include one that can carry the router's hardware address", () => {
+    expect(rd.namesHardware("fe80::1a2b:3cff:fe4d:5e6f")).toBe(true);
+    expect(rd.namesHardware("fe80::1")).toBe(true);
+    expect(rd.namesHardware("febf::1")).toBe(true);
+    expect(rd.namesHardware("2001:db8:0:1:1a2b:3cff:fe4d:5e6f")).toBe(true);
+    expect(rd.namesHardware("2001:db8::53")).toBe(false);
+    expect(rd.namesHardware("fec0::1")).toBe(false);
+    expect(rd.namesHardware("::ffff:192.0.2.1")).toBe(false);
+    expect(rd.namesHardware("192.0.2.1")).toBe(false);
+    expect(
+      rd.cleanNet({ dns: ["fe80::1a2b:3cff:fe4d:5e6f", "2001:db8:0:1:1a2b:3cff:fe4d:5e6f", "192.0.2.1", "2001:db8::53"] }),
+    ).toEqual({ dns: ["192.0.2.1", "2001:db8::53"] });
   });
 });
 

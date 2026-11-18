@@ -156,9 +156,36 @@ function oneOf<T extends string>(value: unknown, allowed: Set<string>): T | unde
   return typeof value === "string" && allowed.has(value) ? (value as T) : undefined;
 }
 
+/** The sixteen bytes of an IPv6 literal `isIpLiteral` accepted. */
+function v6Bytes(value: string): number[] {
+  let text = value;
+  const tail = text.slice(text.lastIndexOf(":") + 1);
+  if (tail.includes(".")) {
+    const [a, b, c, d] = tail.split(".").map(Number);
+    text = `${text.slice(0, text.lastIndexOf(":") + 1)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [head, rest] = text.split("::");
+  const groups = (half: string | undefined) => (half ? half.split(":").map((g) => parseInt(g, 16)) : []);
+  const front = groups(head);
+  const back = groups(rest);
+  const all = rest === undefined ? front : [...front, ...Array(8 - front.length - back.length).fill(0), ...back];
+  return all.flatMap((g) => [g >> 8, g & 0xff]);
+}
+
+/** A resolver address that can carry the router's hardware address: an
+ * IPv6 link-local one (fe80::/10, what home routers commonly advertise as
+ * themselves) or one whose interface ID is EUI-64 (ff:fe in its middle,
+ * built from a MAC). The native side drops these already
+ * (device_facts.rs `names_hardware`); this is the backstop. */
+export function namesHardware(ip: string): boolean {
+  if (!ip.includes(":")) return false;
+  const bytes = v6Bytes(ip);
+  return (bytes[0] === 0xfe && (bytes[1] & 0xc0) === 0x80) || (bytes[11] === 0xff && bytes[12] === 0xfe);
+}
+
 function ips(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  const kept = [...new Set(value.filter(isIpLiteral))].slice(0, MAX_DNS);
+  const kept = [...new Set(value.filter(isIpLiteral).filter((ip) => !namesHardware(ip)))].slice(0, MAX_DNS);
   return kept.length > 0 ? kept : undefined;
 }
 
@@ -391,11 +418,26 @@ export async function readFacts(now: () => number = Date.now): Promise<Facts> {
 
 let tunnelFacts: TunnelDetails = {};
 
-/** The live tunnel's settings, as the screen knows them: merged into what
- * is held, so the landing (mode, resolvers) and the status poll (Custom
- * mode, IPv6, DNS) can each say their part. */
+/** A rung landed: its settings (mode, resolvers) replace whatever the last
+ * tunnel's were, so nothing of an older session -- its resolvers, its
+ * Custom mode -- is reported as this one's. */
+export function landTunnel(facts: TunnelDetails): void {
+  tunnelFacts = compact(facts) ?? {};
+}
+
+/** More of the live tunnel's settings, from the status poll (Custom mode,
+ * IPv6, DNS): merged into the landing's. Ignored while no tunnel has
+ * landed, so a poll answering after a teardown does not start a record
+ * of its own. */
 export function noteTunnel(facts: TunnelDetails): void {
+  if (Object.keys(tunnelFacts).length === 0) return;
   tunnelFacts = { ...tunnelFacts, ...compact(facts) };
+}
+
+/** The tunnel is gone (a disconnect, a drop, a teardown) or about to be
+ * replaced (a pass begins): nothing of it goes with a later report. */
+export function clearTunnel(): void {
+  tunnelFacts = {};
 }
 
 export function currentTunnel(): TunnelDetails | undefined {
@@ -445,6 +487,13 @@ export function noteEgress(state: string, ms: number, now: () => number = Date.n
   lastEgress = { state, ms: int(ms) ?? 0, at: now() };
 }
 
+/** A connect pass begins: what an earlier pass measured is not this
+ * one's, even inside the two minutes. */
+export function clearMeasurements(): void {
+  lastDataCheck = null;
+  lastEgress = null;
+}
+
 /** The last data check and exit check, when recent, given up once taken:
  * each goes with one connect report. */
 export function takeMeasurements(now: () => number = Date.now): Pick<ReportDetails, "dataCheck" | "egress"> {
@@ -462,18 +511,23 @@ export function takeMeasurements(now: () => number = Date.now): Pick<ReportDetai
  * ------------------------------------------------------------------ */
 
 /** The details for a report of `kind`: the device and network, the
- * tunnel's settings (connects and sessions), the last measurements (a
- * connect), with `own` -- what the caller knows, which wins -- on top.
- * Sanitized and capped; undefined when nothing is known. Never rejects. */
-export async function collectDetails(kind: string, own?: ReportDetails): Promise<ReportDetails | undefined> {
+ * tunnel's settings (a successful connect, sessions, service checks), the
+ * last measurements (a connect), with `own` -- what the caller knows,
+ * which wins -- on top. Sanitized and capped; undefined when nothing is
+ * known. Never rejects.
+ *
+ * The tunnel and the measurements are read at the call, before anything
+ * is awaited: a teardown right after the call (a session's end, then the
+ * disconnect) does not take them from the report it was made for. A
+ * failed connect landed nothing, so it carries no tunnel. */
+export async function collectDetails(kind: string, own?: ReportDetails, outcome?: string): Promise<ReportDetails | undefined> {
   try {
-    const facts = await readFacts();
-    const base: ReportDetails = { ...facts };
-    if (kind === "CONNECT" || kind === "SESSION" || kind === "SERVICE_CHECK") {
-      const tunnel = currentTunnel();
-      if (tunnel) base.tunnel = tunnel;
-    }
+    const base: ReportDetails = {};
+    const withTunnel = (kind === "CONNECT" && outcome === "SUCCESS") || kind === "SESSION" || kind === "SERVICE_CHECK";
+    const tunnel = withTunnel ? currentTunnel() : undefined;
+    if (tunnel) base.tunnel = tunnel;
     if (kind === "CONNECT") Object.assign(base, takeMeasurements());
+    Object.assign(base, await readFacts());
     return capDetails(sanitizeDetails({ ...base, ...own }));
   } catch {
     return capDetails(sanitizeDetails(own));

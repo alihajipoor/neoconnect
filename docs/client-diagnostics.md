@@ -291,6 +291,16 @@ by field and holds it to the bounds above).
 | `net.ipv4`, `net.ipv6` | the uplink has a gateway of that family and a usable address (not APIPA; IPv6 global 2000::/3) | the network's `LinkProperties.linkAddresses` hold an IPv4 / a non-link-local IPv6 address | `supportsIPv4` / `supportsIPv6` of the pinned path | no command |
 | `net.otherVpn` | **never** yet: the service's diagnostics know it, behind a round trip this does not wait for | false when no network has a VPN transport; true when one has and none of our own tunnels shows any sign of life (Android 10+: no VPN network owned by this app; no WireGuard, no recorded protocol, no Xray state "up", no platform IKEv2 of ours); left out otherwise | **never**: a tunnel interface does not say whose it is | no command |
 | `net.dns` | the uplink adapter's resolvers, without loopback and the fec0 defaults, at most 4 | `LinkProperties.dnsServers` of the non-VPN network, at most 4 | **never**: no public API | no command |
+
+On every platform `net.dns` leaves out any IPv6 resolver that is
+link-local (fe80::/10) or whose interface ID is EUI-64 (ff:fe in its
+middle): home routers commonly advertise their own link-local address as
+the resolver, and on many it is built from the router's MAC -- the
+gateway fingerprint this feature never sends. Dropped in the Kotlin read,
+again in `dns_list` (`device_facts.rs`, which Windows and both phones go
+through), and once more in the shared TypeScript. A router's global IPv6
+resolver that is not EUI-64 is kept: it carries the household's prefix,
+which the server already sees as the report's source address.
 | `net.privateDns`, `privateDnsHost` | **never** (Android only) | Android 9+: `isPrivateDnsActive` / `privateDnsServerName` -- "host" with the host when a name is set, "auto" when active without one, "off" when not active (so automatic mode that found no DNS-over-TLS server reads "off"); left out before Android 9 | **never**: iOS has no such setting | no command |
 
 The Windows uplink is chosen among adapters that are up, can be physical
@@ -332,18 +342,40 @@ too is unproven.
 
 One implementation, `apps/desktop-windows/src/lib`, which the phone app
 imports: `report-details.ts` (the `details` object), `attempts.ts` (the
-report queue), `service-check.ts`, `diagnostics-bundle.ts`, and the
-Support screen (`screens/Support.tsx`).
+report queue), `service-check.ts`, `diagnostics-bundle.ts`,
+`diagnostics-consent.ts`, and the Support screen (`screens/Support.tsx`).
+
+- **Nothing new until the customer has been told in the app** (Rollout
+  2, `diagnostics-consent.ts`). Until then every report goes exactly as
+  it did before this change -- no `details`, no rung `ms` -- and no
+  SERVICE_CHECK is run by itself or sent. On a phone the notice is the
+  prominent disclosure, now **version 2** (`DISCLOSURE_VERSION`), whose
+  "connection diagnostics" item names the new data; everyone who accepted
+  version 1 is shown it again before anything new is sent, and a wiring
+  test fails whenever the disclosure's words change without a decision
+  about the version. On Windows and Linux it is a notice on the Dashboard
+  (`DiagnosticsNotice`, beside the update notice, in its own store file
+  `diagnostics-notice.json`, which survives a sign-out); it does not stand
+  in front of the app, so a sign-in on a fresh install carries no details.
+  A diagnostics bundle is not held by it: the customer sees exactly what
+  it carries before pressing Send.
 
 - **Details on every CONNECT, SIGN_IN, REGISTER and SESSION report**:
   `device` (from `device_facts`, asked once a run, with the app's
   interface language) and `net` (the same command, at most every 30 s).
-  On CONNECT and SESSION also `tunnel`: the mode (`full`, `custom`,
-  `gaming`) and the resolvers the app sets inside the tunnel, noted when a
-  rung lands, and on Windows `splitTunnel`, `ipv6Blocked` and
-  `dnsUnprotected` from the service's status. On CONNECT also the last
+  On a successful CONNECT, on SESSION and on SERVICE_CHECK also `tunnel`:
+  the mode (`full`, `custom`, `gaming`) and the resolvers the app sets
+  inside the tunnel, set afresh when a rung lands (proven or not), and on
+  Windows `splitTunnel`, `ipv6Blocked` and `dnsUnprotected` from the
+  service's status, merged into that landing's. Put away on a disconnect,
+  a drop, a teardown (a stopped pass, the device limit) and when a connect
+  pass begins, so nothing of an older session is reported as a later
+  one's; a failed CONNECT landed nothing and carries none. Read when the
+  report is made, before anything is awaited. On CONNECT also the last
   data check's two legs and the last exit check's state and time, each
-  within two minutes and each sent once; `errorKind` on a failed connect;
+  within two minutes, each sent once and put away when a pass begins --
+  the exit check only the connect's own (a health poll's never counts);
+  `errorKind` on a failed connect;
   `reconnect` on an automatic reconnect's report. Every field is copied by
   name and held to the validators above; the whole is capped at 6,000
   bytes, giving up parts in the order reconnect, egress, dataCheck,
@@ -360,9 +392,10 @@ Support screen (`screens/Support.tsx`).
   no `sessionSeconds` (so it is never read as ten minutes of health), with
   `details.sessionEnd` -- `disconnected` (the customer's press), `lost`
   (a drop, or the health checks giving up), `replaced` (another route took
-  over) -- for a session of at least 60 s from its first passing check,
-  once. From the live tracker (`session-report.ts`), never from the local
-  session log, which stays on the device. `app_closed` and `unknown` are
+  over), `unknown` (the plan's device limit took it down) -- for a session
+  of at least 60 s from its first passing check, once. A stopped pass ends
+  it as `disconnected`. From the live tracker (`session-report.ts`), never
+  from the local session log, which stays on the device. `app_closed` is
   never sent: a killed app sends nothing.
 - **The service check**, after a proven connect's success report (and
   its speed sample): only when the list says `enabled`, the app is in
@@ -371,17 +404,31 @@ Support screen (`screens/Support.tsx`).
   tunnel -- on Windows and Linux not in Custom or gaming mode; on a phone
   always (Android puts this app in the tunnel when apps are chosen; iOS
   has no per-app routing). Three at a time, 8 s each, 25 s in all; a
-  target not answered by then is left out and the run is `OTHER`. A
-  disconnect stops it and nothing is reported. The list is kept 24 h and
-  the last run per route in the app's store (`service-checks.json`).
+  target not answered by then is left out and the run is `OTHER`. Any
+  teardown or landing during the run -- even a drop and a reconnect to the
+  same route -- stops it and nothing is reported (a landing counter taken
+  when it starts). The list is kept 24 h and the last run per route in
+  the app's store (`service-checks.json`), so a customer who uses several
+  servers in a day gets one run for each; the disclosure says "at most
+  once a day for each server". A SERVICE_CHECK that cannot be delivered is
+  never queued: the queue's 25 places are for connect failures.
 - **Support screen, every platform**: "Connection test" runs the check
   now and shows each service by its label as reachable or not, and the
   way it went (through the VPN, without it, or -- for a tunnel this run of
-  the app did not bring up -- neither). It is reported as a SERVICE_CHECK
-  with that `via` (left out when unknown). "Send diagnostics to support"
+  the app did not bring up -- neither). The way is that of the last
+  landing, unverified ones included, and is left out when a tunnel came or
+  went during the run. It does not start while the automatic run is going.
+  It is reported as a SERVICE_CHECK with that `via` (left out when
+  unknown), at most once in 5 minutes however often it is pressed (shown
+  every time), and only once the customer has been told; the card then
+  says the result is sent. "Send diagnostics to support"
   (signed-in only) shows exactly the body it sends -- the facts, the
   test's results if one was run, and on Windows and Linux the Copy text --
-  and answers with the reference.
+  and answers with the reference. In the bundle's Copy text the other VPNs
+  that are up are a count ("2 (names not sent)"), not the adapters' or
+  links' own names, which a customer or an employer may have named after
+  a person; the Copy button's own text, which the customer pastes
+  themselves, keeps the names.
 
 **Windows** sends all of the above. Its `device_facts` gives no
 `dataSaver`, `metered` or `otherVpn` (table above); `tunnel.dns` is

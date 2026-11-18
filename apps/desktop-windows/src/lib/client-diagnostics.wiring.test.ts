@@ -41,8 +41,9 @@ for (const [name, pass] of [
       expect(pass).toContain("details: { errorKind: lastError.kind }");
     });
 
-    it("notes the tunnel it landed on", () => {
-      expect(pass).toContain("noteTunnel({");
+    it("notes the tunnel it landed on, and puts the last one away as it begins", () => {
+      expect(pass).toContain("noteLanding(");
+      expect(pass).toContain("noteTunnelGone(true);");
       expect(pass).toContain("tunnelResolvers(candidate.protocol, candidate.credentials,");
     });
 
@@ -64,11 +65,48 @@ describe("the session's end", () => {
     }
   });
 
+  it("is said on every teardown: a stopped pass and the device limit's", () => {
+    for (const screen of [windows, phone]) {
+      const stop = screen.slice(screen.indexOf("async function stopPass() {"));
+      expect(stop.slice(0, 600)).toContain('sessionTrackerRef.current.ended("disconnected");');
+      expect(stop.slice(0, 600)).toContain("noteTunnelGone();");
+      expect(screen).toContain('sessionTrackerRef.current.ended("unknown");');
+    }
+    const slot = windows.slice(windows.indexOf("async function tearDownForSlotOnce()"));
+    expect(slot.slice(0, 500)).toContain('sessionTrackerRef.current.ended("unknown");');
+  });
+
   it("is never taken from the local session log, which stays on the device", () => {
     for (const file of ["./session-report.ts", "./report-details.ts", "./service-check.ts", "./diagnostics-bundle.ts", "./attempts.ts"]) {
       expect(source(file)).not.toMatch(/from "\.\/session-log"/);
     }
     expect(source("../screens/Support.tsx")).not.toContain("session-log");
+  });
+});
+
+describe("the exit check a connect report carries", () => {
+  it("is the connect's own, never a health poll's", () => {
+    // Windows: the ladder's confirmEgressWithin notes it; the polls'
+    // verifyEgress calls do not ask to.
+    expect(windows).not.toContain("forConnectReport");
+    const phoneEvidence = source("../../../mobile/src/lib/tunnel-evidence.ts");
+    const confirm = phoneEvidence.slice(phoneEvidence.indexOf("export async function confirmEgress("), phoneEvidence.indexOf("export function leakShown("));
+    expect(confirm.split("forConnectReport: true").length - 1).toBe(2);
+    const poll = phoneEvidence.slice(phoneEvidence.indexOf("export async function pollEgress("));
+    expect(poll.slice(0, 1500)).not.toContain("forConnectReport");
+  });
+});
+
+describe("the in-app notice", () => {
+  it("is on the desktop Dashboard until accepted, and the phone app reads its own disclosure", () => {
+    const app = source("../App.tsx");
+    expect(app).toContain("<DiagnosticsNotice");
+    expect(app).toContain("void acceptDesktopNotice();");
+    expect(source("../../../mobile/src/App.tsx")).toContain("setDiagnosticsConsentSource(hasAcceptedDisclosure);");
+  });
+
+  it("sends a bundle's Copy text without the names of other VPN adapters", () => {
+    expect(source("../screens/Support.tsx")).toContain("collectPlatformText(true)");
   });
 });
 
@@ -79,7 +117,7 @@ describe("Windows' automatic check", () => {
 });
 
 describe("the new strings", () => {
-  const keys = Object.keys(DICTIONARIES.en).filter((k) => k.startsWith("check.") || k.startsWith("send."));
+  const keys = Object.keys(DICTIONARIES.en).filter((k) => k.startsWith("check.") || k.startsWith("send.") || k.startsWith("notice.diag"));
 
   it("exist, in both languages", () => {
     expect(keys.length).toBeGreaterThanOrEqual(28);
@@ -108,7 +146,8 @@ describe("the new strings", () => {
   });
 
   it("include the disclosure's new meaning, and leave the log's promise as it was", () => {
-    expect(DICTIONARIES.en["disclosure.dataDiagnostics"]).toContain("About once a day the app also tests");
+    expect(DICTIONARIES.en["disclosure.dataDiagnostics"]).toContain("at most once a day for each server");
+    expect(DICTIONARIES.en["disclosure.dataDiagnostics"]).toContain("the result of the connection test when you run it yourself");
     expect(DICTIONARIES.en["disclosure.dataDiagnostics"]).toContain("It never records the sites you visit.");
     expect(DICTIONARIES.fa["disclosure.dataDiagnostics"]).toContain("روزی یک بار");
     expect(DICTIONARIES.en["set.historyHint"]).toContain("The log stays on this device for 7 days and isn't sent anywhere.");

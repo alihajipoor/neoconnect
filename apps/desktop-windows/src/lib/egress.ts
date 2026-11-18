@@ -762,6 +762,11 @@ export type VerifyOptions = {
    * use up the whole ceiling before one that works is asked -- the phones'
    * health poll. Unset, the walk is strict, as it always was. */
   hedgeMs?: number;
+  /** Keep the verdict for the next connect report's details
+   * (`noteEgress`). Only a connect's own check sets it: a health poll's
+   * verdict is about an older tunnel, and must not ride on a later
+   * connect's report as if that connect had proven its exit. */
+  forConnectReport?: boolean;
 };
 
 /** Compares the address the world sees now against the one it saw before
@@ -816,8 +821,8 @@ export type VerifyOptions = {
  * tunnel, and silence from it would read as a dead tunnel wherever the
  * public-internet probe is not there to say otherwise.
  *
- * Its verdict and how long it took are kept for the next connect report's
- * details (`noteEgress`); nothing else changes.
+ * With `forConnectReport`, its verdict and how long it took are kept for
+ * the next connect report's details (`noteEgress`); nothing else changes.
  */
 export async function verifyEgress(
   baseline: BaselineIp | null,
@@ -825,7 +830,7 @@ export async function verifyEgress(
 ): Promise<EgressVerdict> {
   const started = Date.now();
   const verdict = await verifyEgressOnce(baseline, options);
-  noteEgress(verdict.state, Date.now() - started);
+  if (options.forConnectReport) noteEgress(verdict.state, Date.now() - started);
   return verdict;
 }
 

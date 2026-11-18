@@ -143,6 +143,9 @@ export async function confirmEgress(
         baselineFirst: true,
         attemptMs: Math.min(EGRESS_TIMEOUT_MS, Math.max(left(), 1)),
         totalMs: Math.max(left(), 1),
+        // The connect's own check: its verdict goes with the connect
+        // report. A health poll's (`pollEgress`) never does.
+        forConnectReport: true,
       }),
     );
     // The baseline's endpoint alone said nothing. One endpoint is not the
@@ -152,7 +155,12 @@ export async function confirmEgress(
     if (verdict.state === "unreachable" && sameEndpointOnly && left() > 0) {
       verdict = leakShown(
         baseline,
-        await verifyEgress(baseline, { tunnelServer, totalMs: Math.min(POLL_WALK_MS, left()), hedgeMs: POLL_HEDGE_MS }),
+        await verifyEgress(baseline, {
+          tunnelServer,
+          totalMs: Math.min(POLL_WALK_MS, left()),
+          hedgeMs: POLL_HEDGE_MS,
+          forConnectReport: true,
+        }),
       );
     }
     if (cancelled()) return null;

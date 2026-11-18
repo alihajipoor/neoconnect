@@ -2,7 +2,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { apiRequest } from "./api";
 import { reportAttempt, type AttemptReport } from "./attempts";
-import { cleanService, collectDetails, type ReportDetails, type ServiceResult } from "./report-details";
+import {
+  clearMeasurements,
+  clearTunnel,
+  cleanService,
+  collectDetails,
+  landTunnel,
+  type ReportDetails,
+  type ServiceResult,
+  type TunnelDetails,
+} from "./report-details";
+import { diagnosticsAllowed } from "./diagnostics-consent";
 
 /** The service check: can a short list of well-known services be reached,
  * through the tunnel or directly (docs/client-diagnostics.md, B).
@@ -214,7 +224,35 @@ export interface LiveRoute {
 
 /** The tunnel the last connect landed on, for the on-demand run. */
 let liveRoute: LiveRoute | null = null;
+/** Moved on by every landing and every end of a tunnel: a run that began
+ * under one value and ends under another went through more than one
+ * tunnel, or none for a while, and says nothing about any route. */
+let landing = 0;
 let running = false;
+/** When a run the customer asked for was last reported. */
+let lastManualReportAt: number | null = null;
+/** At most one on-demand run reported in this long. The results are shown
+ * every time; a test pressed over and over is one report. */
+export const MANUAL_REPORT_EVERY_MS = 5 * 60_000;
+
+/** A rung landed -- proven or not: the tunnel the on-demand run goes
+ * through now, and the settings the reports name (`landTunnel`). */
+export function noteLanding(route: LiveRoute, tunnel: TunnelDetails): void {
+  liveRoute = route;
+  landing += 1;
+  landTunnel(tunnel);
+}
+
+/** The tunnel is gone or being replaced: a disconnect, a drop, a
+ * teardown, or a connect pass beginning. Nothing is attributed to it from
+ * here on, and a run still going is not reported. With `pass`, what an
+ * earlier pass measured is put away too. */
+export function noteTunnelGone(pass = false): void {
+  liveRoute = null;
+  landing += 1;
+  clearTunnel();
+  if (pass) clearMeasurements();
+}
 
 export function foregrounded(): boolean {
   return typeof document === "undefined" || document.visibilityState === "visible";
@@ -235,14 +273,19 @@ export interface ScheduledRun extends LiveRoute {
  * through the tunnel. Fire and forget; never rejects. Resolves true when a
  * run was reported. */
 export async function runScheduledServiceCheck(run: ScheduledRun): Promise<boolean> {
-  const { stillUp, foreground = foregrounded, now = Date.now, ...route } = run;
-  liveRoute = route;
+  const { stillUp: upNow, foreground = foregrounded, now = Date.now, ...route } = run;
+  // The landing this run is for: any teardown or landing since -- even a
+  // reconnect to the same route inside the run -- ends it unreported.
+  const at = landing;
+  const stillUp = () => landing === at && upNow();
   if (running) return false;
   running = true;
   try {
     // In Custom mode the app's own traffic bypasses the tunnel: an
     // automatic run would test the bare line under the tunnel's name.
     if (!route.fullTunnel || !stillUp() || !foreground()) return false;
+    // Not until the customer has been told about it (diagnostics-consent.ts).
+    if (!(await diagnosticsAllowed())) return false;
     const list = await loadTargets(now);
     if (!list || !list.enabled || list.targets.length === 0) return false;
     const store = await getStore().catch(() => null);
@@ -254,7 +297,7 @@ export async function runScheduledServiceCheck(run: ScheduledRun): Promise<boole
     if (typeof last === "number" && now() - last < list.everyHours * 3_600_000 && now() >= last) return false;
     if (!stillUp() || !foreground()) return false;
     const result = await runTargets(list.targets, () => !stillUp(), now);
-    if (result === null || result.services.length === 0) return false;
+    if (result === null || result.services.length === 0 || !stillUp()) return false;
     if (store) {
       try {
         await store.set(LAST_RUN_KEY, { ...lastRuns, [route.routeId]: now() });
@@ -322,17 +365,33 @@ export async function currentVia(): Promise<{ via: Via | undefined; route?: Live
 /** The check, now, for the customer to see: every listed target, its
  * result under its label. Reported as one SERVICE_CHECK, with the way it
  * went. Never rejects. */
-export async function runServiceCheckNow(stopped: () => boolean = () => false): Promise<ServiceCheckAnswer> {
+export async function runServiceCheckNow(
+  stopped: () => boolean = () => false,
+  now: () => number = Date.now,
+): Promise<ServiceCheckAnswer> {
+  // The automatic run is under way: two at once would each measure the
+  // other's load. "Couldn't start, try again in a moment" is what is true.
+  if (running) return { kind: "unavailable" };
+  running = true;
   try {
     const list = await loadTargets();
     if (!list) return { kind: "unavailable" };
     if (!list.enabled || list.targets.length === 0) return { kind: "off" };
-    const { via, route } = await currentVia();
+    const at = landing;
+    const { via: viaAtStart, route } = await currentVia();
     const run = await runTargets(list.targets, stopped);
     // No target answered at all: the probe itself did not run (a build
     // without it), which says nothing about any service.
     if (run === null || run.services.length === 0) return { kind: "unavailable" };
-    void reportRun(list, run, via, route);
+    // A tunnel that came or went during the run: it went neither way
+    // throughout, so it is not said to have.
+    const via = landing === at ? viaAtStart : undefined;
+    // Reported (once in `MANUAL_REPORT_EVERY_MS`) only once the customer
+    // has been told in the app; `reportAttempt` holds that line too.
+    if (lastManualReportAt === null || now() - lastManualReportAt >= MANUAL_REPORT_EVERY_MS || now() < lastManualReportAt) {
+      lastManualReportAt = now();
+      void reportRun(list, run, via, via === "tunnel" ? route : undefined);
+    }
     const labels = new Map(list.targets.map((t) => [t.key, t.label]));
     return {
       kind: "done",
@@ -344,6 +403,8 @@ export async function runServiceCheckNow(stopped: () => boolean = () => false): 
     };
   } catch {
     return { kind: "unavailable" };
+  } finally {
+    running = false;
   }
 }
 
@@ -364,5 +425,7 @@ export async function bundleDetails(answer: ServiceCheckAnswer | null): Promise<
 export function resetServiceCheckForTests(): void {
   storePromise = null;
   liveRoute = null;
+  landing = 0;
   running = false;
+  lastManualReportAt = null;
 }

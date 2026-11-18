@@ -107,7 +107,7 @@ import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, timedRungs, type Dial } from "../lib/attempts";
 import { noteTunnel, tunnelResolvers } from "../lib/report-details";
-import { runScheduledServiceCheck } from "../lib/service-check";
+import { noteLanding, noteTunnelGone, runScheduledServiceCheck } from "../lib/service-check";
 import {
   checkDataMoves,
   rememberedKbps,
@@ -1267,6 +1267,7 @@ export function Dashboard({
     setConnectedAt(null);
     strikesRef.current = 0;
     sessionTrackerRef.current.ended("lost");
+    noteTunnelGone();
     // Nothing renews a slot without a tunnel, and nothing is going to
     // bring one back: given back, rather than left to turn the
     // customer's other device away as "in use" until it goes stale. Kept
@@ -2678,6 +2679,7 @@ export function Dashboard({
       cooldownUntilRef.current = Date.now() + MID_SESSION_COOLDOWN_MS;
       // The health checks gave up on this session.
       sessionTrackerRef.current.ended("lost");
+      noteTunnelGone();
       return true;
     };
 
@@ -3189,6 +3191,10 @@ export function Dashboard({
   async function stopPass() {
     const generation = beginIntent("disconnect");
     cancelRef.current = true;
+    // Whatever was up ends here, as a press ends it: one end report for
+    // the session, and nothing attributed to the tunnel after it.
+    sessionTrackerRef.current.ended("disconnected");
+    noteTunnelGone();
     // The pass may already hold a slot. Given back fire and forget,
     // never in front of the teardown (docs/device-slots.md, 8) -- and
     // again once it is over, if the teardown took the first one with it
@@ -3334,6 +3340,7 @@ export function Dashboard({
         // is a new one, and its check bounces again (lib/check-pop.ts).
         rearmCheckPop();
         sessionTrackerRef.current.ended("disconnected");
+        noteTunnelGone();
         const generation = beginIntent("disconnect");
         // This device stops using one of the plan's devices. Released
         // fire and forget, within a second and a half, and never in
@@ -3511,6 +3518,11 @@ export function Dashboard({
    * settle time, or a service that will not answer, is not down. */
   async function tearDownForSlotOnce(): Promise<boolean> {
     const generation = beginIntent("disconnect");
+    // The plan's device limit ended the session, not the customer and not
+    // the network: "unknown" says no more than that. Once per session,
+    // however often the teardown is retried.
+    sessionTrackerRef.current.ended("unknown");
+    noteTunnelGone();
     setConnectionState("disconnecting");
     await serviceDisconnect().catch(() => undefined);
     const state = await confirmTornDown();
@@ -3589,6 +3601,9 @@ export function Dashboard({
     const intent = beginIntent("connect");
     ladderRunningRef.current = true;
     ladderStartedAtRef.current = Date.now();
+    // Nothing an earlier tunnel or pass left -- its settings, its exit
+    // check, its data check -- goes with this pass's reports.
+    noteTunnelGone(true);
     cancelRef.current = false;
     /** Whether this pass has been told to stop: the stop flag, from
      * whichever screen pressed, or -- for an automatic reconnect's -- the
@@ -4619,10 +4634,15 @@ export function Dashboard({
             // few seconds is the same report; a row of its own for the
             // sample would be counted as a second attempt.
             const rungMs = rungClock.landed();
-            noteTunnel({
-              mode: appModeRef.current === "gaming" ? "gaming" : customMode ? "custom" : "full",
-              dns: tunnelResolvers(candidate.protocol, candidate.credentials, desktopPlatform()),
-            });
+            // Every landing, proven or not: the tunnel the reports and the
+            // on-demand test now name, in place of the last one's.
+            noteLanding(
+              { routeId: candidate.routeId, protocol: label, fullTunnel: appModeRef.current !== "gaming" && !customMode },
+              {
+                mode: appModeRef.current === "gaming" ? "gaming" : customMode ? "custom" : "full",
+                dns: tunnelResolvers(candidate.protocol, candidate.credentials, desktopPlatform()),
+              },
+            );
             void sampleDownload(sampleBase).then((sample) => {
               const sampled = rememberedKbpsWith(measured, sample);
               if (sampled !== null) {

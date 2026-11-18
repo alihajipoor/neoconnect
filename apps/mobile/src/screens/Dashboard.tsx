@@ -143,8 +143,8 @@ import {
   timedRungs,
   type Dial,
 } from "@shared/lib/attempts";
-import { noteTunnel, tunnelResolvers } from "@shared/lib/report-details";
-import { runScheduledServiceCheck } from "@shared/lib/service-check";
+import { tunnelResolvers } from "@shared/lib/report-details";
+import { noteLanding, noteTunnelGone, runScheduledServiceCheck } from "@shared/lib/service-check";
 import {
   checkDataMoves,
   rememberedKbps,
@@ -1548,6 +1548,7 @@ export function Dashboard({
    * be opened, or ends before a pass of it claimed (`slotIdle`). */
   function reportDrop() {
     sessionTrackerRef.current.ended("lost");
+    noteTunnelGone();
     setConnectionState("disconnected");
     setConnectedAt(null);
     setTunnelDropped(true);
@@ -1879,6 +1880,10 @@ export function Dashboard({
    * down what it left, down only on the platform's word. */
   async function stopPass() {
     cancelRef.current = true;
+    // Whatever was up ends here, as a press ends it: one end report for
+    // the session, and nothing attributed to the tunnel after it.
+    sessionTrackerRef.current.ended("disconnected");
+    noteTunnelGone();
     // The pass may already hold a slot. Given back fire and forget,
     // never in front of the teardown (docs/device-slots.md, 8) -- and
     // again once it is over, if the teardown took the first one with it
@@ -2024,6 +2029,7 @@ export function Dashboard({
       // a new one, and its check bounces again (lib/check-pop.ts).
       rearmCheckPop();
       sessionTrackerRef.current.ended("disconnected");
+      noteTunnelGone();
       // This phone stops using one of the plan's devices. Released fire
       // and forget, within a second and a half, and never in front of
       // the teardown: started while the tunnel is still up, the request
@@ -2300,6 +2306,10 @@ export function Dashboard({
     setFailedOverTo(null);
     setLandedSlow(false);
     setConnectionState("disconnecting");
+    // The plan's device limit ended the session, not the customer and not
+    // the network: "unknown" says no more than that.
+    sessionTrackerRef.current.ended("unknown");
+    noteTunnelGone();
     // Down only on the platform's word. Still routed through a VPN, the
     // phone stays shown as disconnecting: "disconnected" would be the lie
     // the toggle's own teardown refuses to tell.
@@ -2343,6 +2353,9 @@ export function Dashboard({
 
   /** The ladder itself, for the pass `runLadder` holds the guard for. */
   async function walkLadder(pass: PhonePass, options: LadderOptions): Promise<LadderOutcome> {
+    // Nothing an earlier tunnel or pass left -- its settings, its exit
+    // check, its data check -- goes with this pass's reports.
+    noteTunnelGone(true);
     setFailedOverTo(null);
     setLandedSlow(false);
     setUnsupportedChoice(null);
@@ -3061,11 +3074,16 @@ export function Dashboard({
           const sampleBase = measured !== null && verdict.state === "throughTunnel" ? verdict.from : undefined;
           const rungMs = rungClock.landed();
           // The phone puts this app in the tunnel even with apps chosen.
-          noteTunnel({
-            mode: allowedApps.length > 0 ? "custom" : "full",
-            splitTunnel: allowedApps.length > 0,
-            dns: tunnelResolvers(candidate.protocol, candidate.credentials, "mobile"),
-          });
+          // Every landing, proven or not: the tunnel the reports and the
+          // on-demand test now name, in place of the last one's.
+          noteLanding(
+            { routeId: candidate.routeId, protocol: label, fullTunnel: true },
+            {
+              mode: allowedApps.length > 0 ? "custom" : "full",
+              splitTunnel: allowedApps.length > 0,
+              dns: tunnelResolvers(candidate.protocol, candidate.credentials, "mobile"),
+            },
+          );
           void sampleDownload(sampleBase).then((sample) => {
             const sampled = rememberedKbpsWith(measured, sample);
             if (sampled !== null) rememberSpeed(candidate.routeId, candidate.protocol, sampled);

@@ -57,9 +57,15 @@ beforeEach(async () => {
   apiRequest.mockResolvedValue({ ok: true, data: LIST });
   reportAttempt.mockClear();
   vi.resetModules();
+  consent = await import("./diagnostics-consent");
+  consent.resetDiagnosticsConsentForTests(async () => true);
   sc = await import("./service-check");
   sc.resetServiceCheckForTests();
 });
+
+let consent: typeof import("./diagnostics-consent");
+
+const ROUTE_1 = { routeId: "route-1", protocol: "Stealth", fullTunnel: true };
 
 afterEach(() => {
   vi.useRealTimers();
@@ -153,6 +159,29 @@ describe("the automatic run", () => {
     expect(await run()).toBe(true);
   });
 
+  it("reports nothing when the tunnel was replaced during it, even by the same route", async () => {
+    sc.noteLanding(ROUTE_1, { mode: "full" });
+    let first = true;
+    probeAnswer = async () => {
+      if (first) {
+        first = false;
+        // Dropped and reconnected to the same route inside the run.
+        sc.noteTunnelGone(true);
+        sc.noteLanding(ROUTE_1, { mode: "full" });
+      }
+      return { ok: true, stage: "ok" };
+    };
+    expect(await run()).toBe(false);
+    expect(reportAttempt).not.toHaveBeenCalled();
+  });
+
+  it("does not run until the customer has been told in the app", async () => {
+    consent.resetDiagnosticsConsentForTests(async () => false);
+    expect(await run()).toBe(false);
+    expect(probes).toEqual([]);
+    expect(apiRequest).not.toHaveBeenCalled();
+  });
+
   it("probes only what the server listed, under the list's own key and host", async () => {
     apiRequest.mockResolvedValue({
       ok: true,
@@ -218,10 +247,53 @@ describe("the run's limits", () => {
 
 describe("the customer's own run", () => {
   it("goes through the tunnel when the last connect here landed on a full tunnel that is up", async () => {
-    await run({ foreground: () => false });
+    sc.noteLanding(ROUTE_1, { mode: "full" });
     const answer = await sc.runServiceCheckNow();
     expect(answer).toMatchObject({ kind: "done", via: "tunnel", listed: 4, complete: true });
     expect(lastReport()?.[0]).toMatchObject({ routeId: "route-1", details: { via: "tunnel" } });
+  });
+
+  it("names the route of the latest landing, proven or not, and none once it is gone", async () => {
+    sc.noteLanding(ROUTE_1, { mode: "full" });
+    // Route B lands unverified: no automatic run, but it is the tunnel now.
+    sc.noteLanding({ routeId: "route-2", protocol: "Fast", fullTunnel: true }, { mode: "full" });
+    expect(await sc.currentVia()).toMatchObject({ via: "tunnel", route: { routeId: "route-2" } });
+    sc.noteTunnelGone();
+    // Something is up, but not a tunnel this run of the app landed on.
+    expect(await sc.currentVia()).toEqual({ via: undefined });
+  });
+
+  it("is reported at most once in five minutes, and shown every time", async () => {
+    status = { connected: false };
+    let clock = 1_000_000;
+    expect(await sc.runServiceCheckNow(undefined, () => clock)).toMatchObject({ kind: "done" });
+    expect(await sc.runServiceCheckNow(undefined, () => clock)).toMatchObject({ kind: "done" });
+    expect(reportAttempt).toHaveBeenCalledTimes(1);
+    clock += sc.MANUAL_REPORT_EVERY_MS;
+    await sc.runServiceCheckNow(undefined, () => clock);
+    expect(reportAttempt).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not start while the automatic run is going", async () => {
+    const held: (() => void)[] = [];
+    probeAnswer = () => new Promise((resolve) => held.push(() => resolve({ ok: true, stage: "ok" })));
+    const automatic = run();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(await sc.runServiceCheckNow()).toEqual({ kind: "unavailable" });
+    probeAnswer = async () => ({ ok: true, stage: "ok" });
+    for (const release of held) release();
+    expect(await automatic).toBe(true);
+  });
+
+  it("says neither way when a tunnel came or went during it", async () => {
+    sc.noteLanding(ROUTE_1, { mode: "full" });
+    probeAnswer = async () => {
+      sc.noteTunnelGone();
+      return { ok: true, stage: "ok" };
+    };
+    const answer = await sc.runServiceCheckNow();
+    expect(answer).toMatchObject({ kind: "done", via: undefined });
+    expect(lastReport()?.[0]).not.toHaveProperty("routeId");
   });
 
   it("goes directly when nothing is up", async () => {
