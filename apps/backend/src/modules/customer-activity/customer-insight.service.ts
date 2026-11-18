@@ -416,7 +416,10 @@ export class CustomerInsightService {
   private routes(rows: Derived[], serverOf: Map<string, string>): InsightRoute[] {
     const routes = new Map<string, InsightRoute & { down: number[]; up: number[] }>();
     for (const d of rows) {
-      if (d.category !== "connect" && d.category !== "reconnect") continue;
+      // A pass the customer stopped still dialled the servers on its
+      // ladder, and they are often the ones that made them give up: left
+      // out, this table hid what the failures list beside it counted.
+      if (d.category !== "connect" && d.category !== "reconnect" && d.category !== "cancelled") continue;
       for (const rung of d.rungs) {
         // The ladder's closing line ("going back to it -- slow, but it
         // works; ...", describeSearchEnd) repeats a rung already counted:

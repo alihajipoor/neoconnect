@@ -122,9 +122,16 @@ function ConnectionTiles({ insight, customerId, days }: { insight: CustomerInsig
   const apiUnreachable = insight.networks.reduce((sum, n) => sum + n.apiUnreachable, 0);
   const top = topFailure(insight.failures);
   const window = windowText(days);
+  // Passes the customer stopped are not counted as tried or failed, so
+  // they are said beside the count: somebody who keeps giving up is a
+  // different story from somebody who never tried.
+  const stopped = insight.reports.cancelled;
+  const attemptsSub =
+    `connects and reconnect passes, last ${window}` +
+    (stopped > 0 ? `; ${stopped} more stopped by the customer` : "");
   return (
     <Tiles>
-      <StatTile label="Attempts" value={tried} sub={`connects and reconnect passes, last ${window}`} />
+      <StatTile label="Attempts" value={tried} sub={attemptsSub} />
       <StatTile
         label="Succeeded"
         value={

@@ -151,6 +151,28 @@ describe("CustomerInsightService.insight", () => {
     expect(insight.routes.find((r) => r.protocol === "Stealth")).toMatchObject({ dialled: 1, notDialled: 0 });
   });
 
+  it("counts the servers a stopped pass dialled, without counting the pass as an attempt", async () => {
+    // Seen on a real account: 17 failed rungs under "Why it failed" and
+    // only 5 in this table, because the other 12 sat in passes the
+    // customer had stopped.
+    const rows = [
+      row({
+        outcome: "OTHER",
+        reason: "cancelled by the customer after 2 of 5 attempt(s)",
+        attemptsJson: [
+          { protocol: "Stealth", result: "up but not carrying traffic", routeId: ROUTE, carried: false },
+          { protocol: "Fast", result: "up but not carrying traffic", routeId: ROUTE, carried: false },
+        ],
+      }),
+    ];
+    const { service } = build(rows);
+    const insight = await service.insight(ME, { days: "7" }, NOW);
+    expect(insight.reports.cancelled).toBe(1);
+    expect(insight.connect.tried).toBe(0);
+    expect(insight.routes.find((r) => r.protocol === "Stealth")).toMatchObject({ dialled: 1, connected: 0 });
+    expect(insight.routes.find((r) => r.protocol === "Fast")).toMatchObject({ dialled: 1, connected: 0 });
+  });
+
   it("reads credentials without credentialsJson, and says others only with three or more", async () => {
     const { service, prisma } = build([row({ attemptsJson: [{ protocol: "Fast", result: "connected" }] })]);
     prisma.subscription.findMany.mockResolvedValue([

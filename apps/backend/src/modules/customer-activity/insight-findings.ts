@@ -132,8 +132,8 @@ export function findingsFor(input: FindingsInput): InsightFinding[] {
         ? {
             severity: "warning",
             code: "NOT_CARRYING_OFTEN",
-            title: "Tunnels came up but carried nothing",
-            detail: `${notCarrying} times in ${days} a tunnel came up and the app's check got no traffic through it.`,
+            title: "Servers the app tried came up but carried nothing",
+            detail: `${notCarrying} times in ${days} a server the app tried came up and the app's check got no traffic through it. This counts every server tried, including ones tried before a connection that then worked.`,
           }
         : {
             severity: "warning",
@@ -233,7 +233,7 @@ export function findingsFor(input: FindingsInput): InsightFinding[] {
         severity: "warning",
         code: "CODE_USED_ELSEWHERE",
         title: "A code issued for this email was redeemed by another account",
-        detail: `A ${v.planName} code issued for this address on ${v.issuedAt} was redeemed by ${elsewhere.length} other account(s) and not by this one.`,
+        detail: `A ${v.planName} code issued for this address on ${v.issuedAt.slice(0, 10)} was redeemed by ${elsewhere.length} other account(s) and not by this one.`,
       });
     }
   }
