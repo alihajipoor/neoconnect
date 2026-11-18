@@ -2,6 +2,7 @@ import Link from "next/link";
 import {
   BadgeCheck,
   CreditCard,
+  FileText,
   KeyRound,
   LifeBuoy,
   LogIn,
@@ -34,6 +35,7 @@ const ICONS: Record<CustomerHistoryEventType, LucideIcon> = {
   PAYMENT: CreditCard,
   SUPPORT_TICKET: LifeBuoy,
   FIRST_CONNECT: Rocket,
+  DIAGNOSTICS_SENT: FileText,
   STAFF_ACTION: ShieldCheck,
 };
 

@@ -22,8 +22,12 @@ import {
 } from "./insight-classify";
 import { findingsFor } from "./insight-findings";
 import { buildSessions, type UsagePeriod } from "./usage-sessions";
+import { diagnosticsReference } from "../client-attempts/client-attempts.service";
+import { deviceFactsFrom, fleetSummary, parseDetails, serviceChecksFrom, type DetailRow } from "./service-checks";
 import type {
   CustomerAttemptDetail,
+  CustomerDiagnosticsItem,
+  ServiceChecksSummary,
   CustomerHistoryEvent,
   CustomerInsight,
   CustomerUsage,
@@ -57,6 +61,10 @@ const SESSION_PERIOD_CAP = 20_000;
 /** Each source of the history is read up to this many rows. */
 const HISTORY_SOURCE_CAP = 200;
 const USAGE_DAYS = 30;
+/** Service-check reports read for the fleet summary, newest first. At one
+ * run a day per device this is far past the fleet's two weeks; past it
+ * the summary counts the newest. */
+export const FLEET_ROW_CAP = 20_000;
 const UNKNOWN_PROTOCOL = "unknown";
 
 const ATTEMPT_SELECT = {
@@ -76,9 +84,28 @@ const ATTEMPT_SELECT = {
   apiEndpoint: true,
   occurredAt: true,
   createdAt: true,
+  sessionId: true,
+  detailsJson: true,
 } satisfies Prisma.ClientAttemptSelect;
 
-type AttemptRecord = AttemptSource & { apiEndpoint: string | null };
+type AttemptRecord = AttemptSource & {
+  apiEndpoint: string | null;
+  sessionId?: string | null;
+  detailsJson?: Prisma.JsonValue | null;
+};
+
+/** A report as the service-check and device-fact readers take it. */
+function detailRow(d: Derived): DetailRow {
+  return {
+    kind: d.row.kind,
+    platform: d.row.platform,
+    sessionId: d.row.sessionId ?? null,
+    routeId: d.row.routeId,
+    protocol: d.row.protocol,
+    at: d.at,
+    details: parseDetails(d.row.detailsJson),
+  };
+}
 
 /** A report with what the insight derives from it, once. */
 interface Derived {
@@ -110,7 +137,7 @@ function derive(row: AttemptRecord): Derived {
  * without counts by its own code. The log's failureCode filter matches
  * on this same list, so a cause's count and the log it links to agree. */
 function countedFailures(d: Derived): { code: FailureCode; text: string }[] {
-  if (d.category === "session" || d.category === "config") return [];
+  if (d.category === "session" || d.category === "config" || d.category === "check") return [];
   const failedRungs = d.category === "connect" || d.category === "reconnect" || d.category === "cancelled"
     ? d.rungs.filter((r) => rungFailed(r.result))
     : [];
@@ -151,7 +178,7 @@ export interface AttemptQuery {
   q?: string;
 }
 
-const CATEGORIES: ReportCategory[] = ["connect", "reconnect", "api", "config", "cancelled", "session", "signin", "register", "other"];
+const CATEGORIES: ReportCategory[] = ["connect", "reconnect", "api", "config", "cancelled", "session", "signin", "register", "check", "other"];
 
 /** Troubleshooting one customer in depth, without SQL: what their apps
  * reported, read and counted (`insight`); every report, filterable
@@ -224,7 +251,12 @@ export class CustomerInsightService {
       if (d.row.routeId) routeIds.add(d.row.routeId);
       for (const r of d.rungs) if (r.routeId) routeIds.add(r.routeId);
     }
-    const serverOf = await this.activity.serverNames([...routeIds]);
+    const sessionIds = [...new Set(rows.map((d) => d.row.sessionId).filter((id): id is string => !!id))];
+    const [serverOf, sessionLabels] = await Promise.all([
+      this.activity.serverNames([...routeIds]),
+      this.sessionLabels(customerId, sessionIds),
+    ]);
+    const details = rows.map(detailRow);
 
     const reports = Object.fromEntries(CATEGORIES.map((c) => [c, 0])) as Record<ReportCategory, number>;
     for (const d of rows) reports[d.category] += 1;
@@ -317,6 +349,75 @@ export class CustomerInsightService {
       credentials,
       vouchers,
       findings,
+      deviceFacts: deviceFactsFrom(details, sessionLabels),
+      serviceChecks: serviceChecksFrom(details, serverOf),
+    };
+  }
+
+  /** Every customer's service checks over `hours` (1-336, default 24):
+   * per server through the tunnel, and per network. Read through the
+   * createdAt index, bounded by FLEET_ROW_CAP, newest first. */
+  async serviceChecksSummary(options: { hours?: string | number } = {}, now: number = Date.now()): Promise<ServiceChecksSummary> {
+    const hours = boundedInt(options.hours, 1, 336, 24);
+    const rows = await this.prisma.clientAttempt.findMany({
+      where: { kind: ClientAttemptKind.SERVICE_CHECK, createdAt: { gte: new Date(now - hours * HOUR_MS) } },
+      orderBy: { createdAt: "desc" },
+      take: FLEET_ROW_CAP,
+      select: { customerId: true, routeId: true, protocol: true, asn: true, detailsJson: true },
+    });
+    const routeIds = [...new Set(rows.map((r) => r.routeId).filter((id): id is string => !!id))];
+    const serverOf = await this.activity.serverNames(routeIds);
+    return fleetSummary(
+      hours,
+      rows.map((r) => ({ customerId: r.customerId, routeId: r.routeId, protocol: r.protocol, asn: r.asn, details: parseDetails(r.detailsJson) })),
+      serverOf,
+      (asn) => ({ name: this.asn.orgOf(asn) || null, country: this.asn.countryOfAsn(asn) }),
+    );
+  }
+
+  /** Each named session's own label, for the customer's sessions only. */
+  private async sessionLabels(customerId: string, sessionIds: string[]): Promise<Map<string, string | null>> {
+    if (sessionIds.length === 0) return new Map();
+    const sessions = await this.prisma.customerSession.findMany({
+      where: { customerId, id: { in: sessionIds } },
+      select: { id: true, label: true },
+    });
+    return new Map(sessions.map((s) => [s.id, s.label]));
+  }
+
+  /** The bundles the customer sent, newest first, paged. */
+  async diagnostics(customerId: string, query: { take?: string; skip?: string }): Promise<Page<CustomerDiagnosticsItem>> {
+    await this.mustExist(customerId);
+    const window = listWindow(query, { defaultTake: 20, maxTake: 100 });
+    const [total, rows] = await Promise.all([
+      this.prisma.customerDiagnostics.count({ where: { customerId } }),
+      this.prisma.customerDiagnostics.findMany({
+        where: { customerId },
+        orderBy: { createdAt: "desc" },
+        skip: window.skip,
+        take: window.take,
+        select: { id: true, createdAt: true, platform: true, appVersion: true, sessionId: true, note: true, bundleJson: true },
+      }),
+    ]);
+    return {
+      total,
+      items: rows.map((r) => {
+        const bundle = parseDetails(r.bundleJson) ?? {};
+        const details = parseDetails(bundle.details as Prisma.JsonValue);
+        return {
+          id: r.id,
+          reference: diagnosticsReference(r.id),
+          createdAt: r.createdAt.toISOString(),
+          platform: r.platform,
+          appVersion: r.appVersion,
+          sessionId: r.sessionId,
+          note: r.note,
+          bundle: {
+            ...(details ? { details } : {}),
+            ...(typeof bundle.platformDiagnostics === "string" ? { platformDiagnostics: bundle.platformDiagnostics } : {}),
+          },
+        };
+      }),
     };
   }
 
@@ -662,6 +763,8 @@ export class CustomerInsightService {
           failureCode: d.failureCode,
           apiEndpoint: d.row.apiEndpoint,
           apiTrace: parseApiTrace(d.row.apiEndpoint),
+          sessionId: d.row.sessionId ?? null,
+          details: parseDetails(d.row.detailsJson),
         };
       }),
     };
@@ -770,7 +873,7 @@ export class CustomerInsightService {
     const window = listWindow(query, { defaultTake: 100, maxTake: 200 });
     const cap = HISTORY_SOURCE_CAP;
 
-    const [identities, sessions, subscriptions, redemptions, payments, tickets, firstConnects] = await Promise.all([
+    const [identities, sessions, subscriptions, redemptions, payments, tickets, firstConnects, bundles] = await Promise.all([
       this.prisma.customerIdentity.findMany({
         where: { customerId },
         orderBy: { createdAt: "desc" },
@@ -815,6 +918,12 @@ export class CustomerInsightService {
         take: 50,
         select: ATTEMPT_SELECT,
       }),
+      this.prisma.customerDiagnostics.findMany({
+        where: { customerId },
+        orderBy: { createdAt: "desc" },
+        take: cap,
+        select: { id: true, createdAt: true, platform: true, appVersion: true },
+      }),
     ]);
 
     const events: CustomerHistoryEvent[] = [];
@@ -840,6 +949,17 @@ export class CustomerInsightService {
     for (const r of redemptions) push(r.redeemedAt, "CODE_REDEEMED", `Code redeemed for ${r.voucher.plan.name}`);
     for (const p of payments) {
       push(p.createdAt, "PAYMENT", `Payment ${p.status.toLowerCase()}`, `${p.provider}, ${p.amountUsd.toString()} USD (${p.currency}), ${p.status}`);
+    }
+    for (const b of bundles) {
+      const reference = diagnosticsReference(b.id);
+      push(
+        b.createdAt,
+        "DIAGNOSTICS_SENT",
+        `Diagnostics sent, reference ${reference}`,
+        `${b.platform}, ${b.appVersion}`,
+        null,
+        `/customers/${customerId}?view=diagnostics&ref=${reference}`,
+      );
     }
     for (const t of tickets) push(t.createdAt, "SUPPORT_TICKET", `Support ticket: ${t.subject}`, `Status now: ${t.status}`, null, `/support/${t.id}`);
     const first = firstConnects.map(derive).find((d) => d.attempt);

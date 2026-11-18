@@ -171,6 +171,66 @@ export interface CustomerInsight {
   credentials: InsightCredentials[];
   vouchers: InsightVoucher[];
   findings: InsightFinding[];
+  /** What each device last said about itself, its network and its tunnel
+   * settings, from reports in the window that carried `details`. */
+  deviceFacts: InsightDeviceFacts[];
+  serviceChecks: InsightServiceChecks;
+}
+
+/** A stored `details` object as staff read it: whatever the client sent
+ * and the intake kept (docs/client-diagnostics.md), typed loosely, since
+ * every key is optional and rows outlive client versions. */
+export type ReportDetails = Record<string, unknown>;
+
+/** One device's newest facts. Grouped by session when the reports named
+ * one, else by platform (sessionId null). */
+export interface InsightDeviceFacts {
+  sessionId: string | null;
+  platform: string;
+  /** The device session's own label, when the session is known and still kept. */
+  label: string | null;
+  lastSeenAt: string;
+  /** The newest `details.device` / `.net` / `.tunnel` seen for it, or null. */
+  device: Record<string, unknown> | null;
+  net: Record<string, unknown> | null;
+  tunnel: Record<string, unknown> | null;
+}
+
+export interface InsightServiceResult {
+  key: string;
+  label: string | null;
+  host: string;
+  ok: boolean;
+  stage: string;
+  dnsMs: number | null;
+  connectMs: number | null;
+  tlsMs: number | null;
+  firstByteMs: number | null;
+  status: number | null;
+  address: string | null;
+  error: string | null;
+  /** When the run happened. */
+  at: string;
+  /** The server the run went through, by its route; null outside the
+   * tunnel or when it named none. */
+  server: string | null;
+  protocol: string | null;
+  via: string | null;
+}
+
+export interface InsightServiceChecks {
+  lastRunAt: string | null;
+  /** SERVICE_CHECK reports in the window. */
+  runs: number;
+  /** The newest result per target key. */
+  latest: InsightServiceResult[];
+  /** Runs per server and protocol (null/null: outside the tunnel). */
+  byServer: {
+    server: string | null;
+    protocol: string | null;
+    runs: number;
+    perService: { key: string; ok: number; failed: number }[];
+  }[];
 }
 
 /** One row of GET /customers/:id/attempts: the activity page's attempt,
@@ -182,6 +242,56 @@ export interface CustomerAttemptDetail extends AttemptRow {
   failureCode: FailureCode | null;
   apiEndpoint: string | null;
   apiTrace: ApiTrace | null;
+  /** The device session the report's token named, if it was the customer's. */
+  sessionId: string | null;
+  /** The stored details object, or null. */
+  details: ReportDetails | null;
+}
+
+/** One row of GET /customers/:id/diagnostics (X-Total-Count = total). */
+export interface CustomerDiagnosticsItem {
+  id: string;
+  /** The first 8 characters of `id`, which the customer quotes. */
+  reference: string;
+  createdAt: string;
+  platform: string;
+  appVersion: string;
+  sessionId: string | null;
+  note: string | null;
+  /** { details?, platformDiagnostics? } as stored. */
+  bundle: { details?: ReportDetails; platformDiagnostics?: string };
+}
+
+/** GET /service-checks/summary?hours=24 */
+export interface ServiceChecksSummary {
+  hours: number;
+  runs: number;
+  customers: number;
+  targets: { key: string; label: string; host: string }[];
+  /** Runs through the tunnel only. */
+  byServer: {
+    server: string | null;
+    protocol: string | null;
+    runs: number;
+    customers: number;
+    perService: {
+      key: string;
+      ok: number;
+      failed: number;
+      medianTlsMs: number | null;
+      medianFirstByteMs: number | null;
+      topFailStage: string | null;
+    }[];
+  }[];
+  /** The 15 networks with the most runs, inside or outside the tunnel. */
+  byNetwork: {
+    asn: number;
+    name: string | null;
+    country: string | null;
+    runs: number;
+    customers: number;
+    perService: { key: string; ok: number; failed: number }[];
+  }[];
 }
 
 export interface UsageHour {
@@ -213,6 +323,7 @@ export type HistoryEventType =
   | "PAYMENT"
   | "SUPPORT_TICKET"
   | "FIRST_CONNECT"
+  | "DIAGNOSTICS_SENT"
   | "STAFF_ACTION";
 
 export interface CustomerHistoryEvent {

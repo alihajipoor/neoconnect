@@ -50,4 +50,5 @@ export const KINDS: Record<ClientAttemptKind, string> = {
   SIGN_IN: "Sign-in",
   CONNECT: "Connect",
   SESSION: "Stayed up",
+  SERVICE_CHECK: "Service check",
 };

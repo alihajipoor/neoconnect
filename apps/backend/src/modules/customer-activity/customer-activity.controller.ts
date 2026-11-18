@@ -48,6 +48,18 @@ export class CustomerActivityController {
     return sendPage(res, await this.insights.attempts(id, query));
   }
 
+  /** Diagnostics bundles the customer sent from the app, newest first,
+   * paged; X-Total-Count carries the total. The same staff as /activity. */
+  @Get(":id/diagnostics")
+  async diagnostics(
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Res({ passthrough: true }) res: Response,
+    @Query("take") take?: string,
+    @Query("skip") skip?: string,
+  ) {
+    return sendPage(res, await this.insights.diagnostics(id, { take, skip }));
+  }
+
   /** What the servers counted, per hour and as sessions over `hours`
    * (1-336, default 72), and per day for 30 days. */
   @Get(":id/usage")
@@ -81,6 +93,24 @@ export class CustomerActivityController {
     @CurrentAdmin() admin: AuthenticatedAdmin,
   ) {
     return this.activity.signOutSession(id, sessionId, admin.email);
+  }
+}
+
+/** The apps' fixed-list service checks across every customer
+ * (docs/client-diagnostics.md). Read-only; the same staff as a
+ * customer's /activity. */
+@ApiTags("service-checks")
+@ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
+@Controller("service-checks")
+export class ServiceChecksController {
+  constructor(private readonly insights: CustomerInsightService) {}
+
+  /** Over `hours` (1-336, default 24): per server through the tunnel,
+   * and per network. */
+  @Get("summary")
+  summary(@Query("hours") hours?: string) {
+    return this.insights.serviceChecksSummary({ hours });
   }
 }
 

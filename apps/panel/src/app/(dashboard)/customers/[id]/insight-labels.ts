@@ -18,6 +18,7 @@ export const CATEGORY_LABELS: Record<CustomerReportCategory, string> = {
   session: "Stayed up",
   signin: "Sign-in",
   register: "Sign-up",
+  check: "Service check",
   other: "Other",
 };
 
@@ -68,6 +69,7 @@ export const HISTORY_LABELS: Record<CustomerHistoryEventType, string> = {
   PAYMENT: "Payment",
   SUPPORT_TICKET: "Support",
   FIRST_CONNECT: "First connect",
+  DIAGNOSTICS_SENT: "Diagnostics",
   STAFF_ACTION: "Staff",
 };
 

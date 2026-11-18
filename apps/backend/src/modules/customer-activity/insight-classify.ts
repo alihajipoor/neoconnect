@@ -31,6 +31,10 @@ export type ReportCategory =
   | "session"
   | "signin"
   | "register"
+  /** A run of the fixed-list service check (SERVICE_CHECK). Never a
+   * connection attempt and never given a failure code: its results are
+   * per target, in `details.services`. */
+  | "check"
   | "other";
 
 export interface ReportLike {
@@ -64,6 +68,8 @@ export function classifyReport(report: ReportLike): ReportCategory {
       return "signin";
     case "REGISTER":
       return "register";
+    case "SERVICE_CHECK":
+      return "check";
     case "CONNECT":
       break;
     default:
@@ -276,7 +282,7 @@ export function reportFailureCode(
   category: ReportCategory = classifyReport(report),
 ): FailureCode | null {
   if (report.outcome === "SUCCESS") return null;
-  if (category === "session" || category === "config") return null;
+  if (category === "session" || category === "config" || category === "check") return null;
   if (FOLLOW_UP.test(report.reason ?? "")) return null;
   if (category === "cancelled") return "CANCELLED_BY_CUSTOMER";
   // A reconnect pass's reason carries what the pass would have been,

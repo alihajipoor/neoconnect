@@ -70,6 +70,9 @@ export interface AttemptRung {
    * where the client measured nothing or is too old to say. */
   downKbps: number | null;
   upKbps: number | null;
+  /** How long the app says this server try took, in milliseconds; null
+   * from clients older than docs/client-diagnostics.md. */
+  ms: number | null;
 }
 
 export interface AttemptRow {
@@ -558,6 +561,7 @@ export class CustomerActivityService {
           carried: r.carried,
           downKbps: r.downKbps,
           upKbps: r.upKbps,
+          ms: r.ms,
         })),
       ]),
     );
@@ -593,6 +597,7 @@ interface ParsedRung {
   carried: boolean | null;
   downKbps: number | null;
   upKbps: number | null;
+  ms: number | null;
 }
 
 /** A whole non-negative number, or null for anything else. */
@@ -601,7 +606,7 @@ function wholeOrNull(value: unknown): number | null {
 }
 
 /** The ladder a client reported, as stored by ClientAttemptsService:
- * an array of { protocol, result, routeId?, carried?, downKbps?, upKbps? },
+ * an array of { protocol, result, routeId?, carried?, downKbps?, upKbps?, ms? },
  * validated on the way in. Read defensively all the same -- rows from older backends, and
  * whatever a future client sends, should show as what they are rather
  * than break the page. */
@@ -618,6 +623,7 @@ export function parseRungs(json: Prisma.JsonValue | null): ParsedRung[] {
       carried: typeof rung.carried === "boolean" ? rung.carried : null,
       downKbps: wholeOrNull(rung.downKbps),
       upKbps: wholeOrNull(rung.upKbps),
+      ms: wholeOrNull(rung.ms),
     });
   }
   return rungs;

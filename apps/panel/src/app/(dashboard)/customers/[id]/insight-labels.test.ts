@@ -15,6 +15,7 @@ const CATEGORIES = [
   "session",
   "signin",
   "register",
+  "check",
   "other",
 ] as const satisfies readonly CustomerReportCategory[];
 
@@ -63,6 +64,7 @@ const HISTORY = [
   "PAYMENT",
   "SUPPORT_TICKET",
   "FIRST_CONNECT",
+  "DIAGNOSTICS_SENT",
   "STAFF_ACTION",
 ] as const satisfies readonly CustomerHistoryEventType[];
 

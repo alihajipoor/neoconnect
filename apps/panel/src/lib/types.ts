@@ -436,7 +436,7 @@ export interface Subscription {
 }
 
 /** What a client was trying to do when it reported an attempt. */
-export type ClientAttemptKind = "REGISTER" | "SIGN_IN" | "CONNECT" | "SESSION";
+export type ClientAttemptKind = "REGISTER" | "SIGN_IN" | "CONNECT" | "SESSION" | "SERVICE_CHECK";
 
 /** How it went, in the app's own vocabulary rather than an HTTP status.
  *
@@ -886,6 +886,10 @@ export interface CustomerAttemptRung {
    * where nothing was measured or the client is too old to say. */
   downKbps: number | null;
   upKbps: number | null;
+  /** How long this server try took, in ms; null from older clients.
+   * Optional only so older fixtures still typecheck: the backend always
+   * sends it (docs/client-diagnostics.md). */
+  ms?: number | null;
 }
 
 /** A client attempt as the profile shows it. `kind` and `outcome` carry
@@ -964,6 +968,8 @@ export type CustomerReportCategory =
   | "session"
   | "signin"
   | "register"
+  /** A run of the fixed-list service check: never a connection attempt. */
+  | "check"
   | "other";
 
 /** What a failure was, from the apps' exact words; UNKNOWN keeps its text. */
@@ -1161,6 +1167,182 @@ export interface CustomerInsight {
   vouchers: InsightVoucher[];
   /** Problems first, then warnings, then info. */
   findings: InsightFinding[];
+  /** Always sent by a backend with client diagnostics; optional only so
+   * older fixtures still typecheck. */
+  deviceFacts?: InsightDeviceFacts[];
+  serviceChecks?: InsightServiceChecks;
+}
+
+// ---------------------------------------------------------------------------
+// Client diagnostics (docs/client-diagnostics.md). Mirrors the backend's
+// customer-insight.types.ts and dto/report-details.dto.ts.
+// ---------------------------------------------------------------------------
+
+/** `details.device`: what the app says about the device. */
+export interface ReportDeviceDetails {
+  model?: string;
+  os?: string;
+  osVersion?: string;
+  language?: string;
+  lowPower?: boolean;
+  dataSaver?: boolean;
+  memFreeMb?: number;
+}
+
+/** `details.net`: the device's network and its own DNS settings. */
+export interface ReportNetDetails {
+  type?: "wifi" | "cellular" | "ethernet" | "other" | "none" | "unknown";
+  metered?: boolean;
+  ipv4?: boolean;
+  ipv6?: boolean;
+  otherVpn?: boolean;
+  /** The device's DNS server addresses. */
+  dns?: string[];
+  privateDns?: "off" | "auto" | "host" | "unknown";
+  /** Android's Private DNS hostname, a device setting. */
+  privateDnsHost?: string;
+}
+
+/** `details.tunnel`: the app's own tunnel settings. */
+export interface ReportTunnelDetails {
+  mode?: "full" | "custom" | "gaming";
+  /** IP literals or resolver URLs the app configures. */
+  dns?: string[];
+  splitTunnel?: boolean;
+  ipv6Blocked?: boolean;
+  dnsUnprotected?: boolean;
+}
+
+export interface ReportDataCheckLeg {
+  status: string;
+  bytes: number;
+  ms: number;
+}
+
+export type ServiceCheckStage = "dns" | "connect" | "tls" | "http" | "ok";
+
+/** One fixed-list target's result. Only hosts on the server's list are kept. */
+export interface ReportServiceResult {
+  key: string;
+  host: string;
+  ok: boolean;
+  stage: ServiceCheckStage;
+  dnsMs?: number;
+  connectMs?: number;
+  tlsMs?: number;
+  firstByteMs?: number;
+  status?: number;
+  address?: string;
+  error?: string;
+}
+
+/** The stored `details` object of a report or a diagnostics bundle. Every
+ * key optional; read defensively, rows outlive client versions. */
+export interface ReportDetails {
+  device?: ReportDeviceDetails;
+  net?: ReportNetDetails;
+  tunnel?: ReportTunnelDetails;
+  errorKind?: string;
+  dataCheck?: { down?: ReportDataCheckLeg; up?: ReportDataCheckLeg };
+  egress?: { state: string; ms?: number };
+  reconnect?: { attempt?: number; quickDeaths?: number; spentMs?: number; droppedSecondsAgo?: number };
+  sessionEnd?: { cause: "disconnected" | "lost" | "replaced" | "app_closed" | "unknown"; seconds: number };
+  via?: "tunnel" | "direct";
+  targetsVersion?: number;
+  services?: ReportServiceResult[];
+}
+
+/** One device's newest facts on GET /customers/:id/insight: by session
+ * when reports named one, else by platform (sessionId null). */
+export interface InsightDeviceFacts {
+  sessionId: string | null;
+  platform: string;
+  /** The device session's label, when known and still kept. */
+  label: string | null;
+  lastSeenAt: string;
+  device: ReportDeviceDetails | null;
+  net: ReportNetDetails | null;
+  tunnel: ReportTunnelDetails | null;
+}
+
+/** The newest result per target key. */
+export interface InsightServiceResult {
+  key: string;
+  label: string | null;
+  host: string;
+  ok: boolean;
+  stage: string;
+  dnsMs: number | null;
+  connectMs: number | null;
+  tlsMs: number | null;
+  firstByteMs: number | null;
+  status: number | null;
+  address: string | null;
+  error: string | null;
+  at: string;
+  /** Null outside the tunnel or when the run named no server. */
+  server: string | null;
+  protocol: string | null;
+  via: string | null;
+}
+
+export interface InsightServiceChecks {
+  lastRunAt: string | null;
+  /** Service-check runs in the window. */
+  runs: number;
+  latest: InsightServiceResult[];
+  /** Per server and protocol; server and protocol null = outside the tunnel. */
+  byServer: {
+    server: string | null;
+    protocol: string | null;
+    runs: number;
+    perService: { key: string; ok: number; failed: number }[];
+  }[];
+}
+
+/** One row of GET /customers/:id/diagnostics (X-Total-Count = total). */
+export interface CustomerDiagnostics {
+  id: string;
+  /** First 8 characters of id; what the customer quotes. */
+  reference: string;
+  createdAt: string;
+  platform: string;
+  appVersion: string;
+  sessionId: string | null;
+  note: string | null;
+  bundle: { details?: ReportDetails; platformDiagnostics?: string };
+}
+
+/** GET /service-checks/summary?hours=24 */
+export interface ServiceChecksSummary {
+  hours: number;
+  runs: number;
+  customers: number;
+  targets: { key: string; label: string; host: string }[];
+  /** Runs made through the tunnel only. */
+  byServer: {
+    server: string | null;
+    protocol: string | null;
+    runs: number;
+    customers: number;
+    perService: {
+      key: string;
+      ok: number;
+      failed: number;
+      medianTlsMs: number | null;
+      medianFirstByteMs: number | null;
+      topFailStage: string | null;
+    }[];
+  }[];
+  /** The 15 networks with most runs, inside or outside the tunnel. */
+  byNetwork: {
+    asn: number;
+    name: string | null;
+    country: string | null;
+    runs: number;
+    customers: number;
+    perService: { key: string; ok: number; failed: number }[];
+  }[];
 }
 
 export interface ApiTraceEntry {
@@ -1209,6 +1391,11 @@ export interface CustomerAttemptDetail {
   failureCode: CustomerFailureCode | null;
   apiEndpoint: string | null;
   apiTrace: ApiTrace | null;
+  /** The device session the report's token named, if the customer's.
+   * Always sent; optional only so older fixtures still typecheck. */
+  sessionId?: string | null;
+  /** The stored details object, or null. Same. */
+  details?: ReportDetails | null;
 }
 
 export interface CustomerUsageHour {
@@ -1255,6 +1442,8 @@ export type CustomerHistoryEventType =
   | "PAYMENT"
   | "SUPPORT_TICKET"
   | "FIRST_CONNECT"
+  /** Links to the customer's diagnostics view with ?view=diagnostics&ref=. */
+  | "DIAGNOSTICS_SENT"
   | "STAFF_ACTION";
 
 /** One row of GET /customers/:id/history (X-Total-Count = total), newest
