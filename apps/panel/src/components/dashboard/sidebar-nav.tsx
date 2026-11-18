@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText, Ticket, LifeBuoy, Activity, Handshake, Gamepad2, SatelliteDish, Network, ShieldAlert, Radar } from "lucide-react";
+import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText, Ticket, LifeBuoy, Activity, Handshake, Gamepad2, SatelliteDish, Network, ShieldAlert, Radar, ListChecks } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AdminRole } from "@/lib/session";
 
@@ -33,6 +33,9 @@ const NAV_ITEMS: { href: string; label: string; icon: typeof Users; roles?: Admi
   // No role restriction: diagnosing why a customer cannot connect is
   // support work, and the backend gates the read the same way.
   { href: "/client-attempts", label: "Client Attempts", icon: Activity },
+  // The apps' fixed-list service checks per server and network: whether
+  // the services customers open load through each server. Same open read.
+  { href: "/service-checks", label: "Service Checks", icon: ListChecks },
   // Same reasoning, and it sits next to Client Attempts deliberately:
   // the two answer the same question from opposite ends. That page says
   // customers are failing to connect; this one says whether the node is
