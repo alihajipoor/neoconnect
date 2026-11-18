@@ -143,6 +143,25 @@ interface LiveRow {
   bytes: bigint;
 }
 
+/** The columns `describeAttempts` reads from a client_attempts row. */
+export interface AttemptSource {
+  id: string;
+  routeId: string | null;
+  kind: string;
+  outcome: string;
+  platform: string;
+  appVersion: string;
+  asn: number | null;
+  ip: string | null;
+  via: string | null;
+  protocol: string | null;
+  reason: string | null;
+  sessionSeconds: number | null;
+  attemptsJson: Prisma.JsonValue | null;
+  occurredAt: Date | null;
+  createdAt: Date;
+}
+
 interface RawTraffic {
   day: string;
   nodeId: string;
@@ -231,9 +250,9 @@ export class CustomerActivityService {
       subscriptionIds.length ? this.traffic(customerId, now) : Promise.resolve([]),
     ]);
 
-    const [versions, rungsById] = await Promise.all([
+    const [versions, attemptRows] = await Promise.all([
       this.appVersions(customerId, sessions.map((s) => s.platform)),
-      this.rungsOf(attempts),
+      this.describeAttempts(attempts, now),
     ]);
 
     // The newest moment the server heard from this customer at all:
@@ -246,13 +265,6 @@ export class CustomerActivityService {
     const lastSeenAt = heard.length ? new Date(Math.max(...heard)).toISOString() : null;
 
     const newest = live[0];
-    // Our servers' addresses, to recognise a report that came through one
-    // of them. Read here rather than cached: a server's address changes
-    // when it is replaced.
-    const servers = await this.prisma.node.findMany({ select: { name: true, publicIp: true } });
-    const serverAt = new Map(servers.map((n) => [n.publicIp, n.name]));
-    // And the server each connect landed on, named as the rungs are.
-    const landedOn = await this.serverNames([...new Set(attempts.map((a) => a.routeId).filter((id): id is string => !!id))]);
 
     return {
       now: {
@@ -276,35 +288,60 @@ export class CustomerActivityService {
         revoked: s.revokedAt !== null,
         appVersion: (s.platform && versions.get(s.platform)) ?? null,
       })),
-      attempts: attempts.map((a) => ({
-        id: a.id,
-        // When the app says it happened, where it said and that is
-        // plausible; else when it arrived. A report queued through an
-        // outage arrives hours late, and it is the outage that matters.
-        at: (a.occurredAt ?? a.createdAt).toISOString(),
-        kind: a.kind,
-        outcome: a.outcome,
-        platform: a.platform,
-        appVersion: a.appVersion,
-        network: a.asn === null ? null : { asn: a.asn, name: this.asn.orgOf(a.asn) || null },
-        ip: a.ip !== null && serverAt.has(a.ip) ? null : a.ip,
-        throughServer: a.ip !== null ? (serverAt.get(a.ip) ?? null) : null,
-        noAddress:
-          a.ip !== null
-            ? null
-            : a.via === "relay"
-              ? "relay"
-              : a.createdAt.getTime() < now - RETENTION_DAYS * 86_400_000
-                ? "erased"
-                : null,
-        server: a.routeId ? (landedOn.get(a.routeId) ?? null) : null,
-        protocol: a.protocol,
-        reason: a.reason,
-        sessionSeconds: a.sessionSeconds,
-        rungs: rungsById.get(a.id) ?? [],
-      })),
+      attempts: attemptRows,
       traffic,
     };
+  }
+
+  /** Attempt rows as staff see them: the network named, the address kept
+   * only where it is the customer's (see `AttemptRow.ip`), each rung's
+   * route named as a server. The one code path for every endpoint that
+   * shows a customer's attempts, so the address rules cannot drift. */
+  async describeAttempts(attempts: AttemptSource[], now: number = Date.now()): Promise<AttemptRow[]> {
+    if (attempts.length === 0) return [];
+    // Our servers' addresses, to recognise a report that came through one
+    // of them. Read here rather than cached: a server's address changes
+    // when it is replaced.
+    const [rungsById, servers, landedOn] = await Promise.all([
+      this.rungsOf(attempts),
+      this.prisma.node.findMany({ select: { name: true, publicIp: true } }),
+      // And the server each connect landed on, named as the rungs are.
+      this.serverNames([...new Set(attempts.map((a) => a.routeId).filter((id): id is string => !!id))]),
+    ]);
+    const serverAt = new Map(servers.map((n) => [n.publicIp, n.name]));
+    return attempts.map((a) => ({
+      id: a.id,
+      // When the app says it happened, where it said and that is
+      // plausible; else when it arrived. A report queued through an
+      // outage arrives hours late, and it is the outage that matters.
+      at: (a.occurredAt ?? a.createdAt).toISOString(),
+      kind: a.kind,
+      outcome: a.outcome,
+      platform: a.platform,
+      appVersion: a.appVersion,
+      network: a.asn === null ? null : { asn: a.asn, name: this.asn.orgOf(a.asn) || null },
+      ip: a.ip !== null && serverAt.has(a.ip) ? null : a.ip,
+      throughServer: a.ip !== null ? (serverAt.get(a.ip) ?? null) : null,
+      noAddress:
+        a.ip !== null
+          ? null
+          : a.via === "relay"
+            ? "relay"
+            : a.createdAt.getTime() < now - RETENTION_DAYS * 86_400_000
+              ? "erased"
+              : null,
+      server: a.routeId ? (landedOn.get(a.routeId) ?? null) : null,
+      protocol: a.protocol,
+      reason: a.reason,
+      sessionSeconds: a.sessionSeconds,
+      rungs: rungsById.get(a.id) ?? [],
+    }));
+  }
+
+  /** Traffic per UTC day, server and protocol over the last `days` days,
+   * the same rows as the activity page's (`traffic`). */
+  trafficDays(customerId: string, days: number, now: number = Date.now()): Promise<TrafficRow[]> {
+    return this.traffic(customerId, now, days);
   }
 
   /** Every customer with traffic counted in the last ten minutes, newest
@@ -438,8 +475,8 @@ export class CustomerActivityService {
    * gives the UTC day. The lower bound is passed as text and pinned to
    * UTC, as DailyUsageService does, so neither the driver's parameter
    * type nor the server's TimeZone can shift it. */
-  private async traffic(customerId: string, now: number): Promise<TrafficRow[]> {
-    const since = new Date(Math.floor(now / DAY_MS) * DAY_MS - (TRAFFIC_DAYS - 1) * DAY_MS);
+  private async traffic(customerId: string, now: number, days: number = TRAFFIC_DAYS): Promise<TrafficRow[]> {
+    const since = new Date(Math.floor(now / DAY_MS) * DAY_MS - (days - 1) * DAY_MS);
     const rows = await this.prisma.$queryRaw<RawTraffic[]>`
       SELECT to_char(date_trunc('day', u."reportedAt"), 'YYYY-MM-DD') AS "day",
              u."nodeId" AS "nodeId",
@@ -529,7 +566,7 @@ export class CustomerActivityService {
   /** A route's server as staff know it: the node's name, or for a relayed
    * route "<entry> -> <exit>", since the customer dialled the first and
    * came out at the second. A route deleted since has no name. */
-  private async serverNames(routeIds: string[]): Promise<Map<string, string>> {
+  async serverNames(routeIds: string[]): Promise<Map<string, string>> {
     if (routeIds.length === 0) return new Map();
     const routes = await this.prisma.route.findMany({
       where: { id: { in: routeIds } },
