@@ -173,6 +173,24 @@ export class UpdatesService {
 
   constructor(private readonly config: ConfigService) {}
 
+  /** The newest released version this process already knows for a
+   * platform, from the caches the update checks fill -- never a request
+   * to GitHub. Null when nothing has been looked up yet or no build has
+   * been found, and for a platform with no release feed here
+   * (iOS, whose version the App Store holds). For staff pages, which
+   * must not wait on GitHub per page view. */
+  cachedVersion(platform: string): string | null {
+    const cache =
+      platform === "windows"
+        ? this.windowsCache
+        : platform === "android"
+          ? this.androidCache
+          : platform === "linux"
+            ? this.linuxCache
+            : null;
+    return cache?.peek()?.version ?? null;
+  }
+
   /** What the updater should be told, for a client on `currentVersion`. */
   async checkFor(currentVersion: string): Promise<UpdateCheck> {
     const newest = await this.newestBuild();
@@ -549,6 +567,12 @@ class ReleaseCache<T> {
     private readonly label: string,
     private readonly select: (releases: GithubRelease[]) => T | null,
   ) {}
+
+  /** What is held, without fetching: the last answer, or the last good
+   * build when the last answer was a failure. */
+  peek(): T | null {
+    return this.entry?.value ?? this.lastGood?.value ?? null;
+  }
 
   async resolve(
     fetchReleases: () => Promise<GithubRelease[] | null>,
