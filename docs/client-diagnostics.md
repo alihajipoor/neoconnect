@@ -253,8 +253,56 @@ Every view states counts of what the apps reported; none names a cause.
 
 ## Per platform
 
-_To be filled in by the client stage: what each app (Windows, Linux,
-Android, iOS) can and cannot report, field by field._
+Two native commands feed the app layer. Both are best effort, never
+touch connecting, and are swallowed on error.
+
+**`probe_service { host, path, timeoutMs }`**, one implementation
+(`apps/desktop-windows/src-tauri/src/service_probe.rs`, compiled into the
+mobile app by path) registered in the Windows and mobile apps. One HTTPS
+request on port 443: the system resolver (inside the tunnel when it is
+up), an IPv4 answer first, TCP, TLS verified against the webpki roots the
+app's own requests trust, `GET <path>` with a Host header, the status line
+read and nothing more, then closed. Answers `{ ok, stage, dnsMs?,
+connectMs?, tlsMs?, firstByteMs?, status?, address?, error? }`, `ok` when
+any status line came back. The whole probe is held to `timeoutMs`
+(clamped to 1-30 s). It rejects (an error, no request made) anything but a
+plain host name -- no scheme, port, user info, IP literal or trailing dot
+-- and any path not starting with one "/" or carrying a space, CR/LF,
+fragment, backslash or dot segment. `error` is one of fixed words that
+name no host or address. Proxies are not consulted: it measures the path
+itself. Under the phones' engine and under Xray on Windows the TCP connect
+is answered on the device, so `connectMs` means little there. Linux has
+no such command yet.
+
+**`device_facts`** (no arguments), every key left out when the platform
+cannot tell. One shape for every platform (`device_facts.rs`, compiled
+into the mobile VPN plugin by path, which reads the platform answer field
+by field and holds it to the bounds above).
+
+| Field | Windows | Android | iOS | Linux |
+|---|---|---|---|---|
+| `model` | BIOS `SystemManufacturer` + `SystemProductName`, OEM placeholders dropped | `Build.MANUFACTURER` + `MODEL` (pending) | `utsname.machine` (pending) | no command |
+| `os`, `osVersion` | "Windows", "11 26100.2314" from the registry build and UBR | "Android", `VERSION.RELEASE` (pending) | "iOS", `systemVersion` (pending) | no command |
+| `lowPower` | battery saver (`GetSystemPowerStatus`) | power save mode (pending) | Low Power Mode (pending) | no command |
+| `dataSaver` | **never** (no such setting) | restrict-background status (pending) | `isConstrained` (pending) | no command |
+| `memFreeMb` | `GlobalMemoryStatusEx` | (pending) | (pending) | no command |
+| `net.type` | the uplink's ifType: 71 wifi, 6 ethernet, 243/244 cellular, else other; "none" when nothing is up with a gateway, "unknown" when only tunnels are | the non-VPN network's transport (pending) | NWPath interface (pending) | no command |
+| `net.metered` | **never**: WinRT's cost describes whichever network Windows calls the internet one, which is our tunnel while it is up | NOT_METERED (pending) | `isExpensive` (pending) | no command |
+| `net.ipv4`, `net.ipv6` | the uplink has a gateway of that family and a usable address (not APIPA; IPv6 global 2000::/3) | link addresses (pending) | supportsIPv4/IPv6 (pending) | no command |
+| `net.otherVpn` | **never** yet: the service's diagnostics know it, behind a round trip this does not wait for | (pending) | (pending) | no command |
+| `net.dns` | the uplink adapter's resolvers, without loopback and the fec0 defaults, at most 4 | LinkProperties of the non-VPN network (pending) | **never**: no public API | no command |
+| `net.privateDns`, `privateDnsHost` | **never** (Android only) | (pending) | **never** | no command |
+
+The Windows uplink is chosen among adapters that are up, can be physical
+(Wi-Fi, Ethernet, mobile broadband, PPP) and have a default gateway,
+leaving out every tunnel -- Wintun and WireGuard by ifType, TAP and other
+VPN drivers by the service's list of driver names, our IKEv2 connection
+by its name -- with the lowest interface metric winning, IPv4 first. Not
+Windows' best route, which while our tunnel is up is the tunnel. Adapter
+names, Wi-Fi names, the computer name and the gateway's hardware address
+are never read into the answer. "(pending)": the Rust forwarder and the
+shape are in; the Kotlin and Swift `deviceFacts` methods are the next
+step, and until then the phones answer `{ os }` only.
 
 ## What is not proven
 
