@@ -188,6 +188,47 @@ fn names_hardware(ip: &std::net::IpAddr) -> bool {
     }
 }
 
+/// The firmware's two strings as one model -- the BIOS keys on Windows,
+/// DMI's `sys_vendor` and `product_name` on Linux -- with the placeholders
+/// boards ship with left out: "To Be Filled By O.E.M." is not a model, and
+/// saying it is would read as one. The product alone when it already
+/// starts with the manufacturer ("LENOVO" and "LENOVO 20XW..."). The phones
+/// name their model themselves.
+#[allow(dead_code)]
+pub fn model_of(manufacturer: Option<String>, product: Option<String>) -> Option<String> {
+    let real = |text: Option<String>| bounded_text(text, MODEL_MAX).filter(|t| !is_placeholder(t));
+    let (manufacturer, product) = (real(manufacturer), real(product));
+    let joined = match (manufacturer, product) {
+        (Some(m), Some(p)) if p.to_lowercase().starts_with(&m.to_lowercase()) => p,
+        (Some(m), Some(p)) => format!("{m} {p}"),
+        (Some(m), None) => m,
+        (None, Some(p)) => p,
+        (None, None) => return None,
+    };
+    bounded_text(Some(joined), MODEL_MAX)
+}
+
+#[allow(dead_code)]
+fn is_placeholder(text: &str) -> bool {
+    const PLACEHOLDERS: &[&str] = &[
+        "to be filled by o.e.m.",
+        "to be filled by oem",
+        "o.e.m.",
+        "oem",
+        "system manufacturer",
+        "system product name",
+        "default string",
+        "not applicable",
+        "not specified",
+        "none",
+        "unknown",
+        "invalid",
+        "x.x",
+    ];
+    let lower = text.trim().to_lowercase();
+    PLACEHOLDERS.contains(&lower.as_str())
+}
+
 /// Trimmed, cut to `max` characters (never inside one), and left out when
 /// nothing is left.
 pub fn bounded_text(text: Option<String>, max: usize) -> Option<String> {
@@ -265,6 +306,19 @@ mod tests {
         // The set is spelled exactly.
         assert_eq!(facts.os, None);
         assert_eq!(bounded_text(Some("   ".into()), 10), None);
+    }
+
+    #[test]
+    fn model_from_the_firmware_strings() {
+        let s = |t: &str| Some(t.to_owned());
+        assert_eq!(model_of(s("Dell Inc."), s("XPS 13 9310")), s("Dell Inc. XPS 13 9310"));
+        assert_eq!(model_of(s("LENOVO"), s("lenovo 20XW")), s("lenovo 20XW"));
+        assert_eq!(model_of(s("To Be Filled By O.E.M."), s("To Be Filled By O.E.M.")), None);
+        assert_eq!(model_of(s("System manufacturer"), s("B450M DS3H")), s("B450M DS3H"));
+        assert_eq!(model_of(s("ASUS"), None), s("ASUS"));
+        assert_eq!(model_of(None, None), None);
+        let long = model_of(s(&"x".repeat(50)), s(&"y".repeat(50))).unwrap();
+        assert_eq!(long.chars().count(), MODEL_MAX);
     }
 
     /// IP literals only, each once, four at most: never a name.
