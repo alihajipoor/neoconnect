@@ -271,8 +271,8 @@ plain host name -- no scheme, port, user info, IP literal or trailing dot
 fragment, backslash or dot segment. `error` is one of fixed words that
 name no host or address. Proxies are not consulted: it measures the path
 itself. Under the phones' engine and under Xray on Windows the TCP connect
-is answered on the device, so `connectMs` means little there. Linux has
-no such command yet.
+is answered on the device, so `connectMs` means little there. The Linux
+app compiles the same file by path.
 
 **`device_facts`** (no arguments), every key left out when the platform
 cannot tell. One shape for every platform (`device_facts.rs`, compiled
@@ -281,16 +281,16 @@ by field and holds it to the bounds above).
 
 | Field | Windows | Android | iOS | Linux |
 |---|---|---|---|---|
-| `model` | BIOS `SystemManufacturer` + `SystemProductName`, OEM placeholders dropped | `Build.MANUFACTURER` + `Build.MODEL` (the maker once, when the model already starts with it) | `utsname.machine`, e.g. "iPhone16,2" -- never the device's name | no command |
-| `os`, `osVersion` | "Windows", "11 26100.2314" from the registry build and UBR | "Android", `Build.VERSION.RELEASE` | "iOS", `ProcessInfo.operatingSystemVersion` ("18.1", "18.1.1") | no command |
-| `lowPower` | battery saver (`GetSystemPowerStatus`) | `PowerManager.isPowerSaveMode` | `ProcessInfo.isLowPowerModeEnabled` | no command |
-| `dataSaver` | **never** (no such setting) | `ConnectivityManager.restrictBackgroundStatus`: true when Data Saver is on, whether or not this app is on its allow list | Low Data Mode: `isConstrained` of the pinned path below; left out when that path is not read | no command |
-| `memFreeMb` | `GlobalMemoryStatusEx` | `ActivityManager.MemoryInfo.availMem` | **never**: iOS tells an app its own budget, not the device's free memory | no command |
-| `net.type` | the uplink's ifType: 71 wifi, 6 ethernet, 243/244 cellular, else other; "none" when nothing is up with a gateway, "unknown" when only tunnels are | the chosen non-VPN network's transport (Wi-Fi, cellular, Ethernet, else other); "none" when the networks were read and none without a VPN transport has INTERNET | the first Wi-Fi, cellular or wired interface in a path monitor's `availableInterfaces`; "none" when there is none and the path is down, "other" when only other interfaces are there | no command |
-| `net.metered` | **never**: WinRT's cost describes whichever network Windows calls the internet one, which is our tunnel while it is up | not `NET_CAPABILITY_NOT_METERED` | `isExpensive` of a path monitor pinned to that interface type | no command |
-| `net.ipv4`, `net.ipv6` | the uplink has a gateway of that family and a usable address (not APIPA; IPv6 global 2000::/3) | the network's `LinkProperties.linkAddresses` hold an IPv4 / a non-link-local IPv6 address | `supportsIPv4` / `supportsIPv6` of the pinned path | no command |
-| `net.otherVpn` | **never** yet: the service's diagnostics know it, behind a round trip this does not wait for | false when no network has a VPN transport; true when one has and none of our own tunnels shows any sign of life (Android 10+: no VPN network owned by this app; no WireGuard, no recorded protocol, no Xray state "up", no platform IKEv2 of ours); left out otherwise | **never**: a tunnel interface does not say whose it is | no command |
-| `net.dns` | the uplink adapter's resolvers, without loopback and the fec0 defaults, at most 4 | `LinkProperties.dnsServers` of the non-VPN network, at most 4 | **never**: no public API | no command |
+| `model` | BIOS `SystemManufacturer` + `SystemProductName`, OEM placeholders dropped | `Build.MANUFACTURER` + `Build.MODEL` (the maker once, when the model already starts with it) | `utsname.machine`, e.g. "iPhone16,2" -- never the device's name | DMI `sys_vendor` + `product_name` from `/sys/class/dmi/id`, the same placeholders dropped -- never the host name |
+| `os`, `osVersion` | "Windows", "11 26100.2314" from the registry build and UBR | "Android", `Build.VERSION.RELEASE` | "iOS", `ProcessInfo.operatingSystemVersion` ("18.1", "18.1.1") | "Linux", os-release `NAME` (else `ID`) + `VERSION_ID`, e.g. "Ubuntu 24.04"; `NAME` alone on a rolling release |
+| `lowPower` | battery saver (`GetSystemPowerStatus`) | `PowerManager.isPowerSaveMode` | `ProcessInfo.isLowPowerModeEnabled` | **never**: no setting every distribution shares |
+| `dataSaver` | **never** (no such setting) | `ConnectivityManager.restrictBackgroundStatus`: true when Data Saver is on, whether or not this app is on its allow list | Low Data Mode: `isConstrained` of the pinned path below; left out when that path is not read | **never** (no such setting) |
+| `memFreeMb` | `GlobalMemoryStatusEx` | `ActivityManager.MemoryInfo.availMem` | **never**: iOS tells an app its own budget, not the device's free memory | `MemAvailable` in `/proc/meminfo` |
+| `net.type` | the uplink's ifType: 71 wifi, 6 ethernet, 243/244 cellular, else other; "none" when nothing is up with a gateway, "unknown" when only tunnels are | the chosen non-VPN network's transport (Wi-Fi, cellular, Ethernet, else other); "none" when the networks were read and none without a VPN transport has INTERNET | the first Wi-Fi, cellular or wired interface in a path monitor's `availableInterfaces`; "none" when there is none and the path is down, "other" when only other interfaces are there | the uplink (below): wifi when sysfs has `wireless`/`phy80211` for it, cellular for `wwan*`, ethernet when its `type` is 1, else other; "none" when there is no default route at all, "unknown" when only tunnels hold one |
+| `net.metered` | **never**: WinRT's cost describes whichever network Windows calls the internet one, which is our tunnel while it is up | not `NET_CAPABILITY_NOT_METERED` | `isExpensive` of a path monitor pinned to that interface type | **never**: only NetworkManager knows, over D-Bus |
+| `net.ipv4`, `net.ipv6` | the uplink has a gateway of that family and a usable address (not APIPA; IPv6 global 2000::/3) | the network's `LinkProperties.linkAddresses` hold an IPv4 / a non-link-local IPv6 address | `supportsIPv4` / `supportsIPv6` of the pinned path | ipv4: an IPv4 default route on the uplink; ipv6: an IPv6 default route on it and a usable global (2000::/3, not tentative) address in `/proc/net/if_inet6` |
+| `net.otherVpn` | **never** yet: the service's diagnostics know it, behind a round trip this does not wait for | false when no network has a VPN transport; true when one has and none of our own tunnels shows any sign of life (Android 10+: no VPN network owned by this app; no WireGuard, no recorded protocol, no Xray state "up", no platform IKEv2 of ours); left out otherwise | **never**: a tunnel interface does not say whose it is | **never** yet: the helper's diagnostics know it, behind a round trip this does not wait for |
+| `net.dns` | the uplink adapter's resolvers, without loopback and the fec0 defaults, at most 4 | `LinkProperties.dnsServers` of the non-VPN network, at most 4 | **never**: no public API | behind the systemd-resolved stub (127.0.0.53/54) the upstreams in `/run/systemd/resolve/resolv.conf`, else `/etc/resolv.conf`; loopback dropped, at most 4. **Left out while a tunnel of ours is up** (below) |
 
 On every platform `net.dns` leaves out any IPv6 resolver that is
 link-local (fe80::/10) or whose interface ID is EUI-64 (ff:fe in its
@@ -301,7 +301,7 @@ again in `dns_list` (`device_facts.rs`, which Windows and both phones go
 through), and once more in the shared TypeScript. A router's global IPv6
 resolver that is not EUI-64 is kept: it carries the household's prefix,
 which the server already sees as the report's source address.
-| `net.privateDns`, `privateDnsHost` | **never** (Android only) | Android 9+: `isPrivateDnsActive` / `privateDnsServerName` -- "host" with the host when a name is set, "auto" when active without one, "off" when not active (so automatic mode that found no DNS-over-TLS server reads "off"); left out before Android 9 | **never**: iOS has no such setting | no command |
+| `net.privateDns`, `privateDnsHost` | **never** (Android only) | Android 9+: `isPrivateDnsActive` / `privateDnsServerName` -- "host" with the host when a name is set, "auto" when active without one, "off" when not active (so automatic mode that found no DNS-over-TLS server reads "off"); left out before Android 9 | **never**: iOS has no such setting | **never** (Android only) |
 
 The Windows uplink is chosen among adapters that are up, can be physical
 (Wi-Fi, Ethernet, mobile broadband, PPP) and have a default gateway,
@@ -311,6 +311,24 @@ by its name -- with the lowest interface metric winning, IPv4 first. Not
 Windows' best route, which while our tunnel is up is the tunnel. Adapter
 names, Wi-Fi names, the computer name and the gateway's hardware address
 are never read into the answer.
+
+On Linux (`linux_facts.rs`: files only, no program run and no round trip
+to the helper, the whole read held to 900 ms on a blocking thread) the
+uplink is the interface holding the IPv4 default route in
+`/proc/net/route` with the lowest metric, failing that the IPv6 one in
+`/proc/net/ipv6_route`, leaving out every tunnel by name: ours
+(`neoconnect0`, `neoxify-wg`, `neoxify-ovpn`, strongSwan's `ipsec*` for
+IKEv2) and `tun*`, `tap*`, `wg*`, `ppp*`, `vti*`, `tailscale*`,
+`nordlynx*`, `zt*`. Our tunnels route through routes and a table of
+their own, so the machine's own default stays visible beneath them.
+`net.dns` is left out whenever one of our interfaces (`neoconnect*`,
+`neoxify*`, `ipsec*`) exists, and whenever `/etc/resolv.conf` is the file
+the helper writes while connected: the helper then points the machine's
+DNS at the tunnel -- through systemd-resolved, whose upstream list then
+holds the tunnel's resolver beside the network's, or by rewriting
+`/etc/resolv.conf` -- and the device's own resolvers cannot be told
+apart from the tunnel's. Interface names are read only to make that
+choice; the host name, Wi-Fi names and hardware addresses are never read.
 
 On Android (`deviceFacts` in `NeoxifyVpnPlugin.kt`, on a thread of its
 own so a running connect cannot hold it up) the network under the tunnel
@@ -436,15 +454,20 @@ report queue), `service-check.ts`, `diagnostics-bundle.ts`,
 `IKEV2_DNS`), a WireGuard credential's own `dns`, and left out for
 OpenVPN, whose resolvers the server pushes.
 
-**Linux** (`apps/desktop-linux`) runs the same TypeScript but has neither
-native command yet. So it sends: `tunnel.mode` and `splitTunnel`,
-`ipv6Blocked`, `dnsUnprotected` where its helper's status gives them;
-`errorKind`, `dataCheck`, `egress`, `reconnect`, `sessionEnd`, and
-rung `ms`. It sends no `device` and no `net` (no `device_facts`), no
-`tunnel.dns` (its engines' resolvers are not known to this layer), and no
-service results: without `probe_service` every probe gives no answer, so
-an automatic run reports nothing and the Support screen's test says it
-could not start. Its bundle still carries the Copy text.
+**Linux** (`apps/desktop-linux`) runs the same TypeScript and registers
+both native commands: `probe_service` is the shared `service_probe.rs`,
+compiled by path, and `device_facts` is `linux_facts.rs` over the shared
+`device_facts.rs` shape and filters. So it sends `device` and `net` as
+in the table above (no `lowPower`, `dataSaver`, `metered`, `otherVpn`
+or `privateDns`; no `net.dns` while a tunnel of ours is up), the service
+results of an automatic run and of the Support screen's test, and
+`tunnel.mode` and `splitTunnel`, `ipv6Blocked`, `dnsUnprotected` where
+its helper's status gives them; `errorKind`, `dataCheck`, `egress`,
+`reconnect`, `sessionEnd`, and rung `ms`. It sends no `tunnel.dns` (its
+engines' resolvers are not known to this layer). Its bundle carries the
+Copy text. None of the Linux side has run on a Linux machine: CI only
+type-checks the app crate (`cargo check --all-targets`), and the unit
+tests in `linux_facts.rs` have run against sample texts, off Linux.
 
 **Android and iOS** send what their `device_facts` gives (table above);
 `tunnel.dns` is `1.1.1.1` for Xray (`TUN_DNS`) and a WireGuard
