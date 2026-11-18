@@ -281,17 +281,17 @@ by field and holds it to the bounds above).
 
 | Field | Windows | Android | iOS | Linux |
 |---|---|---|---|---|
-| `model` | BIOS `SystemManufacturer` + `SystemProductName`, OEM placeholders dropped | `Build.MANUFACTURER` + `MODEL` (pending) | `utsname.machine` (pending) | no command |
-| `os`, `osVersion` | "Windows", "11 26100.2314" from the registry build and UBR | "Android", `VERSION.RELEASE` (pending) | "iOS", `systemVersion` (pending) | no command |
-| `lowPower` | battery saver (`GetSystemPowerStatus`) | power save mode (pending) | Low Power Mode (pending) | no command |
-| `dataSaver` | **never** (no such setting) | restrict-background status (pending) | `isConstrained` (pending) | no command |
-| `memFreeMb` | `GlobalMemoryStatusEx` | (pending) | (pending) | no command |
-| `net.type` | the uplink's ifType: 71 wifi, 6 ethernet, 243/244 cellular, else other; "none" when nothing is up with a gateway, "unknown" when only tunnels are | the non-VPN network's transport (pending) | NWPath interface (pending) | no command |
-| `net.metered` | **never**: WinRT's cost describes whichever network Windows calls the internet one, which is our tunnel while it is up | NOT_METERED (pending) | `isExpensive` (pending) | no command |
-| `net.ipv4`, `net.ipv6` | the uplink has a gateway of that family and a usable address (not APIPA; IPv6 global 2000::/3) | link addresses (pending) | supportsIPv4/IPv6 (pending) | no command |
-| `net.otherVpn` | **never** yet: the service's diagnostics know it, behind a round trip this does not wait for | (pending) | (pending) | no command |
-| `net.dns` | the uplink adapter's resolvers, without loopback and the fec0 defaults, at most 4 | LinkProperties of the non-VPN network (pending) | **never**: no public API | no command |
-| `net.privateDns`, `privateDnsHost` | **never** (Android only) | (pending) | **never** | no command |
+| `model` | BIOS `SystemManufacturer` + `SystemProductName`, OEM placeholders dropped | `Build.MANUFACTURER` + `Build.MODEL` (the maker once, when the model already starts with it) | `utsname.machine`, e.g. "iPhone16,2" -- never the device's name | no command |
+| `os`, `osVersion` | "Windows", "11 26100.2314" from the registry build and UBR | "Android", `Build.VERSION.RELEASE` | "iOS", `ProcessInfo.operatingSystemVersion` ("18.1", "18.1.1") | no command |
+| `lowPower` | battery saver (`GetSystemPowerStatus`) | `PowerManager.isPowerSaveMode` | `ProcessInfo.isLowPowerModeEnabled` | no command |
+| `dataSaver` | **never** (no such setting) | `ConnectivityManager.restrictBackgroundStatus`: true when Data Saver is on, whether or not this app is on its allow list | Low Data Mode: `isConstrained` of the pinned path below; left out when that path is not read | no command |
+| `memFreeMb` | `GlobalMemoryStatusEx` | `ActivityManager.MemoryInfo.availMem` | **never**: iOS tells an app its own budget, not the device's free memory | no command |
+| `net.type` | the uplink's ifType: 71 wifi, 6 ethernet, 243/244 cellular, else other; "none" when nothing is up with a gateway, "unknown" when only tunnels are | the chosen non-VPN network's transport (Wi-Fi, cellular, Ethernet, else other); "none" when the networks were read and none without a VPN transport has INTERNET | the first Wi-Fi, cellular or wired interface in a path monitor's `availableInterfaces`; "none" when there is none and the path is down, "other" when only other interfaces are there | no command |
+| `net.metered` | **never**: WinRT's cost describes whichever network Windows calls the internet one, which is our tunnel while it is up | not `NET_CAPABILITY_NOT_METERED` | `isExpensive` of a path monitor pinned to that interface type | no command |
+| `net.ipv4`, `net.ipv6` | the uplink has a gateway of that family and a usable address (not APIPA; IPv6 global 2000::/3) | the network's `LinkProperties.linkAddresses` hold an IPv4 / a non-link-local IPv6 address | `supportsIPv4` / `supportsIPv6` of the pinned path | no command |
+| `net.otherVpn` | **never** yet: the service's diagnostics know it, behind a round trip this does not wait for | false when no network has a VPN transport; true when one has and none of our own tunnels shows any sign of life (Android 10+: no VPN network owned by this app; no WireGuard, no recorded protocol, no Xray state "up", no platform IKEv2 of ours); left out otherwise | **never**: a tunnel interface does not say whose it is | no command |
+| `net.dns` | the uplink adapter's resolvers, without loopback and the fec0 defaults, at most 4 | `LinkProperties.dnsServers` of the non-VPN network, at most 4 | **never**: no public API | no command |
+| `net.privateDns`, `privateDnsHost` | **never** (Android only) | Android 9+: `isPrivateDnsActive` / `privateDnsServerName` -- "host" with the host when a name is set, "auto" when active without one, "off" when not active (so automatic mode that found no DNS-over-TLS server reads "off"); left out before Android 9 | **never**: iOS has no such setting | no command |
 
 The Windows uplink is chosen among adapters that are up, can be physical
 (Wi-Fi, Ethernet, mobile broadband, PPP) and have a default gateway,
@@ -300,9 +300,33 @@ VPN drivers by the service's list of driver names, our IKEv2 connection
 by its name -- with the lowest interface metric winning, IPv4 first. Not
 Windows' best route, which while our tunnel is up is the tunnel. Adapter
 names, Wi-Fi names, the computer name and the gateway's hardware address
-are never read into the answer. "(pending)": the Rust forwarder and the
-shape are in; the Kotlin and Swift `deviceFacts` methods are the next
-step, and until then the phones answer `{ os }` only.
+are never read into the answer.
+
+On Android (`deviceFacts` in `NeoxifyVpnPlugin.kt`, on a thread of its
+own so a running connect cannot hold it up) the network under the tunnel
+is chosen by walking `ConnectivityManager.allNetworks`: anything with a
+VPN transport is skipped, and of the networks with INTERNET one that is
+VALIDATED wins, Wi-Fi or Ethernet before cellular -- the active network,
+while our tunnel is up, is the tunnel. No permission was added
+(ACCESS_NETWORK_STATE was already declared); each fact is read in its own
+try, so a missing service or a SecurityException costs that fact only.
+
+On iOS (`DeviceFacts.swift`, called by `deviceFacts`) a path monitor
+names the physical interface under the tunnel, and a second monitor
+pinned to that interface type reads its cost, Low Data Mode and address
+families -- the plain path, while a tunnel is up, describes the tunnel.
+Each reading waits at most 0.35 s and its monitor is cancelled either way.
+No entitlement, no Info.plist key, and nothing in the tunnel extension.
+iOS gives an app no public way to read the system's resolvers, whose VPN
+is up, or the device's free memory, so those are always left out.
+
+Neither phone has been run with this code: Android is compiled by CI's
+debug build and is to be run on an emulator, and iOS is compiled only by
+CI and has not run on an iPhone. Which network is picked as the one under
+the tunnel, on either phone, is unproven until it runs with our tunnel
+up. The pinned-path reading on iOS rests on a monitor pinned to an
+interface type describing that interface even while a tunnel is up; that
+too is unproven.
 
 ## What is not proven
 
