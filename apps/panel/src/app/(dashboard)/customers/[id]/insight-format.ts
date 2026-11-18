@@ -112,16 +112,24 @@ export function attemptsQuery(filters: AttemptFilters, take: number, skip: numbe
  * short and one view has one URL. */
 export function customerHref(customerId: string, params: Record<string, string | number | undefined>): string {
   const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(pageParams(params))) if (value !== undefined) query.set(key, value);
+  const text = query.toString();
+  return `/customers/${encodeURIComponent(customerId)}${text ? `?${text}` : ""}`;
+}
+
+/** The same query as customerHref, as the `params` a Pager carries, so a
+ * paged link keeps the window and the filters it was paged from. */
+export function pageParams(params: Record<string, string | number | undefined>): Record<string, string> {
+  const out: Record<string, string> = {};
   for (const [key, raw] of Object.entries(params)) {
     if (raw === undefined || raw === "") continue;
     const value = String(raw);
     if (key === "view" && value === "overview") continue;
     if (key === "days" && value === "7") continue;
     if (key === "hours" && value === "72") continue;
-    query.set(key, value);
+    out[key] = value;
   }
-  const text = query.toString();
-  return `/customers/${encodeURIComponent(customerId)}${text ? `?${text}` : ""}`;
+  return out;
 }
 
 /** One quiet line under a subscription: whether its credentials are on

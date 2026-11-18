@@ -50,7 +50,7 @@ export async function ConnectionsView({
         label="Reports from the last"
         options={DAY_WINDOWS}
         current={days}
-        href={(value) => customerHref(customerId, { ...base, days: value })}
+        href={(value) => customerHref(customerId, { ...base, ...filters, days: value })}
       />
 
       {insight === null ? (

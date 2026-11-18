@@ -24,6 +24,7 @@ import { MoveAddressCard } from "./move-address-card";
 import { RightNowCard } from "./right-now-card";
 import { DevicesCard } from "./devices-card";
 import { Muted, NetworkLabel, Section, When, orNull } from "./view-parts";
+import { pageParams } from "./insight-format";
 
 /** The first view: who this is, what stands out, whether they are on
  * now, and the account's subscriptions, devices and invoices -- the
@@ -123,7 +124,13 @@ export async function OverviewView({
               ))}
             </div>
           )}
-          <Pager total={invoices.total} take={invoiceTake} skip={invoiceSkip} basePath={`/customers/${id}`} />
+          <Pager
+            total={invoices.total}
+            take={invoiceTake}
+            skip={invoiceSkip}
+            basePath={`/customers/${id}`}
+            params={pageParams({ days })}
+          />
         </CardContent>
       </Card>
     </>

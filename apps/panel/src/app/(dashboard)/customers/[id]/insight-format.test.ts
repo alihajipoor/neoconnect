@@ -6,6 +6,7 @@ import {
   customerHref,
   hasFilters,
   othersLine,
+  pageParams,
   parseAttemptFilters,
   parseDays,
   parseHours,
@@ -90,6 +91,24 @@ describe("query parsing", () => {
       `/customers/${ID}?view=connections&days=30`,
     );
     expect(customerHref(ID, { view: "usage", hours: 72 })).toBe(`/customers/${ID}?view=usage`);
+  });
+
+  it("keeps the log's filters when the window changes", () => {
+    const filters = parseAttemptFilters({ outcome: "SUCCESS", asn: "64500", q: "timed out" });
+    const base = { view: "connections", days: 7 };
+    expect(customerHref(ID, { ...base, ...filters, days: 30 })).toBe(
+      `/customers/${ID}?view=connections&days=30&outcome=SUCCESS&asn=64500&q=timed+out`,
+    );
+  });
+
+  it("gives a pager the window it was paged from", () => {
+    expect(pageParams({ days: 30 })).toEqual({ days: "30" });
+    expect(pageParams({ days: 7 })).toEqual({});
+    expect(pageParams({ view: "connections", days: 60, kind: "CONNECT", q: "" })).toEqual({
+      view: "connections",
+      days: "60",
+      kind: "CONNECT",
+    });
   });
 });
 
