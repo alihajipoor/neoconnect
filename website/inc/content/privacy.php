@@ -30,7 +30,7 @@ defined('NX') || exit;
 
 return array(
 
-    'updated' => '2026-11-15',
+    'updated' => '2026-11-18',
 
     'sections' => array(
 
@@ -110,14 +110,18 @@ return array(
                 'en' => array(
                     'This is the part people ask about most.',
                     'Our billing system records how much data you use, as a number of bytes, to apply your plan\'s limit. It doesn\'t record what you used it for.',
-                    'The app also sends us a short report when you sign up, sign in or connect, whether it works or not. It says which servers and connection types the app tried and what happened. It also includes the app version, the kind of device, your internet provider and your IP address. If you\'re signed in, the report is linked to your account. We delete the IP address after 14 days and the rest of the report after 60 days.',
+                    'The app also sends us a short report when you sign up, sign in or connect, whether it works or not. It says which servers and connection types the app tried, how long each step took and what happened. It also includes the app version, your device\'s model and system version, the app\'s language, whether you were on Wi-Fi or mobile data, the DNS servers your device is set to use, your internet provider and your IP address. If you\'re signed in, the report is linked to your account. We delete the IP address after 14 days and the rest of the report after 60 days.',
+                    'About once a day while you are connected, the app also checks whether a short list of well-known services, such as Instagram, WhatsApp and Google, can be reached through the VPN, and sends us the result. The list is the same for everyone and is chosen by us. This test does not look at the sites you visit, and the app does not record them.',
+                    'If you press Send diagnostics in the app, it sends us a fuller technical report about the app and your device\'s network settings so support can help you. You see what is sent before it goes. We delete it after 60 days.',
                     'The VPN servers also keep operational logs, as most network software does, and these can include connection records. We use them to run the service and find faults. We don\'t use them to build a profile of you, and we don\'t sell them or give them to advertisers.',
                     'If you need a stronger guarantee than this, ask us before you assume one.',
                 ),
                 'fa' => array(
                     'این بخشی است که بیشتر از همه درباره‌اش سؤال می‌شود.',
                     'سیستم صورتحساب ما حجم مصرفی شما را به بایت ثبت می‌کند تا سقف پلنتان را اعمال کند. ثبت نمی‌کند آن حجم را صرف چه کاری کرده‌اید.',
-                    'برنامه هم وقتی ثبت‌نام می‌کنید، وارد حسابتان می‌شوید یا وصل می‌شوید، چه موفق شود چه نه، یک گزارش کوتاه برایمان می‌فرستد. در این گزارش آمده که برنامه کدام سرورها و روش‌های اتصال را امتحان کرده و نتیجه چه شده است. نسخه برنامه، نوع دستگاه، اپراتور اینترنتتان و آدرس IP شما هم در آن هست. اگر وارد حسابتان شده باشید، گزارش با حساب کاربری شما ثبت می‌شود. آدرس IP را بعد از ۱۴ روز پاک می‌کنیم و بقیه گزارش را بعد از ۶۰ روز.',
+                    'برنامه هم وقتی ثبت‌نام می‌کنید، وارد حسابتان می‌شوید یا وصل می‌شوید، چه موفق شود چه نه، یک گزارش کوتاه برایمان می‌فرستد. در این گزارش آمده که برنامه کدام سرورها و روش‌های اتصال را امتحان کرده، هر مرحله چقدر طول کشیده و نتیجه چه شده است. نسخه برنامه، مدل دستگاه و نسخه سیستم‌عامل آن، زبان برنامه، اینکه با وای‌فای وصل بوده‌اید یا اینترنت همراه، سرورهای DNS تنظیم‌شده روی دستگاه، اپراتور اینترنتتان و آدرس IP شما هم در آن هست. اگر وارد حسابتان شده باشید، گزارش با حساب کاربری شما ثبت می‌شود. آدرس IP را بعد از ۱۴ روز پاک می‌کنیم و بقیه گزارش را بعد از ۶۰ روز.',
+                    'برنامه حدوداً روزی یک بار، وقتی وصل هستید، بررسی می‌کند که چند سرویس شناخته‌شده مثل اینستاگرام، واتس‌اپ و گوگل از طریق وی‌پی‌ان در دسترس هستند یا نه، و نتیجه را برایمان می‌فرستد. این فهرست برای همه یکسان است و خودمان آن را انتخاب می‌کنیم. این بررسی کاری به سایت‌هایی که شما باز می‌کنید ندارد و برنامه آن‌ها را ثبت نمی‌کند.',
+                    'اگر در برنامه «ارسال گزارش عیب‌یابی» را بزنید، برنامه گزارش فنی کامل‌تری درباره خودش و تنظیمات شبکه دستگاهتان برایمان می‌فرستد تا پشتیبانی بتواند کمکتان کند. پیش از ارسال می‌بینید چه چیزی فرستاده می‌شود. این گزارش را هم بعد از ۶۰ روز پاک می‌کنیم.',
                     'خود سرورهای وی‌پی‌ان هم مثل بیشتر نرم‌افزارهای شبکه لاگ‌های عملیاتی نگه می‌دارند که ممکن است سوابق اتصال را هم شامل شود. از این لاگ‌ها برای اداره سرویس و پیدا کردن خطاها استفاده می‌کنیم. با آن‌ها درباره شما پرونده نمی‌سازیم و آن‌ها را به تبلیغ‌کننده‌ها نمی‌فروشیم یا نمی‌دهیم.',
                     'اگر به تضمینی بیشتر از این نیاز دارید، قبل از هر فرضی از ما بپرسید.',
                 ),
