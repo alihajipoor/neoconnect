@@ -1009,6 +1009,9 @@ export function Dashboard({
   // no honest duration to show, and the timer stays blank rather than
   // inventing one from the moment the window opened.
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
+  /** For the session tracker, which the health poll's closure calls. */
+  const connectedAtRef = useRef<number | null>(null);
+  connectedAtRef.current = connectedAt;
   const [now, setNow] = useState(() => Date.now());
 
   /** The address the world saw before connecting. Captured while still
@@ -2643,8 +2646,16 @@ export function Dashboard({
       // the session clock, a failed one restarts it. `unverified` does
       // neither -- an abstention is not evidence either way, the same
       // reasoning as the strike count below.
-      if (verdict === "connected") sessionTrackerRef.current.healthy(settledRouteRef.current);
-      else if (verdict !== "unverified") sessionTrackerRef.current.broken();
+      if (verdict === "connected") {
+        // With the protocol label and the "Connected" time, for the
+        // session's end report (session-report.ts).
+        const landed = protocolUserRef.current;
+        sessionTrackerRef.current.healthy(
+          settledRouteRef.current,
+          landed ? customerProtocolLabel(landed.protocol, landed.connection?.transport) : undefined,
+          connectedAtRef.current,
+        );
+      } else if (verdict !== "unverified") sessionTrackerRef.current.broken();
 
       if (verdict === "connected" || verdict === "unverified") {
         // `unverified` resets the strike count with the same authority

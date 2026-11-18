@@ -94,6 +94,52 @@ describe("a session's end report", () => {
     ]);
   });
 
+  it("counts from when Connected was shown, not from the first passing check (fake timers)", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-11-18T22:23:22Z"));
+      const sent: AttemptReport[] = [];
+      // The real clock, faked: Date.now is what the dashboards use.
+      const tracker = createSessionTracker(async (r) => void sent.push(r));
+      const connectedAt = Date.now();
+      // The first health poll passes twenty seconds after "Connected".
+      vi.advanceTimersByTime(20_000);
+      tracker.healthy("r1", "Stealth", connectedAt);
+      vi.setSystemTime(new Date("2026-11-18T22:26:49Z"));
+      tracker.ended("disconnected");
+      const end = sent.find((r) => r.details?.sessionEnd);
+      expect(end?.details?.sessionEnd).toEqual({ cause: "disconnected", seconds: 207 });
+      // The same route and protocol the session landed on.
+      expect(end).toMatchObject({ routeId: "r1", protocol: "Stealth" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the ten-minute report on the first passing check when Connected came earlier", () => {
+    const { tracker, sent, advance } = tracked();
+    const shown = 1_000_000 - 20_000;
+    tracker.healthy("r1", "Stealth", shown);
+    advance(SUSTAINED_MS - 1);
+    tracker.healthy("r1", "Stealth", shown);
+    expect(sent).toEqual([]);
+    advance(1);
+    tracker.healthy("r1", "Stealth", shown);
+    expect(sent).toEqual([
+      { kind: "SESSION", outcome: "SUCCESS", routeId: "r1", protocol: "Stealth", sessionSeconds: SUSTAINED_MS / 1000 },
+    ]);
+  });
+
+  it("ignores a Connected time later than the check, and takes a protocol learnt after the first check", () => {
+    const { tracker, ends, advance } = tracked();
+    tracker.healthy("r1", undefined, 1_000_000 + 5_000);
+    advance(30_000);
+    tracker.healthy("r1", "Stealth", null);
+    advance(40_000);
+    tracker.ended("lost");
+    expect(ends()[0]).toMatchObject({ routeId: "r1", protocol: "Stealth", details: { sessionEnd: { cause: "lost", seconds: 70 } } });
+  });
+
   it("is nothing without a session", () => {
     const { tracker, sent } = tracked();
     tracker.ended("disconnected");

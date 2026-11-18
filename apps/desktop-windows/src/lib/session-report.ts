@@ -32,18 +32,22 @@ export const SESSION_END_MIN_MS = 60_000;
 export interface SessionTracker {
   /** A health check just proved traffic is crossing the tunnel on
    * `routeId`. Starts the clock, or sends the report once it has run
-   * long enough. */
-  healthy(routeId: string | null | undefined, protocol?: string): void;
+   * long enough. `protocol` is the label the connect's own report used,
+   * and `connectedAt` when the app showed "Connected" for this tunnel:
+   * the end report counts from it (see `ended`). */
+  healthy(routeId: string | null | undefined, protocol?: string, connectedAt?: number | null): void;
   /** A check failed, or the tunnel is down or being replaced. The clock
    * starts again from the next passing check -- the claim is continuous
    * health, and a session that dropped out half way has not earned it. */
   broken(): void;
   /** The session is over: the customer pressed disconnect, the tunnel was
    * lost, or another server replaced it. Sends one end report, with the
-   * cause and how long the session ran since its first passing check --
-   * only when that was at least `SESSION_END_MIN_MS`, and never twice for
-   * one session. A session never ended this way (the app was killed) sends
-   * none. */
+   * cause, the route and protocol, and how long the session ran since the
+   * app showed "Connected" for it (its first passing check when that time
+   * was not given) -- only when that was at least `SESSION_END_MIN_MS`,
+   * and never twice for one session. A session never ended this way (the
+   * app was killed) sends none. The ten-minute report still counts from
+   * the first passing check: it claims continuous proven health. */
   ended(cause: SessionEndCause): void;
 }
 
@@ -52,8 +56,8 @@ export function createSessionTracker(
   now: () => number = Date.now,
 ): SessionTracker {
   let current: { routeId: string; protocol?: string; since: number; sent: boolean } | null = null;
-  /** The session as a whole: from its first passing check to its end,
-   * through any failed checks between. Not reset by `broken`, which only
+  /** The session as a whole: from when the app showed it connected (else
+   * its first passing check) to its end, through any failed checks between. Not reset by `broken`, which only
    * restarts the continuous-health clock above. */
   let session: { routeId: string; protocol?: string; since: number } | null = null;
 
@@ -79,12 +83,16 @@ export function createSessionTracker(
   };
 
   return {
-    healthy(routeId, protocol) {
+    healthy(routeId, protocol, connectedAt) {
       if (!routeId) return;
       const at = now();
       // Another route took over without this session being ended: a switch.
       if (session && session.routeId !== routeId) end("replaced");
-      session ??= { routeId, protocol, since: at };
+      // When "Connected" was shown, if that is a time and not later than
+      // this check: the first passing check comes a poll after it.
+      const shown = typeof connectedAt === "number" && Number.isFinite(connectedAt) && connectedAt <= at ? connectedAt : at;
+      session ??= { routeId, protocol, since: shown };
+      if (session.protocol === undefined && protocol) session.protocol = protocol;
       if (!current || current.routeId !== routeId) {
         current = { routeId, protocol, since: at, sent: false };
         return;

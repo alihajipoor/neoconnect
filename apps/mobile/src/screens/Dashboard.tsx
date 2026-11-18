@@ -607,6 +607,9 @@ export function Dashboard({
   const [signingOut, setSigningOut] = useState(false);
 
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
+  /** For the session tracker, which the health poll's closure calls. */
+  const connectedAtRef = useRef<number | null>(null);
+  connectedAtRef.current = connectedAt;
   const [exitIp, setExitIp] = useState<string | null>(null);
   const [baselineIp, setBaselineIp] = useState<BaselineIp | null>(null);
   /** Where the connected rung's tunnel is dialled, and whether the phone
@@ -1638,7 +1641,12 @@ export function Dashboard({
       // address advances the clock; an indeterminate reading neither
       // advances nor resets it, and anything else starts it over.
       if (egress.state === "throughTunnel" && next === "connected") {
-        sessionTrackerRef.current.healthy(settledRouteRef.current);
+        const landed = protocolUserRef.current;
+        sessionTrackerRef.current.healthy(
+          settledRouteRef.current,
+          landed ? customerProtocolLabel(landed.protocol, landed.connection?.transport) : undefined,
+          connectedAtRef.current,
+        );
       } else if (egress.state !== "indeterminate") {
         sessionTrackerRef.current.broken();
       }
