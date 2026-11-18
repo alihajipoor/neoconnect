@@ -123,18 +123,83 @@ export async function confirmEgress(
     intervalMs = VERIFY_INTERVAL_MS,
   } = options;
   const deadline = Date.now() + timeoutMs;
+  const left = () => Math.max(0, deadline - Date.now());
+  // What the attempts have seen, for when the time is up without proof: a
+  // reading of the bare line's own address is a leak, whatever endpoint
+  // gave it; an answer of any other kind through the tunnel means it
+  // carries something, and is no grounds to accuse it.
+  let leak: EgressVerdict | null = null;
+  let answered: EgressVerdict | null = null;
   for (;;) {
     // Checked every pass, not only at the end: this loop is most of the
     // time a hanging protocol spends in "checking connection", so a
     // cancel that is not honoured here is a button that does nothing.
     if (cancelled()) return null;
-    const verdict = await verifyEgress(baseline, { sameEndpointOnly, tunnelServer, baselineFirst: true });
+    let verdict = leakShown(
+      baseline,
+      await verifyEgress(baseline, {
+        sameEndpointOnly,
+        tunnelServer,
+        baselineFirst: true,
+        attemptMs: Math.min(EGRESS_TIMEOUT_MS, Math.max(left(), 1)),
+        totalMs: Math.max(left(), 1),
+      }),
+    );
+    // The baseline's endpoint alone said nothing. One endpoint is not the
+    // tunnel: a relay's exit refuses its own engine's connections to its
+    // own mirror, and any endpoint can be down. The rest are asked, hedged
+    // and within what is left, before anything is concluded.
+    if (verdict.state === "unreachable" && sameEndpointOnly && left() > 0) {
+      verdict = leakShown(
+        baseline,
+        await verifyEgress(baseline, { tunnelServer, totalMs: Math.min(POLL_WALK_MS, left()), hedgeMs: POLL_HEDGE_MS }),
+      );
+    }
     if (cancelled()) return null;
     if (verdict.state === "throughTunnel") return verdict;
+    if (verdict.state === "bypassingTunnel") leak = verdict;
+    if (verdict.state === "indeterminate") answered = verdict;
     if (baseline === null && verdict.state === "indeterminate") return verdict;
-    if (Date.now() >= deadline) return verdict;
+    if (Date.now() >= deadline) return leak ?? answered ?? verdict;
     await sleep(intervalMs);
   }
+}
+
+/** `verdict`, as a leak where it shows the bare line's own address --
+ * whichever endpoint it came from. `verifyEgress` calls a reading from
+ * another endpoint than the baseline's "no comparison", and for the exit
+ * address that is right; but the address the phone has outside the tunnel
+ * is never an exit, so seeing it again means the traffic did not go
+ * through. Our nodes' addresses never are a baseline (`nodeAddressesOf`),
+ * and an endpoint reached around the tunnel is passed over, so neither can
+ * produce this. */
+export function leakShown(baseline: BaselineIp | null, verdict: EgressVerdict): EgressVerdict {
+  if (baseline === null || verdict.state !== "indeterminate" || verdict.exitIp === null) return verdict;
+  return verdict.exitIp.trim() === baseline.ip.trim() ? { state: "bypassingTunnel", exitIp: verdict.exitIp } : verdict;
+}
+
+/** Which server the API's endpoint order should keep last, given what the
+ * platform says: the dialled server's while a tunnel is up AND that tunnel
+ * landed -- a rung the ladder kept -- null once it is down, unchanged
+ * (undefined) otherwise. The order follows `setTunnelServer` in the shared
+ * api-endpoints.ts, which also ends the backup route and "doors first".
+ *
+ * "Landed" is the point. The platform reports the engine of a rung that
+ * was dialled and is being rejected as up, and taking that for a tunnel
+ * ended the backup route for a rung that never carried anything: on a
+ * network where only the backup route reaches the API, the next config
+ * refresh then went to the direct doors first. Same rules as
+ * `tunnelServerFromService` otherwise: down is null unless a pass is
+ * still dialling. */
+export function endpointServerFor(
+  observed: ConnectionState,
+  landed: boolean,
+  passInFlight: boolean,
+  passServer: TunnelServer | null,
+): TunnelServer | null | undefined {
+  if (tunnelUp(observed)) return landed ? passServer : undefined;
+  if (observed === "disconnected") return passInFlight ? undefined : null;
+  return undefined;
 }
 
 /** What one rung of the connect ladder comes to.
@@ -147,21 +212,28 @@ export async function confirmEgress(
  *    not confirmed", never "You're protected".
  *  - `notCarrying`: the rung is torn down and the next one tried.
  *
- * An `indeterminate` reading on a rung with a baseline and another
- * protocol still to try is `notCarrying`, as on Windows: that rung asks
- * only the baseline's endpoint, so it can only get there when nothing
- * comparable answered, and the next protocol may yet prove itself. */
+ * An `indeterminate` reading lands too, on every rung. It used to be
+ * `notCarrying` on a rung with another protocol to try, on the grounds
+ * that the rung asked only the baseline's endpoint and the next protocol
+ * might prove itself. But one silent endpoint is not a silent tunnel: a
+ * relay's exit refuses its own engine's connections to its own mirror,
+ * and any endpoint can be down. `confirmEgress` now asks the rest when the
+ * baseline's endpoint says nothing, and an answer from any of them that is
+ * not the bare line's address means the tunnel carries traffic: not
+ * proven, never accused. "Not carrying" is for nothing answering at all,
+ * or the bare line's address coming back. */
 export type RungOutcome = "connected" | "unverified" | "notCarrying";
 
 export function rungOutcome(
   verdict: EgressVerdict,
-  { baselineTaken, isLast }: { baselineTaken: boolean; isLast: boolean },
+  // Kept for the callers: no longer changes the answer.
+  _rung: { baselineTaken: boolean; isLast: boolean },
 ): RungOutcome {
   switch (verdict.state) {
     case "throughTunnel":
       return "connected";
     case "indeterminate":
-      return isLast || !baselineTaken ? "unverified" : "notCarrying";
+      return "unverified";
     case "bypassingTunnel":
     case "unreachable":
       return "notCarrying";
@@ -279,10 +351,19 @@ export async function pollEgress(baseline: BaselineIp | null, tunnelServer?: Tun
   // No endpoint of its own to ask first: straight to the walk. A baseline
   // from the tunnel's own server is one (`askedAroundTunnel`): asked
   // "alone", the shared check walks the whole list strictly instead.
-  if (baseline === null || askedAroundTunnel(baseline, tunnelServer)) return verifyEgress(baseline, walk);
-  const own = await verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer, attemptMs: POLL_OWN_MS });
-  if (own.state !== "unreachable") return own;
-  return verifyEgress(baseline, walk);
+  let verdict: EgressVerdict;
+  if (baseline === null || askedAroundTunnel(baseline, tunnelServer)) {
+    verdict = await verifyEgress(baseline, walk);
+  } else {
+    verdict = await verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer, attemptMs: POLL_OWN_MS });
+    if (verdict.state === "unreachable") verdict = await verifyEgress(baseline, walk);
+  }
+  verdict = leakShown(baseline, verdict);
+  if (verdict.state !== "unreachable") return verdict;
+  // Nothing answered. A congested line that works can do that once, so the
+  // whole list is asked again at once -- not a poll interval later -- and
+  // only a second silence is "not carrying traffic".
+  return leakShown(baseline, await verifyEgress(baseline, { ...walk, baselineFirst: true }));
 }
 
 /** How long a health poll gives the baseline's own endpoint, then the
@@ -300,9 +381,11 @@ export async function pollEgress(baseline: BaselineIp | null, tunnelServer?: Tun
  * that does not resolve -- the next straight away. So a dead endpoint or
  * two at the head cannot use the budget up, and "unreachable" still means
  * that nothing at all answered: an HTTP status of any kind from any of
- * them is an answer, and the verdict is then no verdict. One poll is at
- * most about 15 s; with the poll every 15 s (HEALTH_POLL_MS), a tunnel
- * that dies just after one poll is reported at most about 30 s later. */
+ * them is an answer, and the verdict is then no verdict. A poll in which
+ * nothing answered asks the whole list once more at once (8 s), and only a
+ * second silence reports the tunnel dead: one poll is then at most about
+ * 25 s, and with the poll every 15 s (HEALTH_POLL_MS) a tunnel that dies
+ * just after one poll is reported at most about 40 s later. */
 export const POLL_OWN_MS = EGRESS_TIMEOUT_MS;
 export const POLL_WALK_MS = 8_000;
 export const POLL_HEDGE_MS = BASELINE_HEDGE_MS;

@@ -46,7 +46,7 @@ import { iapAvailable } from "@shared/lib/iap";
 import { endedNotice } from "@shared/lib/subscription-state";
 import { customerProtocolLabel } from "@shared/lib/protocol-labels";
 import { askedAroundTunnel, type BaselineIp, type TunnelServer } from "@shared/lib/egress";
-import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } from "@shared/lib/api-endpoints";
+import { setTunnelServer as setEndpointTunnelServer } from "@shared/lib/api-endpoints";
 import {
   classifyConnectionError,
   type ClassifiedError,
@@ -247,6 +247,7 @@ import {
 import { loadChosenRoute, saveChosenRoute } from "../lib/route-preference";
 import {
   confirmEgress,
+  endpointServerFor,
   nodeAddressesOf,
   phoneTunnelServerOf,
   pollEgress,
@@ -626,8 +627,11 @@ export function Dashboard({
    * also end the backup route and "doors first" for a rung that never
    * came up, which on the phones only a landed pass does. */
   const followTunnelForEndpoints = (observed: ConnectionState) => {
-    const up = tunnelUp(observed) ? true : observed === "disconnected" ? false : null;
-    const told = tunnelServerFromService(up, ladderPass.inFlight(), tunnelServerRef.current);
+    // Only a landed tunnel counts as up (`endpointServerFor`): an engine
+    // the platform reports for a rung that was dialled and then rejected
+    // must not end the backup route.
+    const landed = passTunnel.current !== null && passTunnel.current !== "unproven";
+    const told = endpointServerFor(observed, landed, ladderPass.inFlight(), tunnelServerRef.current);
     if (told !== undefined) setEndpointTunnelServer(told);
   };
   /** Names the protocol actually in use when it is not the one the

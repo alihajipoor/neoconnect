@@ -23,7 +23,7 @@ vi.mock("@shared/lib/egress", async (importOriginal) => ({
   },
 }));
 
-const { confirmEgress, pollEgress, pollState, rejectionIsEvidence, rungOutcome, stateFromStatus, tunnelUp } =
+const { confirmEgress, endpointServerFor, pollEgress, pollState, rejectionIsEvidence, rungOutcome, stateFromStatus, tunnelUp } =
   await import("./tunnel-evidence");
 
 const BASELINE: BaselineIp = { ip: "198.51.100.7", from: "https://api.example.test" };
@@ -112,8 +112,10 @@ describe("rungOutcome", () => {
     expect(rungOutcome(THROUGH, { baselineTaken: true, isLast: false })).toBe("connected");
   });
 
-  it("moves on from an indeterminate reading while another protocol is left", () => {
-    expect(rungOutcome(INDETERMINATE, { baselineTaken: true, isLast: false })).toBe("notCarrying");
+  // It used to move on while another protocol was left. One endpoint saying
+  // nothing comparable is not the tunnel carrying nothing.
+  it("lands an indeterminate reading on every rung, never accusing it", () => {
+    expect(rungOutcome(INDETERMINATE, { baselineTaken: true, isLast: false })).toBe("unverified");
   });
 
   it("lands an indeterminate last rung, or one with no baseline, as unverified", () => {
@@ -235,5 +237,37 @@ describe("tunnelUp", () => {
     expect(tunnelUp("degraded")).toBe(true);
     expect(tunnelUp("disconnected")).toBe(false);
     expect(tunnelUp("disconnecting")).toBe(false);
+  });
+});
+
+describe("endpointServerFor", () => {
+  const server = { addresses: ["203.0.113.41"], reachedAround: true };
+  // The defect: a rung dialled and then rejected, its engine reported up
+  // by the platform, was taken for a tunnel -- the backup route and "doors
+  // first" ended for a rung that never carried anything. As it was:
+  it("named the server for an engine that was up but never landed", () => {
+    const asItWas = (observed: Parameters<typeof endpointServerFor>[0]) =>
+      tunnelUp(observed) ? server : observed === "disconnected" ? null : undefined;
+    expect(asItWas("unverified")).toBe(server);
+  });
+
+  it("names it only for a tunnel that landed", () => {
+    expect(endpointServerFor("unverified", false, true, server)).toBeUndefined();
+    expect(endpointServerFor("connected", false, false, server)).toBeUndefined();
+    expect(endpointServerFor("unverified", true, false, server)).toBe(server);
+    expect(endpointServerFor("connected", true, false, server)).toBe(server);
+  });
+
+  it("lets go once it is down, unless a pass is still dialling", () => {
+    expect(endpointServerFor("disconnected", false, false, server)).toBeNull();
+    expect(endpointServerFor("disconnected", true, true, server)).toBeUndefined();
+    expect(endpointServerFor("verifying", true, false, server)).toBeUndefined();
+  });
+
+  it("is what the dashboard follows", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
+    expect(source).toContain("const landed = passTunnel.current !== null && passTunnel.current !== \"unproven\";");
+    expect(source).toContain("endpointServerFor(observed, landed, ladderPass.inFlight(), tunnelServerRef.current)");
   });
 });

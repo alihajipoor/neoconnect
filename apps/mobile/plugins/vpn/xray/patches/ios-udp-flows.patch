@@ -1,8 +1,8 @@
 neoxify-patch header: ios-udp-flows
 
 Bounds the UDP flows of the iOS engine's TUN inbound, and the time a refused one
-is held. A 64-packet queue per flow (upstream 1024); a flow ended after
-30 s with no packet either way once replied, 15 s while unreplied, 10 s for
+is held. A 256-packet queue per flow (upstream 1024); a flow ended after
+120 s with no packet either way once replied, 15 s while unreplied, 10 s for
 one to port 53; at most 64 flows at once, and 512 lookups beside them.
 Upstream keeps a flow until its outbound gives up on it (300 s idle), and the
 blackhole held a refused UDP flow 30-90 s. Written against xray-core v26.6.27
@@ -38,7 +38,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  	"time"
  
  	"github.com/xtls/xray-core/common/buf"
-@@ -11,6 +12,39 @@
+@@ -11,6 +12,43 @@
  	"github.com/xtls/xray-core/common/net"
  )
  
@@ -50,9 +50,13 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
 +// opening apps held thousands of flows inside an iOS packet tunnel that is
 +// killed at about 50 MB (measured 2026-11-17: 49.2 MiB 30 s into a
 +// session). Bounded here by design:
-+//   - a short queue per flow (udpFlowQueue);
++//   - a shorter queue per flow (udpFlowQueue): room for a video call's
++//     burst on a slow TCP-carried transport, not for a backlog;
 +//   - a flow ended when idle -- no packet either way -- for udpFlowIdle
-+//     once it has had a reply, udpUnrepliedIdle while it has had none (a
++//     once it has had a reply (two minutes: calls on hold, peer-to-peer
++//     games and long keep-alives rely on that floor, and a flow ended
++//     early gets a new server-side port, so the far end's packets after a
++//     silence are lost), udpUnrepliedIdle while it has had none (a
 +//     QUIC attempt nothing answers); for one to port 53, which is over in
 +//     one reply, udpLookupIdle until it is answered (the slowest lookup
 +//     takes 6 s) and udpAnsweredIdle after;
@@ -65,8 +69,8 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
 +//     them is about 4 MiB, and a QUIC attempt turned away falls back to
 +//     TCP as it does wherever QUIC is blocked.
 +const (
-+	udpFlowQueue     = 64
-+	udpFlowIdle      = 30 * time.Second
++	udpFlowQueue     = 256
++	udpFlowIdle      = 120 * time.Second
 +	udpUnrepliedIdle = 15 * time.Second
 +	udpLookupIdle    = 10 * time.Second
 +	udpAnsweredIdle  = 2 * time.Second
@@ -78,7 +82,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  type packet struct {
  	data []byte
  	dest *net.Destination
-@@ -21,6 +55,8 @@
+@@ -21,6 +59,8 @@
  	sync.RWMutex
  
  	udpConns map[net.Destination]*udpConn
@@ -87,7 +91,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  
  	handleConnection func(conn net.Conn, dest net.Destination)
  	writePacket      func(data []byte, src net.Destination, dst net.Destination) error
-@@ -42,6 +78,7 @@
+@@ -42,6 +82,7 @@
  	u.RLock()
  	conn, found := u.udpConns[src]
  	if found {
@@ -95,7 +99,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  		select {
  		case conn.egress <- &packet{
  			data: data,
-@@ -60,9 +97,34 @@
+@@ -60,9 +101,34 @@
  
  	conn, found = u.udpConns[src]
  	if !found {
@@ -132,7 +136,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  
  		go u.handleConnection(conn, dst)
  	}
-@@ -78,13 +140,39 @@
+@@ -78,13 +144,39 @@
  	}
  }
  
@@ -176,7 +180,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  	u.Unlock()
  }
  
-@@ -92,9 +180,29 @@
+@@ -92,9 +184,29 @@
  type udpConn struct {
  	handler *udpConnectionHandler
  
@@ -209,7 +213,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  }
  
  func (c *udpConn) ReadMultiBuffer() (buf.MultiBuffer, error) {
-@@ -130,6 +238,8 @@
+@@ -130,6 +242,8 @@
  }
  
  func (c *udpConn) WriteMultiBuffer(mb buf.MultiBuffer) error {
@@ -218,7 +222,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  	for i, b := range mb {
  		dst := c.dst
  		if b.UDP != nil {
-@@ -151,6 +261,8 @@
+@@ -151,6 +265,8 @@
  
  // Write returning packets back
  func (c *udpConn) Write(p []byte) (int, error) {
@@ -227,7 +231,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  	// sending packets back mean sending payload with source/destination reversed
  	err := c.handler.writePacket(p, c.dst, c.src)
  	if err != nil {
-@@ -161,7 +273,7 @@
+@@ -161,7 +277,7 @@
  }
  
  func (c *udpConn) Close() error {

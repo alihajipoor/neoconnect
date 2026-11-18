@@ -62,14 +62,17 @@ describe("how the tunnel's last run ended, for a drop's report", () => {
     const files: RunFiles = {
       lastEnd: null,
       run: JSON.stringify({ startedAt: NOW - 45 }),
-      heartbeat: heartbeat({ gateClosings: 2, gateClosedMs: 4250, gateRefused: 312 }),
+      heartbeat: heartbeat({ gate: { closings: 2, closedMs: 4250, refused: 312, shed: 7, closed: false } }),
       fatalTail: null,
     };
     expect(describeLastRun(files, NOW).text).toContain(
-      "mem peak 48.2 MiB, last 47.9 MiB, left 1.1 MiB, gate closed 2x for 4.3 s, 312 refused; engine xray",
+      "mem peak 48.2 MiB, last 47.9 MiB, left 1.1 MiB, gate closed 2x for 4.3 s, 312 refused, 7 shed; engine xray",
     );
-    const quiet = { ...files, heartbeat: heartbeat({ gateClosings: 0, gateClosedMs: 0, gateRefused: 0 }) };
-    expect(describeLastRun(quiet, NOW).text).toContain("gate closed 0x for 0.0 s, 0 refused");
+    const quiet = { ...files, heartbeat: heartbeat({ gate: { closings: 0, closedMs: 0, refused: 0, shed: 0, closed: false } }) };
+    expect(describeLastRun(quiet, NOW).text).toContain("gate closed 0x for 0.0 s, 0 refused, 0 shed");
+    // Android's engine has no gate, and its heartbeat no record of one.
+    const android = { ...files, heartbeat: heartbeat({ engine: "xray" }) };
+    expect(describeLastRun(android, NOW).text).not.toContain("gate");
   });
 
   it("says a run that died ended without a stop reason, with its memory, engine and panic line", () => {

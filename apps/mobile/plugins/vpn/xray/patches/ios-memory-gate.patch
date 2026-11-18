@@ -5,7 +5,10 @@ The TUN inbound side of the memory-pressure gate in the iOS engine
 new TCP connections are refused with a reset (here) and packets that would
 open a new UDP flow are dropped (ios-udp-flows.patch, which calls the same
 admitting()); new TCP connections are also admitted at no more than 100 a
-second. Unbounded before: a flood of new connections reached 107 MiB on
+second (20 under memory pressure); and the connections it carries are tracked,
+so the gate can close the
+idlest when memory stays high (shedIdlest). Unbounded before: a flood of new
+connections reached 107 MiB on
 Stealth and 400 MiB on Shadowsocks; iOS kills the extension at about 50 MiB.
 Written against xray-core v26.6.27 (45cf2898ab12): proxy/tun/stack_gvisor.go
 and a new proxy/tun/neoxify_gate.go. Applied by
@@ -29,14 +32,31 @@ TestEngineMemoryBudget (plugins/vpn/xray), 2026-11-18.
  		go func(r *tcp.ForwarderRequest) {
  			var wq waiter.Queue
  			id := r.ID()
+@@ -84,8 +92,12 @@
+ 			options.SetReuseAddress(true)
+ 			options.SetReusePort(true)
+ 
++			// neoxify-patch: ios-memory-gate. Tracked, so the gate can
++			// close the idlest connections when memory stays high.
++			conn := trackTCP(gonet.NewTCPConn(&wq, ep))
++			defer conn.untrack()
+ 			t.handler.HandleConnection(
+-				gonet.NewTCPConn(&wq, ep),
++				conn,
+ 				// local address on the gVisor side is connection destination
+ 				net.TCPDestination(net.IPAddress(id.LocalAddress.AsSlice()), net.Port(id.LocalPort)),
+ 			)
 --- /dev/null
 +++ b/proxy/tun/neoxify_gate.go
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,174 @@
 +package tun
 +
 +import (
 +	"expvar"
++	"net"
++	"sort"
 +	"sync"
++	"sync/atomic"
 +	"time"
 +)
 +
@@ -59,6 +79,12 @@ TestEngineMemoryBudget (plugins/vpn/xray), 2026-11-18.
 +const (
 +	tcpAdmitRate  = 100.0
 +	tcpAdmitBurst = 100.0
++	// Under memory pressure -- the footprint near the gate's high mark,
++	// "neoxify.tun.pressure" -- far fewer: a burst of a hundred Shadowsocks
++	// connections let in as the gate opened again is about 35 MiB, and
++	// measured, took the footprint from 45 to 52 MiB.
++	pressureAdmitRate  = 20.0
++	pressureAdmitBurst = 5.0
 +)
 +
 +func admitting() bool {
@@ -74,16 +100,22 @@ TestEngineMemoryBudget (plugins/vpn/xray), 2026-11-18.
 +
 +// admittingTCP is admitting, and within the rate for new connections.
 +func admittingTCP() bool {
-+	if !admitting() {
-+		return false
-+	}
 +	tcpAdmit.Lock()
 +	defer tcpAdmit.Unlock()
 +	now := time.Now()
++	if !admitting() {
++		// Nothing saved up while closed: no burst as it opens.
++		tcpAdmit.tokens, tcpAdmit.last = 0, now
++		return false
++	}
++	rate, burst := tcpAdmitRate, tcpAdmitBurst
++	if v, ok := expvar.Get("neoxify.tun.pressure").(*expvar.Int); ok && v.Value() != 0 {
++		rate, burst = pressureAdmitRate, pressureAdmitBurst
++	}
 +	if tcpAdmit.last.IsZero() {
-+		tcpAdmit.tokens = tcpAdmitBurst
++		tcpAdmit.tokens = burst
 +	} else {
-+		tcpAdmit.tokens = min(tcpAdmitBurst, tcpAdmit.tokens+now.Sub(tcpAdmit.last).Seconds()*tcpAdmitRate)
++		tcpAdmit.tokens = min(burst, tcpAdmit.tokens+now.Sub(tcpAdmit.last).Seconds()*rate)
 +	}
 +	tcpAdmit.last = now
 +	if tcpAdmit.tokens < 1 {
@@ -97,4 +129,97 @@ TestEngineMemoryBudget (plugins/vpn/xray), 2026-11-18.
 +	if v, ok := expvar.Get("neoxify.tun.refused").(*expvar.Int); ok {
 +		v.Add(1)
 +	}
++}
++
++// The TCP connections the TUN inbound is carrying, for shedding: when the
++// engine's footprint stays at the gate's high mark, the gate asks for the
++// idlest of them to be closed (gate_darwin.go, gateShed) until it falls.
++// The idlest, because a transfer under way is what the customer is
++// waiting on; one that has sat silent is the cheapest to lose, and an app
++// reopens it when it needs it.
++var tracked struct {
++	sync.Mutex
++	conns map[*trackedConn]struct{}
++}
++
++type trackedConn struct {
++	net.Conn
++	last atomic.Int64 // unix nanoseconds of the last byte either way
++}
++
++func trackTCP(c net.Conn) *trackedConn {
++	t := &trackedConn{Conn: c}
++	t.last.Store(time.Now().UnixNano())
++	tracked.Lock()
++	if tracked.conns == nil {
++		tracked.conns = make(map[*trackedConn]struct{})
++	}
++	tracked.conns[t] = struct{}{}
++	tracked.Unlock()
++	return t
++}
++
++func (t *trackedConn) untrack() {
++	tracked.Lock()
++	delete(tracked.conns, t)
++	tracked.Unlock()
++}
++
++func (t *trackedConn) Read(p []byte) (int, error) {
++	n, err := t.Conn.Read(p)
++	if n > 0 {
++		t.last.Store(time.Now().UnixNano())
++	}
++	return n, err
++}
++
++func (t *trackedConn) Write(p []byte) (int, error) {
++	n, err := t.Conn.Write(p)
++	if n > 0 {
++		t.last.Store(time.Now().UnixNano())
++	}
++	return n, err
++}
++
++// The half-closes gonet's connection offers, passed through: hidden behind
++// the wrapper, a close from one side would no longer reach the other.
++func (t *trackedConn) CloseWrite() error {
++	if c, ok := t.Conn.(interface{ CloseWrite() error }); ok {
++		return c.CloseWrite()
++	}
++	return nil
++}
++
++func (t *trackedConn) CloseRead() error {
++	if c, ok := t.Conn.(interface{ CloseRead() error }); ok {
++		return c.CloseRead()
++	}
++	return nil
++}
++
++// shedShare: what one shedding round closes, of the connections held.
++const shedShare = 4 // a quarter, at least one
++
++// shedIdlest closes the idlest quarter of the connections held, at least
++// one, and says how many.
++func shedIdlest() any {
++	tracked.Lock()
++	all := make([]*trackedConn, 0, len(tracked.conns))
++	for c := range tracked.conns {
++		all = append(all, c)
++	}
++	tracked.Unlock()
++	if len(all) == 0 {
++		return int64(0)
++	}
++	sort.Slice(all, func(i, j int) bool { return all[i].last.Load() < all[j].last.Load() })
++	n := max(1, len(all)/shedShare)
++	for _, c := range all[:n] {
++		_ = c.Conn.Close()
++	}
++	return int64(n)
++}
++
++func init() {
++	expvar.Publish("neoxify.tun.shedIdlest", expvar.Func(shedIdlest))
 +}

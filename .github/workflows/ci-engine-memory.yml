@@ -15,7 +15,8 @@ name: CI (phone engine memory)
 # config builder change -- macOS runners bill at ten times Linux, and
 # ci-ios.yml runs on every change under apps/mobile. The darwin tests need a
 # Mac (the engine's footprint is read from the Mac kernel, as iOS reads it);
-# no Xcode, no app build. About six minutes.
+# no Xcode, no app build. About ten minutes (eight of them the test: thirty
+# cases, every config under six loads).
 #
 # What a pass does NOT prove: that an iPhone stays under its limit. It is a
 # Mac process with the same Go engine and the same accounting, not the same

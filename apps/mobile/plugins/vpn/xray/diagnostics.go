@@ -75,7 +75,7 @@ var wireGuardRunningHook = func() bool { return false }
 var (
 	startGateHook = func() {}
 	stopGateHook  = func() {}
-	gateStatsHook = func() (closings, closedMs, refused int64) { return 0, 0, 0 }
+	gateStatsHook = func() (*GateRecord, bool) { return nil, false }
 )
 
 // Heartbeat is engine-heartbeat.json, and lastHeartbeat in the app's file.
@@ -100,12 +100,23 @@ type Heartbeat struct {
 	// buffer patch (scripts/xray-core-patch.sh).
 	Core        string `json:"core"`
 	CorePatched bool   `json:"corePatched"`
-	// The memory-pressure gate (gate_darwin.go), this run: how often it
-	// closed, for how long in all, and how many new connections and UDP
-	// flows it turned away. Zero where there is no gate.
-	GateClosings int64 `json:"gateClosings"`
-	GateClosedMs int64 `json:"gateClosedMs"`
-	GateRefused  int64 `json:"gateRefused"`
+	// The memory-pressure gate (gate_darwin.go), this run. Absent where
+	// there is no gate (Android).
+	Gate *GateRecord `json:"gate,omitempty"`
+}
+
+// GateRecord is what the memory-pressure gate did in one run.
+type GateRecord struct {
+	// How often it closed, and for how long in all, ms.
+	Closings int64 `json:"closings"`
+	ClosedMs int64 `json:"closedMs"`
+	// New TCP connections and UDP flows it turned away: while closed, or
+	// past the rate for new connections.
+	Refused int64 `json:"refused"`
+	// Connections it closed to shed load.
+	Shed int64 `json:"shed"`
+	// Whether it is closed now.
+	Closed bool `json:"closed"`
 }
 
 // runRecord is tunnel-run.json.
@@ -465,11 +476,12 @@ func sampleHeartbeat(started time.Time) Heartbeat {
 	} else if wireGuardRunningHook() {
 		engine = "wireguard"
 	}
-	closings, closedMs, refused := gateStatsHook()
+	var gateRecord *GateRecord
+	if g, ok := gateStatsHook(); ok {
+		gateRecord = g
+	}
 	return Heartbeat{
-		GateClosings:  closings,
-		GateClosedMs:  closedMs,
-		GateRefused:   refused,
+		Gate:          gateRecord,
 		Time:          now.Unix(),
 		Uptime:        int64(now.Sub(started) / time.Second),
 		Footprint:     fp,

@@ -93,6 +93,8 @@ const net = {
    * through its own tunnel -- the nodes' self-loop guard, under which the
    * TLS handshake ends with EOF (measured on the emulator 2026-11-17). */
   selfRefused: false,
+  // Endpoints that do not answer through the tunnel, whatever the route.
+  deadEndpoints: new Set<string>(),
   /** Endpoints the bare network refuses at once. */
   blockedBare: new Set<string>(),
   /** Endpoints the bare network black-holes until the request's timeout:
@@ -107,6 +109,9 @@ setHealthIpTransport(async (base, timeoutMs) => {
   const throughTunnel = net.tunnel !== null && !(peer === net.tunnel && net.around);
   if (throughTunnel && net.dead) throw new Error("no answer");
   if (throughTunnel && net.selfRefused && peer === net.tunnel) throw new Error("EOF");
+  // A relay's exit does the same to its own mirror (its self-loop guard).
+  if (throughTunnel && net.selfRefused && net.exit !== null && peer === net.exit) throw new Error("EOF");
+  if (throughTunnel && net.deadEndpoints.has(base)) throw new Error("no answer");
   if (!throughTunnel && net.hangBare.has(base)) {
     await new Promise((r) => setTimeout(r, timeoutMs));
     throw new Error("timed out");
@@ -128,6 +133,7 @@ afterEach(() => {
   net.around = false;
   net.dead = false;
   net.selfRefused = false;
+  net.deadEndpoints.clear();
   net.blockedBare.clear();
   net.hangBare.clear();
   asked.length = 0;
@@ -197,8 +203,10 @@ describe("IKEv2, where the server is taken to be reached around the tunnel", () 
     const baseline = { ip: PHONE, from: CDN, peer: EDGE };
     net.tunnel = FINLAND;
     net.dead = true;
-    // As it was: the mirror's answer was a reading from another endpoint.
-    expect((await pollEgress(baseline)).state).toBe("indeterminate");
+    // Not passed over (no server named), the mirror's answer around the
+    // tunnel is the phone's own address: a leak, whatever endpoint said it
+    // (`leakShown`) -- the reason every poll names the server.
+    expect((await pollEgress(baseline)).state).toBe("bypassingTunnel");
     // Passed over, nothing at all answered.
     expect(pollState("unverified", await pollEgress(baseline, FI_IKEV2))).toBe("degraded");
   });
@@ -363,17 +371,19 @@ describe("the server's own mirror, refused through its own tunnel", () => {
     endpoints = [FI_MIRROR, CDN, DE_MIRROR];
   }
 
-  it("was every rung torn down and held against a working route", async () => {
-    // The control: the pass's first baseline, then the shared rule's server.
+  it("was every rung torn down; now the rest of the list is asked and the rung is not accused", async () => {
+    // The pass's first baseline, then the shared rule's server. Asked
+    // alone, that mirror said nothing (EOF), and every rung was torn down
+    // as not carrying; the rest of the list now answers through the tunnel.
     coldStart();
     const baseline = await takeBaseline({ nodeAddresses: nodeAddressesOf(USERS) });
     expect(baseline?.from).toBe(FI_MIRROR);
     expect(askedAroundTunnel(baseline, FI_XRAY)).toBe(false);
     net.tunnel = FINLAND;
     const verdict = await confirmEgress(baseline, { ...quick, sameEndpointOnly: true, tunnelServer: FI_XRAY });
-    expect(verdict?.state).toBe("unreachable");
-    expect(rungOutcome(verdict!, { baselineTaken: true, isLast: false })).toBe("notCarrying");
-    expect(rejectionIsEvidence(verdict!)).toBe(true);
+    expect(verdict?.state).toBe("indeterminate");
+    expect(rungOutcome(verdict!, { baselineTaken: true, isLast: false })).toBe("unverified");
+    expect(rejectionIsEvidence(verdict!)).toBe(false);
   });
 
   it("takes the baseline again from elsewhere, and the tunnel is proven on the rung and on every poll", async () => {
@@ -426,6 +436,73 @@ describe("the server's own mirror, refused through its own tunnel", () => {
       expect(server.reachedAround, user.protocol).toBe(true);
       expect([...server.addresses], user.protocol).toEqual([FINLAND]);
     }
+  });
+});
+
+describe("one silent endpoint is not a silent tunnel", () => {
+  // The connect-time check follows the poll's rule: the baseline's endpoint
+  // first, and when it says nothing, the rest of the list, hedged and
+  // bounded. Only nothing answering at all -- or the bare line's address
+  // coming back -- is held against the rung.
+  const FI_XRAY_CHECKED = { protocol: "XRAY_VLESS_REALITY", connection: { host: FINLAND } };
+
+  it("lands a relay rung whose baseline came from the exit's own mirror", async () => {
+    // Finland the entry, Germany the exit; the credential names only the
+    // entry, so the exit's mirror is not passed over -- and the exit
+    // refuses its own engine's connections to it.
+    net.selfRefused = true;
+    endpoints = [DE_MIRROR, CDN];
+    const server = await phoneTunnelServerOf(FI_XRAY_CHECKED);
+    const baseline = await takeBaseline({ nodeAddresses: nodeAddressesOf(USERS), tunnelServer: server });
+    expect(baseline?.from).toBe(DE_MIRROR);
+    net.tunnel = FINLAND;
+    net.exit = GERMANY;
+    const verdict = await confirmEgress(baseline, { ...quick, timeoutMs: 400, sameEndpointOnly: true, tunnelServer: server });
+    expect(verdict).toMatchObject({ state: "indeterminate", exitIp: GERMANY });
+    expect(rungOutcome(verdict!, { baselineTaken: true, isLast: false })).toBe("unverified");
+    expect(rejectionIsEvidence(verdict!)).toBe(false);
+  });
+
+  it("lands a rung whose baseline endpoint has died, and proves it if that endpoint comes back", async () => {
+    endpoints = [CDN, CDN2];
+    const server = await phoneTunnelServerOf(FI_XRAY_CHECKED);
+    const baseline = await takeBaseline({ nodeAddresses: nodeAddressesOf(USERS), tunnelServer: server });
+    expect(baseline?.from).toBe(CDN);
+    net.tunnel = FINLAND;
+    net.deadEndpoints.add(CDN);
+    const verdict = await confirmEgress(baseline, { ...quick, timeoutMs: 400, sameEndpointOnly: true, tunnelServer: server });
+    expect(verdict?.state).toBe("indeterminate");
+    expect(rungOutcome(verdict!, { baselineTaken: true, isLast: false })).toBe("unverified");
+    net.deadEndpoints.clear();
+    const again = await confirmEgress(baseline, { ...quick, sameEndpointOnly: true, tunnelServer: server });
+    expect(again).toMatchObject({ state: "throughTunnel", exitIp: FINLAND });
+  });
+
+  it("still accuses a dead tunnel: nothing answers", async () => {
+    endpoints = [CDN, CDN2, DE_MIRROR];
+    const server = await phoneTunnelServerOf(FI_XRAY_CHECKED);
+    const baseline = await takeBaseline({ nodeAddresses: nodeAddressesOf(USERS), tunnelServer: server });
+    net.tunnel = FINLAND;
+    net.dead = true;
+    const verdict = await confirmEgress(baseline, { ...quick, timeoutMs: 400, sameEndpointOnly: true, tunnelServer: server });
+    expect(verdict?.state).toBe("unreachable");
+    expect(rungOutcome(verdict!, { baselineTaken: true, isLast: false })).toBe("notCarrying");
+    expect(rejectionIsEvidence(verdict!)).toBe(true);
+  });
+
+  it("still accuses a leak, from the baseline's endpoint or from any other", async () => {
+    endpoints = [CDN, CDN2];
+    const server = await phoneTunnelServerOf(FI_XRAY_CHECKED);
+    const baseline = await takeBaseline({ nodeAddresses: nodeAddressesOf(USERS), tunnelServer: server });
+    // Up, but leaving on the bare line: every endpoint sees the phone.
+    const leak = await confirmEgress(baseline, { ...quick, timeoutMs: 400, sameEndpointOnly: true, tunnelServer: server });
+    expect(leak?.state).toBe("bypassingTunnel");
+    // The baseline's endpoint silent, another one sees the bare line's address.
+    net.deadEndpoints.add(CDN);
+    const elsewhere = await confirmEgress(baseline, { ...quick, timeoutMs: 400, sameEndpointOnly: true, tunnelServer: server });
+    expect(elsewhere).toMatchObject({ state: "bypassingTunnel", exitIp: PHONE });
+    expect(rungOutcome(elsewhere!, { baselineTaken: true, isLast: false })).toBe("notCarrying");
+    expect(pollState("connected", await pollEgress(baseline, server))).toBe("degraded");
   });
 });
 

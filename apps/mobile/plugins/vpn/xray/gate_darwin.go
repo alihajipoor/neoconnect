@@ -24,7 +24,9 @@ import (
 // packet that would open a new UDP flow is dropped. Lookups (port 53) are
 // still admitted: they have their own cap and are gone 2 s after their
 // answer, and refusing them would only turn the refused connections into
-// failed lookups. Nothing already running is touched. The TUN side reads
+// failed lookups. Nothing already running is touched -- unless memory
+// stays at the high mark (gateShedAfter), when the idlest connections are
+// closed (gateShed) until it falls. The TUN side reads
 // the gate through expvar (patches/ios-memory-gate.patch), because the
 // patched xray-core cannot import this package and Android's unpatched
 // one must still build against it; there, nothing reads it.
@@ -37,35 +39,68 @@ import (
 // The marks, from TestEngineMemoryBudget on the Mac with the iOS patches
 // (2026-11-18, three runs): the heaviest normal load there -- a phone
 // opening apps on Shadowsocks with the DoH resolver unreachable -- peaks
-// at 40.5-42.4 MiB, VLESS over WebSocket at 38.9-39.6, everything else at
-// 37 MiB or less; the TCP flood on Shadowsocks, held by the rate, at
-// 44.1-44.5. An iPhone was killed at 49.2 MiB. Closing at gateHighWater
-// leaves the heaviest normal load 2.6 MiB, and the kill about 5 MiB of
-// headroom for what is already in flight. Opening again only below
-// gateLowWater, and no sooner than gateMinClosed, so it does not flap
-// around one figure.
+// at 42.1-42.8 MiB, VLESS over WebSocket at 39.6-41.5, everything else at
+// 40 MiB or less; the floods, held by the rate, at 40.7 or less. An
+// iPhone was killed at 49.2 MiB. Closing at gateHighWater leaves the
+// heaviest normal load 3 MiB, and the kill about 4 MiB of headroom for
+// what is already in flight. Under these loads it never closed.
+//
+// A closed gate heals by itself. It opens again once it has been closed
+// gateMinClosed and the footprint is gateReopenStep under the high mark --
+// not at a low mark far below, which long-lived connections could keep the
+// footprint above for minutes while the heaviest normal load sits there
+// anyway. If the footprint stays at the high mark for gateShedAfter, the
+// idlest connections are closed, a share at a time every gateShedEvery,
+// until it falls. So the longest a customer cannot open a new connection
+// is about gateShedAfter plus a few shedding rounds: seconds.
 const (
-	gateHighWater = 45 << 20
-	gateLowWater  = 39 << 20
-	gateMinClosed = 2 * time.Second
+	gateHighWater  = 46 << 20
+	gateReopenStep = 1 << 20
+	gateMinClosed  = time.Second
+	gateShedAfter  = 3 * time.Second
+	gateShedEvery  = 2 * time.Second
+	// Memory pressure: from gatePressureHigh until under gatePressureLow,
+	// new TCP connections are admitted at 20 a second rather than 100
+	// (neoxify_gate.go), so the gate is rarely reached, and opening it
+	// again lets no burst in. The heaviest normal loads sit near 42 MiB and
+	// open few connections; browsing there is slowed, not refused.
+	gatePressureHigh = 40 << 20
+	gatePressureLow  = 38 << 20
 	// How often the footprint is read: a system call, not per packet.
 	gateSampleEvery = 50 * time.Millisecond
 	// How often, while closed, the runtime is asked to give memory back.
 	gateReleaseEvery = 3 * time.Second
 )
 
-// The names the TUN inbound looks up (patches/ios-memory-gate.patch).
+// The names the TUN inbound looks up and publishes
+// (patches/ios-memory-gate.patch).
 var (
-	gateClosedVar  = expvar.NewInt("neoxify.tun.gateClosed")
-	gateRefusedVar = expvar.NewInt("neoxify.tun.refused")
+	gateClosedVar   = expvar.NewInt("neoxify.tun.gateClosed")
+	gateRefusedVar  = expvar.NewInt("neoxify.tun.refused")
+	gateShedVar     = expvar.NewInt("neoxify.tun.shed")
+	gatePressureVar = expvar.NewInt("neoxify.tun.pressure")
 )
+
+// gateShed closes the idlest connections the TUN inbound holds and says
+// how many; the patched xray-core publishes it as expvar
+// "neoxify.tun.shedIdlest". A variable so tests can stand in for it.
+var gateShed = func() int64 {
+	if f, ok := expvar.Get("neoxify.tun.shedIdlest").(expvar.Func); ok {
+		if n, ok := f().(int64); ok {
+			return n
+		}
+	}
+	return 0
+}
 
 var gate struct {
 	sync.Mutex
 	closings     int64
 	closedFor    time.Duration
 	closedSince  time.Time
+	highSince    time.Time // when the footprint last rose to the high mark; zero below it
 	lastReleased time.Time
+	lastShed     time.Time
 	stop         chan struct{}
 }
 
@@ -76,18 +111,26 @@ func init() {
 }
 
 // startGate begins sampling. Called by Start; a second call while one is
-// running does nothing.
+// running does nothing. Each run starts open and counts its own: a run
+// must never inherit a closed gate from the one before.
 func startGate() {
 	gate.Lock()
 	defer gate.Unlock()
 	if gate.stop != nil {
 		return
 	}
-	// Each run counts its own.
-	gate.closings, gate.closedFor = 0, 0
-	gateRefusedVar.Set(0)
+	resetGateLocked()
 	gate.stop = make(chan struct{})
 	go sampleGate(gate.stop)
+}
+
+func resetGateLocked() {
+	gateClosedVar.Set(0)
+	gateRefusedVar.Set(0)
+	gateShedVar.Set(0)
+	gatePressureVar.Set(0)
+	gate.closings, gate.closedFor = 0, 0
+	gate.closedSince, gate.highSince, gate.lastReleased, gate.lastShed = time.Time{}, time.Time{}, time.Time{}, time.Time{}
 }
 
 // stopGate ends sampling and opens the gate, so nothing outlives the
@@ -101,6 +144,7 @@ func stopGate() {
 	close(gate.stop)
 	gate.stop = nil
 	openGateLocked(time.Now())
+	gatePressureVar.Set(0)
 }
 
 func sampleGate(stop chan struct{}) {
@@ -113,16 +157,35 @@ func sampleGate(stop chan struct{}) {
 		case now := <-tick.C:
 			fp, _ := footprint()
 			if fp >= 0 {
-				stepGate(fp, now)
+				stepGate(stop, fp, now)
 			}
 		}
 	}
 }
 
-// stepGate moves the gate for one reading of the footprint.
-func stepGate(fp int64, now time.Time) {
+// stepGate moves the gate for one reading of the footprint, taken by the
+// sampler whose stop channel is stop. A reading from a sampler that is no
+// longer the running one -- read as the engine stopped -- does nothing, or
+// it could close the gate after stopGate opened it.
+func stepGate(stop chan struct{}, fp int64, now time.Time) {
 	gate.Lock()
 	defer gate.Unlock()
+	if stop == nil || gate.stop != stop {
+		return
+	}
+	switch {
+	case fp >= gatePressureHigh:
+		gatePressureVar.Set(1)
+	case fp < gatePressureLow:
+		gatePressureVar.Set(0)
+	}
+	if fp >= gateHighWater {
+		if gate.highSince.IsZero() {
+			gate.highSince = now
+		}
+	} else {
+		gate.highSince = time.Time{}
+	}
 	closed := gateClosedVar.Value() != 0
 	switch {
 	case !closed && fp >= gateHighWater:
@@ -130,8 +193,13 @@ func stepGate(fp int64, now time.Time) {
 		gate.closings++
 		gate.closedSince = now
 		releaseLocked(now)
-	case closed && fp < gateLowWater && now.Sub(gate.closedSince) >= gateMinClosed:
+	case closed && fp < gateHighWater-gateReopenStep && now.Sub(gate.closedSince) >= gateMinClosed:
 		openGateLocked(now)
+	case closed && !gate.highSince.IsZero() && now.Sub(gate.highSince) >= gateShedAfter &&
+		now.Sub(gate.lastShed) >= gateShedEvery:
+		gate.lastShed = now
+		gateShedVar.Add(gateShed())
+		releaseLocked(now)
 	case closed && now.Sub(gate.lastReleased) >= gateReleaseEvery:
 		releaseLocked(now)
 	}
@@ -153,13 +221,20 @@ func releaseLocked(now time.Time) {
 }
 
 // gateStats: how often the gate closed, for how long in all (counting a
-// closing still going), and how much it turned away.
-func gateStats() (closings, closedMs, refused int64) {
+// closing still going), how much it turned away, and how many connections
+// it closed to shed load.
+func gateStats() (*GateRecord, bool) {
 	gate.Lock()
 	defer gate.Unlock()
 	closedFor := gate.closedFor
 	if gateClosedVar.Value() != 0 {
 		closedFor += time.Since(gate.closedSince)
 	}
-	return gate.closings, closedFor.Milliseconds(), gateRefusedVar.Value()
+	return &GateRecord{
+		Closings: gate.closings,
+		ClosedMs: closedFor.Milliseconds(),
+		Refused:  gateRefusedVar.Value(),
+		Shed:     gateShedVar.Value(),
+		Closed:   gateClosedVar.Value() != 0,
+	}, true
 }

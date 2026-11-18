@@ -59,15 +59,17 @@ import (
 // asks the Go runtime to stay under 30 MiB (memory_darwin.go,
 // SetMemoryLimit), a soft limit its footprint overshoots: goroutine stacks
 // and memory the runtime has not yet given back count too. Measured on the
-// Mac with the iOS patches, 2026-11-17, three runs: the heaviest case,
+// Mac with the iOS patches, 2026-11-18, three runs: the heaviest case,
 // the app-open load on Shadowsocks with the DoH resolver unreachable (every
-// lookup falling back to TCP), peaked at 41.8-42.9 MiB; VLESS over
-// WebSocket 38.4-39.4, Trojan 36.4-37.0, the Vision transports 30.6-34.2,
-// stalled uploads and slow readers 16-24. Before the flows were bounded the
-// same load reached 107-175 MiB. 46 MiB is 3 MiB over the worst run seen
-// (the spread between runs was about 1 MiB) and 4 MiB under the kill: a
+// lookup falling back to TCP), peaked at 42.1-42.8 MiB; VLESS over
+// WebSocket 39.6-41.5, Trojan 36.5-39.9, the Vision transports 31.5-34.9,
+// the TCP and UDP floods 14.6-40.7, stalled uploads and slow readers
+// 16-24. Before the flows were bounded the app-open load reached 107-175
+// MiB, and the TCP flood 107 (Stealth) to 400 (Shadowsocks). 47 MiB is
+// 4 MiB over the worst run seen (runs differed by up to 3 MiB, Trojan) and
+// 3 MiB under the kill; the memory gate closes at 46 (gate_darwin.go). A
 // regression of a few MiB fails here, before a phone finds it.
-const EngineFootprintBudget = 46 << 20
+const EngineFootprintBudget = 47 << 20
 
 // The resolver the tunnel advertises (TUN_DNS in xray-config.ts).
 var tunDNS = tcpip.AddrFrom4([4]byte{1, 1, 1, 1})
@@ -85,6 +87,9 @@ type loadSpec struct {
 	// echoes 1 KiB and closes), and new UDP flows as fast as 4 workers
 	// send them, each from a fresh port to a fresh destination.
 	tcpFlood, udpFlood bool
+	// How long the floods run, when shorter than the window: the rest of it
+	// shows the gate opening again while the transfers keep running.
+	floodFor time.Duration
 	// Whether the memory-pressure gate may close. Never for the normal
 	// loads: closing there would refuse a phone's ordinary traffic.
 	gateMayClose bool
@@ -156,6 +161,9 @@ func TestEngineMemoryBudget(t *testing.T) {
 		// reached 107 MiB on Stealth and 400 MiB on Shadowsocks.
 		{"tcp-flood", loadSpec{tcpFlood: true, gateMayClose: true}, 15 * time.Second},
 		{"udp-flood", loadSpec{udpFlood: true, gateMayClose: true}, 10 * time.Second},
+		// A flood for 8 s beside 8 long transfers, then 6 s of the transfers
+		// alone: the gate must open again by itself, and no transfer be cut.
+		{"tcp-flood-then-transfers", loadSpec{tcpFlood: true, downloads: 8, slowRead: 256 << 10, floodFor: 8 * time.Second, gateMayClose: true}, 14 * time.Second},
 	}
 	for _, transport := range e2eTransports {
 		if _, ok := all[transport]; !ok {
@@ -186,6 +194,12 @@ func TestEngineMemoryBudget(t *testing.T) {
 					t.Errorf("the memory gate closed %d times (%d refused) under an ordinary load; its high mark is %.0f MiB",
 						r.gateClosings, r.gateRefused, float64(gateHighWater)/(1<<20))
 				}
+				if c.spec.floodFor > 0 && r.closedAfterFlood {
+					t.Errorf("the memory gate was still closed 2 s after the flood stopped")
+				}
+				if c.spec.downloads > 0 && r.cut > 0 {
+					t.Errorf("%d of %d transfers were cut off", r.cut, c.spec.downloads)
+				}
 			})
 		}
 	}
@@ -195,14 +209,19 @@ type loadResult struct {
 	footprintPeak, footprintEnd, heapPeak, heapEnd int64
 	goroutinesPeak, goroutinesEnd                  int64
 	gateClosings, gateClosedMs, gateRefused        int64
-	note                                           string
+	gateShed                                       int64
+	// With floodFor: whether the gate was still closed 2 s after the
+	// floods stopped, and how many transfers were cut off.
+	closedAfterFlood bool
+	cut              int64
+	note             string
 }
 
 func (r loadResult) String() string {
 	mib := func(v int64) float64 { return float64(v) / (1 << 20) }
-	return fmt.Sprintf("footprint peak %5.1f MiB end %5.1f  heap peak %5.1f MiB end %5.1f  goroutines peak %5d end %5d  gate closed %d times, %.1f s, %d refused  %s",
+	return fmt.Sprintf("footprint peak %5.1f MiB end %5.1f  heap peak %5.1f MiB end %5.1f  goroutines peak %5d end %5d  gate closed %d times, %.1f s, %d refused, %d shed  %s",
 		mib(r.footprintPeak), mib(r.footprintEnd), mib(r.heapPeak), mib(r.heapEnd), r.goroutinesPeak, r.goroutinesEnd,
-		r.gateClosings, float64(r.gateClosedMs)/1000, r.gateRefused, r.note)
+		r.gateClosings, float64(r.gateClosedMs)/1000, r.gateRefused, r.gateShed, r.note)
 }
 
 func measureLoad(t *testing.T, env *e2eEnv, config string, spec loadSpec, window time.Duration) loadResult {
@@ -210,7 +229,7 @@ func measureLoad(t *testing.T, env *e2eEnv, config string, spec loadSpec, window
 	e := startEngine(t, config)
 	time.Sleep(time.Second)
 	from := time.Now().UnixMilli()
-	note := runLoad(e, spec, window)
+	note, moved := runLoad(e, spec, window)
 	endAt := time.Now().UnixMilli()
 	time.Sleep(time.Second)
 	if !e.alive() {
@@ -228,17 +247,68 @@ func measureLoad(t *testing.T, env *e2eEnv, config string, spec loadSpec, window
 		r.gateClosings = max(r.gateClosings, s.gateClosings)
 		r.gateClosedMs = max(r.gateClosedMs, s.gateClosedMs)
 		r.gateRefused = max(r.gateRefused, s.gateRefused)
+		r.gateShed = max(r.gateShed, s.gateShed)
+		if spec.floodFor > 0 && s.ms >= from+spec.floodFor.Milliseconds()+2000 && s.ms <= endAt && s.gateClosedNow != 0 {
+			r.closedAfterFlood = true
+		}
 	}
 	r.footprintEnd, r.heapEnd, r.goroutinesEnd = last.footprint, last.heap, last.goroutines
+	r.cut = moved.cut
+	checkMeasured(t, spec, window, len(e.samplesSince(from)), r, moved)
 	return r
 }
 
-func runLoad(e *engine, spec loadSpec, window time.Duration) string {
+// What a load moved, for checkMeasured.
+type loadMoved struct {
+	down, up, asked, answered, connections, flows int64
+	// Downloads that ended before their window: cut off.
+	cut int64
+}
+
+// The floor under any footprint this engine can have while it runs: its
+// code, the Go runtime and xray-core's apps. Idle it is about 12 MiB.
+const engineFootprintFloor = 8 << 20
+
+// checkMeasured fails a run that did not measure what it says: a budget
+// test that passes because no sample arrived, the footprint could not be
+// read, or the load never reached the engine would be a guard that guards
+// nothing.
+func checkMeasured(t *testing.T, spec loadSpec, window time.Duration, samples int, r loadResult, m loadMoved) {
+	t.Helper()
+	// Four a second from the engine process; half of them is plenty.
+	if want := int(window / (500 * time.Millisecond)); samples < want {
+		t.Fatalf("%d samples from the engine over %v, want at least %d: the SAMPLE lines are not arriving or not parsing", samples, window, want)
+	}
+	if r.footprintPeak < engineFootprintFloor {
+		t.Fatalf("footprint peak %d bytes, under the %d MiB floor: the footprint is not being read", r.footprintPeak, engineFootprintFloor>>20)
+	}
+	if spec.downloads > 0 && m.down < 1<<20 {
+		t.Fatalf("the downloads moved %d bytes: the load did not reach the engine", m.down)
+	}
+	if spec.uploads > 0 && m.up < 1<<20 {
+		t.Fatalf("the uploads moved %d bytes: the load did not reach the engine", m.up)
+	}
+	if spec.lookups && (m.asked == 0 || m.answered*10 < m.asked*9) {
+		t.Fatalf("%d of %d lookups answered, want 90%%", m.answered, m.asked)
+	}
+	if spec.tcpFlood && m.connections < 100 {
+		t.Fatalf("the TCP flood completed %d connections: it did not reach the engine", m.connections)
+	}
+	if spec.udpFlood && m.flows < 1000 {
+		t.Fatalf("the UDP flood sent %d flows", m.flows)
+	}
+}
+
+func runLoad(e *engine, spec loadSpec, window time.Duration) (string, loadMoved) {
 	deadline := time.Now().Add(window)
 	var wg sync.WaitGroup
 	var asked, answered, slow atomic.Int64
 	var lost [3]atomic.Int64 // A, AAAA, HTTPS
-	var down, up atomic.Int64
+	var down, up, cut atomic.Int64
+	floodDeadline := deadline
+	if spec.floodFor > 0 {
+		floodDeadline = time.Now().Add(spec.floodFor)
+	}
 
 	for i := 0; i < spec.downloads; i++ {
 		wg.Add(1)
@@ -246,6 +316,7 @@ func runLoad(e *engine, spec loadSpec, window time.Duration) string {
 			defer wg.Done()
 			c, err := e.dial(80)
 			if err != nil {
+				cut.Add(1)
 				return
 			}
 			defer c.Close()
@@ -265,6 +336,11 @@ func runLoad(e *engine, spec loadSpec, window time.Duration) string {
 				total += int64(k)
 				down.Add(int64(k))
 				if err != nil {
+					// Ended before the window did: cut off, by the gate or
+					// anything else.
+					if time.Until(deadline) > 500*time.Millisecond {
+						cut.Add(1)
+					}
 					return
 				}
 				if spec.slowRead > 0 {
@@ -363,21 +439,26 @@ func runLoad(e *engine, spec loadSpec, window time.Duration) string {
 	}
 
 	var floodNote string
+	var connections, flows atomic.Int64
 	if spec.tcpFlood {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			floodNote = "tcp flood: " + shortConns(nil, e, 0, window) + "; "
+			floodLen := time.Until(floodDeadline)
+			said := shortConns(nil, e, 0, floodLen)
+			var perSecond float64
+			_, _ = fmt.Sscanf(said, "%f connections a second", &perSecond)
+			connections.Store(int64(perSecond * floodLen.Seconds()))
+			floodNote = "tcp flood: " + said + "; "
 		}()
 	}
 	if spec.udpFlood {
-		var flows atomic.Int64
 		for w := 0; w < 4; w++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				payload := make([]byte, 100)
-				for n := w; time.Now().Before(deadline); n += 4 {
+				for n := w; time.Now().Before(floodDeadline); n += 4 {
 					dst := tcpip.AddrFrom4([4]byte{198, 19, byte(n >> 8), byte(n)})
 					uc, err := gonet.DialUDP(e.stack, nil, &tcpip.FullAddress{NIC: 1, Addr: dst, Port: 5000}, ipv4.ProtocolNumber)
 					if err != nil {
@@ -400,7 +481,10 @@ func runLoad(e *engine, spec loadSpec, window time.Duration) string {
 		note = fmt.Sprintf("lookups %d/%d answered (%d over 1 s; unanswered A %d AAAA %d HTTPS %d); ",
 			answered.Load(), asked.Load(), slow.Load(), lost[0].Load(), lost[1].Load(), lost[2].Load()) + note
 	}
-	return floodNote + note
+	return floodNote + note, loadMoved{
+		down: down.Load(), up: up.Load(), asked: asked.Load(), answered: answered.Load(),
+		connections: connections.Load(), flows: flows.Load(), cut: cut.Load(),
+	}
 }
 
 // lookup sends one question from a fresh source port and waits up to 5 s

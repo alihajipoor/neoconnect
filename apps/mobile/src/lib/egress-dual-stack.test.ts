@@ -61,7 +61,9 @@ const quick = { intervalMs: 5, timeoutMs: 40 };
 // In this order: the module starts on the plugin's fetch, as the phones
 // did, and the second block installs what main.tsx now installs.
 describe("on the plugin's fetch, as the phones were", () => {
-  it("rejected a working tunnel on every rung with another to try", async () => {
+  // It was rejected on every rung with another to try; an indeterminate
+  // reading now lands, "Connected, not confirmed" (`rungOutcome`).
+  it("could not prove a working tunnel over two families", async () => {
     tunnel = "down";
     const baseline = await captureBaselineIp();
     expect(baseline).toEqual({ ip: PHONE_V6, from: CDN });
@@ -69,7 +71,7 @@ describe("on the plugin's fetch, as the phones were", () => {
     tunnel = "carrying";
     const verdict = await confirmEgress(baseline, { ...quick, sameEndpointOnly: true });
     expect(verdict).toEqual({ state: "indeterminate", exitIp: EXIT_V4 });
-    expect(rungOutcome(verdict!, { baselineTaken: true, isLast: false })).toBe("notCarrying");
+    expect(rungOutcome(verdict!, { baselineTaken: true, isLast: false })).toBe("unverified");
     expect(rungOutcome(verdict!, { baselineTaken: true, isLast: true })).toBe("unverified");
   });
 });

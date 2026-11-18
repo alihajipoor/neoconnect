@@ -84,7 +84,8 @@ describe("a dead tunnel", () => {
     const baseline = { ip: PHONE, from: LIST[3], peer: EDGE };
     const { value, ms } = await timed(pollEgress(baseline), 60_000);
     expect(value.state).toBe("unreachable");
-    expect(ms).toBeLessThanOrEqual(POLL_OWN_MS + POLL_WALK_MS + 2_000);
+    // The baseline's endpoint, the walk, and the second look.
+    expect(ms).toBeLessThanOrEqual(POLL_OWN_MS + 2 * POLL_WALK_MS + 3_000);
     expect(pollState("connected", value)).toBe("degraded");
   });
 
@@ -94,7 +95,7 @@ describe("a dead tunnel", () => {
     net.dead = true;
     const { value, ms } = await timed(pollEgress(null), 60_000);
     expect(value.state).toBe("unreachable");
-    expect(ms).toBeLessThanOrEqual(POLL_WALK_MS + 2_000);
+    expect(ms).toBeLessThanOrEqual(2 * POLL_WALK_MS + 3_000);
   });
 });
 
@@ -176,5 +177,37 @@ describe("the poll", () => {
     const source = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
     expect(source).toContain("const check = singleFlight(checkOnce);");
     expect(source).toContain("pollEgress(baselineIp, tunnelServerRef.current ?? undefined)");
+  });
+});
+
+describe("one silent poll", () => {
+  // Nothing answering for one walk can happen on a congested line that
+  // works. The whole list is asked again at once, and only a second
+  // silence is "not carrying traffic".
+  it("is looked at again at once, and a working tunnel stays", async () => {
+    vi.useFakeTimers();
+    endpoints = LIST.slice(0, 5);
+    net.dead = true;
+    const baseline = { ip: PHONE, from: LIST[0], peer: EDGE };
+    let value: Awaited<ReturnType<typeof pollEgress>> | undefined;
+    void pollEgress(baseline).then((v) => (value = v));
+    // Past the baseline's endpoint and the first walk...
+    await vi.advanceTimersByTimeAsync(POLL_OWN_MS + POLL_WALK_MS + 1_500);
+    expect(value).toBeUndefined();
+    // ...the line clears, and the second look finds the tunnel.
+    net.dead = false;
+    await vi.advanceTimersByTimeAsync(POLL_WALK_MS + 2_000);
+    // Answered -- by whichever endpoint answered first -- so not accused.
+    expect(value).toBeDefined();
+    expect(value!.state).not.toBe("unreachable");
+    expect(pollState("connected", value!)).toBe("connected");
+  });
+
+  it("puts a really dead tunnel within about 40 s of dying", () => {
+    // Died just after a poll: the next one in 15 s, then the baseline's
+    // endpoint (6 s, and the transport's 1 s backstop), the walk (8 s), the
+    // second look (8 s), a second each for the walks' last requests.
+    const worst = 15_000 + POLL_OWN_MS + 1_000 + 2 * (POLL_WALK_MS + 1_000);
+    expect(worst).toBeLessThanOrEqual(45_000);
   });
 });
