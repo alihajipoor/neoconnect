@@ -207,14 +207,16 @@ export interface InsightServiceResult {
   tlsMs: number | null;
   firstByteMs: number | null;
   status: number | null;
-  address: string | null;
+  /** The kind of address it resolved to; never the address. */
+  addressKind: string | null;
   error: string | null;
   /** When the run happened. */
   at: string;
-  /** The server the run went through, by its route; null outside the
-   * tunnel or when it named none. */
+  /** The server the run went through, by its route; null unless the run
+   * said it went through the tunnel, or when it named none. */
   server: string | null;
   protocol: string | null;
+  /** "tunnel", "direct", or null when the run did not say. */
   via: string | null;
 }
 
@@ -224,10 +226,13 @@ export interface InsightServiceChecks {
   runs: number;
   /** The newest result per target key. */
   latest: InsightServiceResult[];
-  /** Runs per server and protocol (null/null: outside the tunnel). */
+  /** Runs per route: through the tunnel by server and protocol; direct
+   * runs (via "direct") and runs that did not say (via null) each in a
+   * group of their own, with server and protocol null. */
   byServer: {
     server: string | null;
     protocol: string | null;
+    via: string | null;
     runs: number;
     perService: { key: string; ok: number; failed: number }[];
   }[];

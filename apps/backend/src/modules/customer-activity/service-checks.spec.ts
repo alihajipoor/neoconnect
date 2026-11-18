@@ -98,6 +98,7 @@ describe("serviceChecksFrom", () => {
       {
         server: "alpha",
         protocol: "Stealth",
+        via: "tunnel",
         runs: 2,
         perService: [
           { key: "google", ok: 1, failed: 1 },
@@ -105,8 +106,39 @@ describe("serviceChecksFrom", () => {
         ],
       },
       // A direct run went through no server, whatever route it named.
-      { server: null, protocol: null, runs: 1, perService: [{ key: "google", ok: 1, failed: 0 }] },
+      { server: null, protocol: null, via: "direct", runs: 1, perService: [{ key: "google", ok: 1, failed: 0 }] },
     ]);
+  });
+
+  /** A run that did not say how it went is counted against no server, as
+   * in the fleet summary, and is not called direct either. */
+  it("keeps a run without via out of the server it named, in a group of its own", () => {
+    const rows = [
+      row({ kind: "SERVICE_CHECK", at: T0, routeId: ROUTE_A, protocol: "Stealth", details: { services: [svc("x", "x.com", false)] } }),
+      row({ kind: "SERVICE_CHECK", at: T0 - MIN, details: { via: "direct", services: [svc("x", "x.com", true)] } }),
+    ];
+    const checks = serviceChecksFrom(rows, serverOf);
+    expect(checks.latest).toEqual([expect.objectContaining({ key: "x", server: null, protocol: null, via: null })]);
+    expect(checks.byServer).toEqual([
+      { server: null, protocol: null, via: null, runs: 1, perService: [{ key: "x", ok: 0, failed: 1 }] },
+      { server: null, protocol: null, via: "direct", runs: 1, perService: [{ key: "x", ok: 1, failed: 0 }] },
+    ]);
+  });
+
+  it("skips a result under a key on neither list, and reads only the address kind", () => {
+    const rows = [
+      row({
+        kind: "SERVICE_CHECK",
+        details: {
+          via: "tunnel",
+          services: [svc("somesite.example", "www.google.com", true), svc("google", "www.google.com", true, { addressKind: "private", address: "192.0.2.1" })],
+        },
+      }),
+    ];
+    const checks = serviceChecksFrom(rows, serverOf);
+    expect(checks.latest).toHaveLength(1);
+    expect(checks.latest[0]).toMatchObject({ key: "google", addressKind: "private" });
+    expect(checks.latest[0]).not.toHaveProperty("address");
   });
 
   it("says there were none rather than inventing a run", () => {

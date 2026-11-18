@@ -33,16 +33,21 @@ export interface ParsedService {
   tlsMs: number | null;
   firstByteMs: number | null;
   status: number | null;
-  address: string | null;
+  /** The kind of address the target resolved to (public, private, ...);
+   * the address itself is never stored. */
+  addressKind: string | null;
   error: string | null;
 }
 
-/** The service results a details object carries. */
+/** The service results a details object carries. A result whose key is
+ * on neither list is skipped: the intake never stores one, and a view
+ * must not show a name the server did not choose. */
 export function parseServices(details: Obj | null): ParsedService[] {
   if (!details || !Array.isArray(details.services)) return [];
   const out: ParsedService[] = [];
   for (const s of details.services) {
     if (!isObj(s) || typeof s.key !== "string" || typeof s.host !== "string" || typeof s.ok !== "boolean") continue;
+    if (serviceCheckLabel(s.key) === null) continue;
     out.push({
       key: s.key,
       host: s.host,
@@ -53,7 +58,7 @@ export function parseServices(details: Obj | null): ParsedService[] {
       tlsMs: num(s.tlsMs),
       firstByteMs: num(s.firstByteMs),
       status: num(s.status),
-      address: str(s.address),
+      addressKind: str(s.addressKind),
       error: str(s.error),
     });
   }
@@ -108,10 +113,13 @@ export function deviceFactsFrom(rows: DetailRow[], labelOf: Map<string, string |
   return [...groups.values()];
 }
 
-/** The server a run went through, or null for a run outside the tunnel. */
+/** The server a run went through. Only a run that said it went through
+ * the tunnel names one: a direct run tested the customer's own line, and
+ * a run that did not say how it went is counted against no server (the
+ * fleet summary reads it the same way). `via` is null for that run. */
 function runServer(r: DetailRow, serverOf: Map<string, string>): { server: string | null; protocol: string | null; via: string | null } {
   const via = str(r.details?.via);
-  if (via === "direct") return { server: null, protocol: null, via };
+  if (via !== "tunnel") return { server: null, protocol: null, via: via === "direct" ? via : null };
   return { server: r.routeId ? (serverOf.get(r.routeId) ?? null) : null, protocol: r.protocol, via };
 }
 
@@ -122,10 +130,10 @@ export function serviceChecksFrom(rows: DetailRow[], serverOf: Map<string, strin
   const byServer = new Map<string, InsightServiceChecks["byServer"][number] & { per: Map<string, { ok: number; failed: number }> }>();
   for (const r of runs) {
     const where = runServer(r, serverOf);
-    const groupKey = `${where.server ?? ""}\u0000${where.protocol ?? ""}`;
+    const groupKey = `${where.via ?? ""}\u0000${where.server ?? ""}\u0000${where.protocol ?? ""}`;
     let g = byServer.get(groupKey);
     if (!g) {
-      g = { server: where.server, protocol: where.protocol, runs: 0, perService: [], per: new Map() };
+      g = { server: where.server, protocol: where.protocol, via: where.via, runs: 0, perService: [], per: new Map() };
       byServer.set(groupKey, g);
     }
     g.runs += 1;
@@ -142,7 +150,7 @@ export function serviceChecksFrom(rows: DetailRow[], serverOf: Map<string, strin
           tlsMs: s.tlsMs,
           firstByteMs: s.firstByteMs,
           status: s.status,
-          address: s.address,
+          addressKind: s.addressKind,
           error: s.error,
           at: iso(r.at),
           ...where,
