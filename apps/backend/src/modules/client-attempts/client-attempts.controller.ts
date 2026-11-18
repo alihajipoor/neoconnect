@@ -60,21 +60,23 @@ export class ClientAttemptsController {
    * secret, and an account that never verified would otherwise count as
    * one of the distinct customers the per-ISP tags require.
    */
-  private customerIdFrom(req: Request, now = Date.now()): string | undefined {
+  private customerIdFrom(req: Request, now = Date.now()): { customerId?: string; sessionId?: string } {
     const header = req.headers.authorization;
-    if (!header?.startsWith("Bearer ")) return undefined;
+    if (!header?.startsWith("Bearer ")) return {};
     try {
       const payload = this.jwt.verify<CustomerAccessTokenPayload & { purpose?: unknown; exp?: unknown }>(
         header.slice(7),
         { secret: this.config.get<string>("customerJwt.accessSecret"), ignoreExpiration: true },
       );
-      if (payload.purpose !== undefined) return undefined;
+      if (payload.purpose !== undefined) return {};
       // Only the expiry is relaxed, and only this far. A token without one
       // is taken as the ordinary verification would take it.
-      if (typeof payload.exp === "number" && payload.exp * 1000 < now - ATTRIBUTION_GRACE_MS) return undefined;
-      return payload.sub;
+      if (typeof payload.exp === "number" && payload.exp * 1000 < now - ATTRIBUTION_GRACE_MS) return {};
+      // The device session the token names travels with it, never from
+      // the body; the service keeps it only if it is this customer's.
+      return { customerId: payload.sub, sessionId: typeof payload.sid === "string" ? payload.sid : undefined };
     } catch {
-      return undefined;
+      return {};
     }
   }
 
@@ -110,11 +112,12 @@ export class ClientAttemptsController {
     // Over the relay, no address at all: the network and the fact that
     // it came by relay are kept, the address never is (I5).
     const relay = relayContextOf(req);
+    const who = this.customerIdFrom(req);
     await this.attempts.record(
       dto,
       relay
-        ? { ip: undefined, via: "relay", asn: relay.asn, customerId: this.customerIdFrom(req) }
-        : { ip: clientIpOf(req), customerId: this.customerIdFrom(req) },
+        ? { ip: undefined, via: "relay", asn: relay.asn, ...who }
+        : { ip: clientIpOf(req), ...who },
     );
     // Always 204, whatever happened inside. A client that just failed to
     // connect must not also be told its complaint was rejected.

@@ -15,6 +15,7 @@ import {
   Min,
   ValidateNested,
 } from "class-validator";
+import { ReportDetailsDto } from "./report-details.dto";
 
 /** The longest `apiEndpoint` accepted.
  *
@@ -44,6 +45,9 @@ export const API_ENDPOINT_MAX_LENGTH = 2000;
 /** The fastest a rung may claim, in kilobits a second: ten gigabits.
  * Nothing of ours moves that; a figure above it is a broken clock. */
 export const RUNG_KBPS_MAX = 10_000_000;
+
+/** The longest one rung may claim to have taken: ten minutes. */
+export const RUNG_MS_MAX = 600_000;
 
 /** One rung of the failover ladder, as the app recorded it.
  *
@@ -92,6 +96,14 @@ export class AttemptRungDto {
   @Min(0)
   @Max(RUNG_KBPS_MAX)
   upKbps?: number;
+
+  /** How long this server try took, in milliseconds. Absent from every
+   * client older than docs/client-diagnostics.md. */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(RUNG_MS_MAX)
+  ms?: number;
 }
 
 /** A client reporting what happened to it.
@@ -196,4 +208,13 @@ export class ReportAttemptDto {
   @Min(0)
   @Max(7 * 86_400)
   sessionSeconds?: number;
+
+  /** Device, network and tunnel facts, the data check, and (on a
+   * SERVICE_CHECK report) the fixed-list results. Optional and validated
+   * to the last key; what is stored of it is `keepServiceResults`'s
+   * decision. See docs/client-diagnostics.md. */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ReportDetailsDto)
+  details?: ReportDetailsDto;
 }

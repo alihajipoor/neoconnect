@@ -153,6 +153,9 @@ services:
       NODE_DOOR_PORTS: ${NODE_DOOR_PORTS:-}
       NODE_DOOR_SNI: ${NODE_DOOR_SNI:-}
       NODE_DOOR_DOMAINS: ${NODE_DOOR_DOMAINS:-}
+      # The apps' fixed-list service check (docs/client-diagnostics.md):
+      # blank = on, off = every app that asks stops running it.
+      SERVICE_CHECKS: ${SERVICE_CHECKS:-}
       # Per-ISP recommendations: an offline IP-to-ASN table (iptoasn.com,
       # public domain), downloaded once a day. All optional and on by
       # default. ASN_LOOKUP_ENABLED=false turns the feature off (no tags,

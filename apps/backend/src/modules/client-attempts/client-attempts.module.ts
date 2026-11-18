@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { JwtModule } from "@nestjs/jwt";
 import { ClientAttemptsController } from "./client-attempts.controller";
 import { ClientAttemptsService } from "./client-attempts.service";
+import { CustomerDiagnosticsController } from "./customer-diagnostics.controller";
 import { NetworkIdentityModule } from "../network-identity/network-identity.module";
 import { SourceAddressesModule } from "../source-addresses/source-addresses.module";
 
@@ -14,7 +15,9 @@ import { SourceAddressesModule } from "../source-addresses/source-addresses.modu
   // SourceAddressesModule: the customer's address for a report that came
   // through the VPN, from the server they connected to.
   imports: [JwtModule.register({}), NetworkIdentityModule, SourceAddressesModule],
-  controllers: [ClientAttemptsController],
+  // CustomerDiagnosticsController: GET /customer/service-checks/targets and
+  // POST /customer/diagnostics (docs/client-diagnostics.md).
+  controllers: [ClientAttemptsController, CustomerDiagnosticsController],
   providers: [ClientAttemptsService],
   exports: [ClientAttemptsService],
 })

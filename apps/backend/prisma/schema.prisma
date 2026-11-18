@@ -420,7 +420,8 @@ model Customer {
   voucherRedemptions VoucherRedemption[]
   supportTickets     SupportTicket[]
   clientAttempts     ClientAttempt[]
-  gamingToken        GamingResolverToken?
+  diagnostics        CustomerDiagnostics[]
+  gamingToken       GamingResolverToken?
   sessions           CustomerSession[]
 
   @@index([referredByCustomerId])
@@ -1120,6 +1121,12 @@ enum ClientAttemptKind {
   /// kept working" half that a CONNECT success cannot say. `outcome` is
   /// SUCCESS and `sessionSeconds` says for how long.
   SESSION
+  /// One run of the service check: the app tried each target on the
+  /// server's fixed list (GET /customer/service-checks/targets) and says
+  /// how far each got, in `detailsJson.services`. SUCCESS when every
+  /// target was reachable, OTHER otherwise. Never a connection attempt
+  /// (docs/client-diagnostics.md).
+  SERVICE_CHECK
 }
 
 /// How it went, in the app's own vocabulary rather than an HTTP status.
@@ -1262,6 +1269,19 @@ model ClientAttempt {
   /// row keeps the network (asn) and never the address: `ip` is null.
   via String?
 
+  /// The device session the report's bearer token named, when that
+  /// session belongs to the token's customer; never taken from the body.
+  /// No foreign key: sessions are pruned when signed out or idle, and the
+  /// report outlives them as a plain id (docs/client-diagnostics.md).
+  sessionId String?
+
+  /// The validated `details` object of the report (device, network,
+  /// tunnel settings, data check, service-check results), at most 8 KB
+  /// serialized, with service results for hosts not on the server's fixed
+  /// target list dropped at intake. Null for every report from a client
+  /// that sends none. Lives and dies with the row.
+  detailsJson Json?
+
   createdAt DateTime @default(now())
 
   customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
@@ -1271,6 +1291,31 @@ model ClientAttempt {
   @@index([customerId])
   @@index([asn, createdAt])
   @@map("client_attempts")
+}
+
+/// A diagnostics bundle a signed-in customer chose to send from the app
+/// (POST /customer/diagnostics): an optional note, the same validated
+/// `details` object a report carries, and the text the desktop "Copy
+/// diagnostics" button already shows the customer. Read by staff on the
+/// customer's page, quoted by the first 8 characters of `id`. Deleted at
+/// 60 days by the client-attempt retention sweep.
+model CustomerDiagnostics {
+  id         String   @id @default(uuid())
+  customerId String
+  /// The session the request's token named, when it is the customer's.
+  sessionId  String?
+  platform   String
+  appVersion String
+  note       String?
+  /// { details?, platformDiagnostics? }
+  bundleJson Json
+  createdAt  DateTime @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, createdAt])
+  @@index([createdAt])
+  @@map("customer_diagnostics")
 }
 
 model AgentCommand {

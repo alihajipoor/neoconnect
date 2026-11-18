@@ -4,6 +4,18 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { ReportAttemptDto } from "./dto/report-attempt.dto";
 import { NetworkIdentityService } from "../network-identity/network-identity.service";
 import { SourceAddressesService } from "../source-addresses/source-addresses.service";
+import type { ReportDetailsDto } from "./dto/report-details.dto";
+import type { SendDiagnosticsDto } from "./dto/send-diagnostics.dto";
+import { DETAILS_MAX_BYTES, keepServiceResults } from "./report-details";
+
+/** How long a diagnostics bundle is kept: as long as a report without its
+ * address (KEEP_WITHOUT_ADDRESS_DAYS), by the same sweep. */
+export const DIAGNOSTICS_KEEP_DAYS = 60;
+
+/** What a customer quotes to support: the first 8 characters of the id. */
+export function diagnosticsReference(id: string): string {
+  return id.slice(0, 8);
+}
 
 /** How long a report is kept.
  *
@@ -116,6 +128,60 @@ export class ClientAttemptsService {
     }
   }
 
+  /** The `details` to store, per `keepServiceResults`, with a warning --
+   * sizes and counts only, never the content -- when something is cut. */
+  private detailsToStore(input: ReportDetailsDto | undefined): Prisma.InputJsonObject | null {
+    const verdict = keepServiceResults(input);
+    if (verdict.servicesDropped > 0) {
+      this.logger.warn(`Dropped ${verdict.servicesDropped} service result(s) for hosts not on the target list`);
+    }
+    if (verdict.dropped === "too-large") {
+      this.logger.warn(`Dropped report details of ${verdict.bytes} bytes (limit ${DETAILS_MAX_BYTES}); the report is kept`);
+    }
+    return verdict.details;
+  }
+
+  /** The session id to store: only one the token named AND that belongs
+   * to the token's customer. Null otherwise, and on any error -- the
+   * report matters more than the attribution. */
+  private async ownSession(customerId: string | undefined, sessionId: string | undefined): Promise<string | null> {
+    if (!customerId || !sessionId) return null;
+    try {
+      const found = await this.prisma.customerSession.findFirst({
+        where: { id: sessionId, customerId },
+        select: { id: true },
+      });
+      return found?.id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** A diagnostics bundle the signed-in customer chose to send. The
+   * details pass the same intake as a report's; the text is what the app
+   * showed the customer before they pressed send. */
+  async recordDiagnostics(
+    dto: SendDiagnosticsDto,
+    context: { customerId: string; sessionId?: string },
+  ): Promise<{ id: string; reference: string }> {
+    const details = this.detailsToStore(dto.details);
+    const bundle: Record<string, Prisma.InputJsonValue> = {};
+    if (details) bundle.details = details;
+    if (dto.platformDiagnostics) bundle.platformDiagnostics = dto.platformDiagnostics;
+    const row = await this.prisma.customerDiagnostics.create({
+      data: {
+        customerId: context.customerId,
+        sessionId: await this.ownSession(context.customerId, context.sessionId),
+        platform: dto.platform,
+        appVersion: dto.appVersion,
+        note: dto.note?.trim() ? dto.note : null,
+        bundleJson: bundle,
+      },
+      select: { id: true },
+    });
+    return { id: row.id, reference: diagnosticsReference(row.id) };
+  }
+
   /** Records one report. Never throws to the caller.
    *
    * A client reporting a failure must not then fail because the report
@@ -133,6 +199,9 @@ export class ClientAttemptsService {
        * server looked up for it, in memory, from that address. */
       via?: "relay";
       asn?: number | null;
+      /** The `sid` of the verified token that named `customerId`. Kept
+       * only if that session is the customer's (`ownSession`). */
+      sessionId?: string;
     },
   ): Promise<void> {
     const attested = this.identity.verify(dto.network);
@@ -142,6 +211,8 @@ export class ClientAttemptsService {
     // future date or an ancient one is a broken clock or a bored
     // stranger, and either way is worse than no answer.
     const occurredAt = plausibleOccurredAt(dto.occurredAt);
+    const details = this.detailsToStore(dto.details);
+    const sessionId = await this.ownSession(context.customerId, context.sessionId);
     const data = (customerId: string | null) => ({
       kind: dto.kind,
       outcome: dto.outcome,
@@ -166,6 +237,9 @@ export class ClientAttemptsService {
       asn: attested ?? context.asn ?? null,
       via: context.via ?? null,
       sessionSeconds: dto.kind === ClientAttemptKind.SESSION ? (dto.sessionSeconds ?? null) : null,
+      // A session id only alongside the customer it was checked against.
+      sessionId: customerId ? sessionId : null,
+      detailsJson: details ?? Prisma.DbNull,
     });
 
     let row: { id: string; createdAt: Date; asn: number | null };
@@ -262,7 +336,9 @@ export class ClientAttemptsService {
   }
 
   /** Erases the address from anything past the retention window, and
-   * drops anything past `KEEP_WITHOUT_ADDRESS_DAYS`. Called by the sweep. */
+   * drops anything past `KEEP_WITHOUT_ADDRESS_DAYS` -- `detailsJson` with
+   * its row -- and every diagnostics bundle past `DIAGNOSTICS_KEEP_DAYS`.
+   * Called by the sweep. */
   async prune(): Promise<number> {
     const now = Date.now();
     const erase = new Date(now - RETENTION_DAYS * 86_400_000);
@@ -275,6 +351,11 @@ export class ClientAttemptsService {
       where: { createdAt: { lt: drop } },
     });
     if (count > 0) this.logger.log(`Pruned ${count} client attempts older than ${KEEP_WITHOUT_ADDRESS_DAYS} days`);
+    // Diagnostics bundles go on the same day as the reports beside them.
+    const bundles = await this.prisma.customerDiagnostics.deleteMany({
+      where: { createdAt: { lt: new Date(now - DIAGNOSTICS_KEEP_DAYS * 86_400_000) } },
+    });
+    if (bundles.count > 0) this.logger.log(`Pruned ${bundles.count} diagnostics bundles older than ${DIAGNOSTICS_KEEP_DAYS} days`);
     return count;
   }
 }

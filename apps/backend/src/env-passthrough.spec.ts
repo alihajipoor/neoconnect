@@ -25,6 +25,7 @@ const OPTIONAL_KNOBS = [
   "NODE_DOOR_PORTS",
   "NODE_DOOR_SNI",
   "NODE_DOOR_DOMAINS",
+  "SERVICE_CHECKS",
 ];
 
 const COMPOSE = readFileSync(join(__dirname, "..", "..", "..", "infra", "docker-compose.prod.yml"), "utf8");
