@@ -99,6 +99,11 @@ describe("rungs", () => {
   it("tells a rung passed over from one dialled", () => {
     expect(rungNotDialled("not dialled -- its server was too slow a moment ago")).toBe(true);
     expect(rungNotDialled("up but unreachable")).toBe(false);
+    // The phone ladder's skips (mobile Dashboard.tsx), copied verbatim.
+    expect(rungNotDialled("not available with selected apps")).toBe(true);
+    expect(rungNotDialled("not supported on this platform")).toBe(true);
+    expect(rungFailed("not available with selected apps")).toBe(false);
+    expect(rungFailed("not supported on this platform")).toBe(false);
     expect(rungFailed("connected")).toBe(false);
     expect(rungFailed("not dialled -- its server was too slow a moment ago")).toBe(false);
     expect(rungFailed("going back to it -- slow, but it works; 2 more dialled in 9 s found nothing better, 1 further not dialled yet")).toBe(false);

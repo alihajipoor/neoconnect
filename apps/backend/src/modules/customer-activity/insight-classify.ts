@@ -101,9 +101,11 @@ export function isConnectAttempt(report: ReportLike, category: ReportCategory = 
 
 /** A rung the ladder passed over without dialling (`passOverSlow` and
  * `describeSearchEnd` in data-check.ts: "not dialled -- its server was
- * too slow a moment ago"). */
+ * too slow a moment ago"). The phone ladder (mobile Dashboard.tsx) also
+ * skips a rung without dialling it: "not available with selected apps"
+ * and "not supported on this platform". */
 export function rungNotDialled(result: string): boolean {
-  return /^not dialled\b/.test(result);
+  return /^(not dialled\b|not available with selected apps\b|not supported on this platform\b)/.test(result);
 }
 
 /** A rung that landed. */
