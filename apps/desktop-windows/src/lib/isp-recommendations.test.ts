@@ -173,7 +173,10 @@ describe("session report", () => {
     clock = SUSTAINED_MS + 1_000;
     tracker.healthy("r2");
     tracker.healthy("r1");
-    expect(report).not.toHaveBeenCalled();
+    // No ten-minute report. The change of route does end r1's session,
+    // which is its own report (session-report-end.test.ts), never a SUCCESS.
+    expect(report.mock.calls.filter(([r]) => r.outcome === "SUCCESS")).toEqual([]);
+    expect(report.mock.calls.every(([r]) => r.details?.sessionEnd?.cause === "replaced")).toBe(true);
   });
 });
 

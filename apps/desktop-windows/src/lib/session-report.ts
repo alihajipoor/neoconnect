@@ -1,4 +1,5 @@
 import { reportAttempt, type AttemptReport } from "./attempts";
+import type { SessionEndCause } from "./report-details";
 
 /** "It connected, and it kept working" -- the half of a connection a
  * CONNECT report cannot say.
@@ -23,6 +24,11 @@ import { reportAttempt, type AttemptReport } from "./attempts";
  * the first passing check, so a report always clears the server's bar. */
 export const SUSTAINED_MS = 10 * 60_000;
 
+/** The shortest session whose end is reported (`ended`). A tunnel that
+ * lived less than a minute is a connect's story, which its CONNECT report
+ * already tells. */
+export const SESSION_END_MIN_MS = 60_000;
+
 export interface SessionTracker {
   /** A health check just proved traffic is crossing the tunnel on
    * `routeId`. Starts the clock, or sends the report once it has run
@@ -32,6 +38,13 @@ export interface SessionTracker {
    * starts again from the next passing check -- the claim is continuous
    * health, and a session that dropped out half way has not earned it. */
   broken(): void;
+  /** The session is over: the customer pressed disconnect, the tunnel was
+   * lost, or another server replaced it. Sends one end report, with the
+   * cause and how long the session ran since its first passing check --
+   * only when that was at least `SESSION_END_MIN_MS`, and never twice for
+   * one session. A session never ended this way (the app was killed) sends
+   * none. */
+  ended(cause: SessionEndCause): void;
 }
 
 export function createSessionTracker(
@@ -39,11 +52,39 @@ export function createSessionTracker(
   now: () => number = Date.now,
 ): SessionTracker {
   let current: { routeId: string; protocol?: string; since: number; sent: boolean } | null = null;
+  /** The session as a whole: from its first passing check to its end,
+   * through any failed checks between. Not reset by `broken`, which only
+   * restarts the continuous-health clock above. */
+  let session: { routeId: string; protocol?: string; since: number } | null = null;
+
+  const end = (cause: SessionEndCause) => {
+    const ending = session;
+    // Taken before anything is sent: one end per session, whatever calls next.
+    session = null;
+    if (!ending) return;
+    const ran = now() - ending.since;
+    if (ran < SESSION_END_MIN_MS) return;
+    const seconds = Math.min(Math.floor(ran / 1000), 7 * 86_400);
+    void report({
+      kind: "SESSION",
+      // Not SUCCESS, and no `sessionSeconds`: the server counts a SUCCESS
+      // with seconds as ten minutes of continuous health, which this does
+      // not claim.
+      outcome: "OTHER",
+      routeId: ending.routeId,
+      protocol: ending.protocol,
+      reason: `session ended (${cause}) after ${seconds} s; not an attempt`,
+      details: { sessionEnd: { cause, seconds } },
+    });
+  };
 
   return {
     healthy(routeId, protocol) {
       if (!routeId) return;
       const at = now();
+      // Another route took over without this session being ended: a switch.
+      if (session && session.routeId !== routeId) end("replaced");
+      session ??= { routeId, protocol, since: at };
       if (!current || current.routeId !== routeId) {
         current = { routeId, protocol, since: at, sent: false };
         return;
@@ -60,6 +101,10 @@ export function createSessionTracker(
     },
     broken() {
       current = null;
+    },
+    ended(cause) {
+      current = null;
+      end(cause);
     },
   };
 }
