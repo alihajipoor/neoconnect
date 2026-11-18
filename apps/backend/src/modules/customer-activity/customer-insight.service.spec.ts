@@ -127,6 +127,30 @@ describe("CustomerInsightService.insight", () => {
     expect(insight.findings.map((f) => f.code)).toEqual(expect.arrayContaining(["SERVICE_NOT_ANSWERING", "APP_BEHIND", "NO_ACTIVE_PLAN"]));
   });
 
+  it("does not count the ladder's 'going back to it' line as a dial", async () => {
+    const rows = [
+      row({
+        outcome: "SUCCESS",
+        routeId: ROUTE,
+        protocol: "Fast",
+        attemptsJson: [
+          { protocol: "Fast", result: "connected", routeId: ROUTE, carried: true },
+          { protocol: "Stealth", result: "up but unreachable", routeId: ROUTE, carried: false },
+          {
+            protocol: "Fast",
+            result: "going back to it -- slow, but it works; 1 more dialled in 9 s found nothing better, 2 further not dialled yet",
+            routeId: ROUTE,
+          },
+        ],
+      }),
+    ];
+    const { service } = build(rows);
+    const insight = await service.insight(ME, { days: "7" }, NOW);
+    const fast = insight.routes.find((r) => r.protocol === "Fast");
+    expect(fast).toMatchObject({ dialled: 1, connected: 1, notDialled: 0, lastResult: "connected" });
+    expect(insight.routes.find((r) => r.protocol === "Stealth")).toMatchObject({ dialled: 1, notDialled: 0 });
+  });
+
   it("reads credentials without credentialsJson, and says others only with three or more", async () => {
     const { service, prisma } = build([row({ attemptsJson: [{ protocol: "Fast", result: "connected" }] })]);
     prisma.subscription.findMany.mockResolvedValue([

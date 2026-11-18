@@ -418,6 +418,10 @@ export class CustomerInsightService {
     for (const d of rows) {
       if (d.category !== "connect" && d.category !== "reconnect") continue;
       for (const rung of d.rungs) {
+        // The ladder's closing line ("going back to it -- slow, but it
+        // works; ...", describeSearchEnd) repeats a rung already counted:
+        // neither a new dial nor one left undialled.
+        if (/^going back to it\b/.test(rung.result)) continue;
         const server = rung.routeId ? (serverOf.get(rung.routeId) ?? null) : null;
         // A deleted route has no name; it stays apart from the others.
         const serverKey = server ?? (rung.routeId ? `route:${rung.routeId}` : "");
