@@ -1234,8 +1234,9 @@ export interface ReportServiceResult {
   tlsMs?: number;
   firstByteMs?: number;
   status?: number;
-  /** The kind of address the target resolved to; the address itself is
-   * never stored (docs/client-diagnostics.md). */
+  /** The address the target resolved to and its kind as the server
+   * judged it (docs/client-diagnostics.md). */
+  address?: string;
   addressKind?: AddressKind;
   error?: string;
 }
@@ -1281,6 +1282,7 @@ export interface InsightServiceResult {
   tlsMs: number | null;
   firstByteMs: number | null;
   status: number | null;
+  address: string | null;
   addressKind: string | null;
   error: string | null;
   at: string;

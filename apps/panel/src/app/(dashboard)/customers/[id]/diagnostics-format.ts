@@ -275,6 +275,15 @@ export function addressKindText(kind: string | null | undefined): string | null 
   return ADDRESS_KIND_LABELS[kind as AddressKind] ?? kind;
 }
 
+/** The address a target resolved to, with its kind: "203.0.113.7 (a
+ * reserved address)". The kind alone when an older row has no address;
+ * null when neither was reported. */
+export function resolvedText(address: string | null | undefined, kind: string | null | undefined): string | null {
+  const kindText = addressKindText(kind);
+  if (address) return kindText ? `${address} (${kindText})` : address;
+  return kindText;
+}
+
 /** Whether an address kind is one a well-known name should not resolve
  * to: what a poisoned lookup looks like. Said as the kind, not a cause. */
 export function addressKindOdd(kind: string | null | undefined): boolean {

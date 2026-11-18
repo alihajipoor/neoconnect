@@ -125,7 +125,7 @@ describe("serviceChecksFrom", () => {
     ]);
   });
 
-  it("skips a result under a key on neither list, and reads only the address kind", () => {
+  it("skips a result under a key on neither list, and reads the address with its kind", () => {
     const rows = [
       row({
         kind: "SERVICE_CHECK",
@@ -137,8 +137,7 @@ describe("serviceChecksFrom", () => {
     ];
     const checks = serviceChecksFrom(rows, serverOf);
     expect(checks.latest).toHaveLength(1);
-    expect(checks.latest[0]).toMatchObject({ key: "google", addressKind: "private" });
-    expect(checks.latest[0]).not.toHaveProperty("address");
+    expect(checks.latest[0]).toMatchObject({ key: "google", address: "192.0.2.1", addressKind: "private" });
   });
 
   it("says there were none rather than inventing a run", () => {

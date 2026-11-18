@@ -208,6 +208,7 @@ export interface InsightServiceResult {
   firstByteMs: number | null;
   status: number | null;
   /** The kind of address it resolved to; never the address. */
+  address: string | null;
   addressKind: string | null;
   error: string | null;
   /** When the run happened. */

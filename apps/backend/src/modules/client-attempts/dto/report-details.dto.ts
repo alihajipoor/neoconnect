@@ -142,8 +142,8 @@ export class ServiceResultDto {
   @IsOptional() @IsInt() @Min(0) @Max(SERVICE_MS_MAX) tlsMs?: number;
   @IsOptional() @IsInt() @Min(0) @Max(SERVICE_MS_MAX) firstByteMs?: number;
   @IsOptional() @IsInt() @Min(0) @Max(999) status?: number;
-  /** The address the target resolved to. Never stored: the intake keeps
-   * only its kind (`addressKind` in report-details.ts). */
+  /** The address the target resolved to. Stored with its kind beside it
+   * (`addressKind` in report-details.ts says why it is kept). */
   @IsOptional() @IsIP() address?: string;
   @IsOptional() @IsString() @MaxLength(120) error?: string;
 }

@@ -3,7 +3,7 @@ import { protocolLabel } from "@/lib/protocol-labels";
 import { cn } from "@/lib/utils";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { serviceOutcome } from "./insight-labels";
-import { addressKindOdd, addressKindText, lastRunCounts, lastRunRoute, msText, routeGroupLabel, utcStamp } from "./diagnostics-format";
+import { addressKindOdd, lastRunCounts, resolvedText, lastRunRoute, msText, routeGroupLabel, utcStamp } from "./diagnostics-format";
 import { serviceOrder } from "./service-check-layout";
 import { More, Muted, Ratio, Section, TableBox, When } from "./view-parts";
 
@@ -79,10 +79,10 @@ export function ServiceChecksCard({ checks, window }: { checks: InsightServiceCh
                   .map(([name, ms]) => `${name} ${msText(ms as number)}`)
                   .join(" · ") || "no times"}
                 {r.status !== null && ` · HTTP ${r.status}`}
-                {r.addressKind && (
+                {resolvedText(r.address, r.addressKind) && (
                   <span className={addressKindOdd(r.addressKind) ? "text-amber-300" : undefined}>
                     {" "}
-                    · resolved to {addressKindText(r.addressKind)}
+                    · resolved to <span className="font-mono">{resolvedText(r.address, r.addressKind)}</span>
                   </span>
                 )}
                 {" · "}
@@ -135,7 +135,7 @@ export function ServiceChecksCard({ checks, window }: { checks: InsightServiceCh
                     phoneOrder={4}
                     className={cn("text-xs", addressKindOdd(r.addressKind) ? "text-amber-300" : "text-muted-foreground")}
                   >
-                    {addressKindText(r.addressKind) ?? "—"}
+                    <span className="font-mono">{resolvedText(r.address, r.addressKind) ?? "—"}</span>
                   </TableCell>
                   <TableCell label="When" phoneOrder={5} className="text-sm">
                     <When at={r.at} />

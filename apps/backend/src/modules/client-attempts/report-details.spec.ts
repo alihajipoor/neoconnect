@@ -37,9 +37,9 @@ describe("keepServiceResults", () => {
     expect((verdict.details!.services as { key: string }[]).map((s) => s.key)).toEqual(["x"]);
   });
 
-  /** Nothing ties a sent address to the target, so it is never stored:
-   * only its kind is. */
-  it("stores the kind of a resolved address and never the address", () => {
+  /** The address a fixed target resolved to is what tells a poisoned
+   * answer from a real one, so it is kept, with its kind beside it. */
+  it("stores the address a target resolved to with its kind, and only when it is an IP literal", () => {
     const verdict = keepServiceResults({
       services: [
         { ...result("www.google.com", "google"), address: "10.10.34.35" },
@@ -49,7 +49,12 @@ describe("keepServiceResults", () => {
     } as ReportDetailsDto);
     const stored = verdict.details!.services as Record<string, unknown>[];
     expect(stored.map((s) => s.addressKind)).toEqual(["private", "public", undefined]);
-    expect(JSON.stringify(verdict.details)).not.toMatch(/address"|10.10.34|8.8.8.8/);
+    expect(stored.map((s) => s.address)).toEqual(["10.10.34.35", "8.8.8.8", undefined]);
+    // Something that is not an address never gets through as one.
+    const odd = keepServiceResults({
+      services: [{ ...result("www.google.com", "google"), address: "visited.example" }],
+    } as ReportDetailsDto);
+    expect(JSON.stringify(odd.details)).not.toMatch(/visited.example|address/);
   });
 
   it.each([

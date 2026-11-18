@@ -33,8 +33,9 @@ export interface ParsedService {
   tlsMs: number | null;
   firstByteMs: number | null;
   status: number | null;
-  /** The kind of address the target resolved to (public, private, ...);
-   * the address itself is never stored. */
+  /** The address the target resolved to, and its kind (public, private,
+   * ...) as the intake judged it. */
+  address: string | null;
   addressKind: string | null;
   error: string | null;
 }
@@ -58,6 +59,7 @@ export function parseServices(details: Obj | null): ParsedService[] {
       tlsMs: num(s.tlsMs),
       firstByteMs: num(s.firstByteMs),
       status: num(s.status),
+      address: str(s.address),
       addressKind: str(s.addressKind),
       error: str(s.error),
     });
@@ -150,6 +152,7 @@ export function serviceChecksFrom(rows: DetailRow[], serverOf: Map<string, strin
           tlsMs: s.tlsMs,
           firstByteMs: s.firstByteMs,
           status: s.status,
+          address: s.address,
           addressKind: s.addressKind,
           error: s.error,
           at: iso(r.at),

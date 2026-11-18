@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 import { serviceOutcome } from "./insight-labels";
 import {
   addressKindOdd,
-  addressKindText,
+  resolvedText,
   dataCheckLegText,
   detailFactGroups,
   egressText,
@@ -132,9 +132,9 @@ export function ServiceResults({ services, title }: { services: ReportServiceRes
                 .filter(([, ms]) => typeof ms === "number")
                 .map(([name, ms]) => `${name} ${msText(ms as number)}`)
                 .join(" · ") || "no times"}
-              {s.addressKind && (
+              {resolvedText(s.address, s.addressKind) && (
                 <span className={cn("ml-2", addressKindOdd(s.addressKind) && "text-amber-300")}>
-                  resolved to {addressKindText(s.addressKind)}
+                  resolved to <span className="font-mono">{resolvedText(s.address, s.addressKind)}</span>
                 </span>
               )}
             </span>

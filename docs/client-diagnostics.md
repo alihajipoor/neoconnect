@@ -67,14 +67,21 @@ How the server holds the line, rather than trusting the app to:
   allowed host's result under a name of its own (the key is what the
   panel groups by and shows). The readers also skip any key on neither
   list.
-- A result's `address` (where the target resolved to) is **never
-  stored**: nothing ties it to the target, so a modified client could put
-  any address there. The intake replaces it with `addressKind`:
+- A result's `address` (where the target resolved to) is **stored**,
+  when it is an IP literal, with its kind beside it (`addressKind`:
   `public`, `private` (RFC 1918, CGNAT, ULA), `loopback`, `link-local`
   or `reserved` (unspecified, documentation, benchmarking, multicast and
-  the rest of 224/3). A well-known name resolving to a private or
-  reserved address is what a poisoned lookup looks like, and that signal
-  survives.
+  the rest of 224/3)). It is the answer the customer's line or tunnel
+  gave for a name on our list, and it is what tells a poisoned answer
+  (which block-page address), a wrong region's edge or an IPv6-only
+  answer apart. It is not a visited site: the app reports it only for the
+  fixed targets, and the key and host beside it are held to the list.
+  Nothing ties the address itself to the target, so a modified client
+  can put another address in its own report; that is a customer
+  misreporting themselves and is accepted. A first review round removed
+  the address for that reason and kept only the kind; it was put back
+  because the owner asked for the addresses and the kind alone cannot
+  say which block page or which edge answered.
 - The free-text fields that remain are the app's own words about its own
   failures (`errorKind`, `services[].error`, the `reason` that already
   existed) and the customer's own note and diagnostics text in a bundle
@@ -119,8 +126,8 @@ What is stored:
 - `client_attempts.detailsJson`: the validated object, undefined and
   null keys removed (a null is "not reported", the same as leaving the
   key out), services off the list removed (and the `services` key with
-  them when none is left), each service's `address` replaced by
-  `addressKind`. Over **8 KB** serialized (`DETAILS_MAX_BYTES`)
+  them when none is left), each service's `address` kept only as an IP literal, with
+  `addressKind` added. Over **8 KB** serialized (`DETAILS_MAX_BYTES`)
   the whole object is dropped and the report kept, with a warning that
   gives the size and never the content. An object left empty is stored
   as NULL.
@@ -190,7 +197,7 @@ same intake as A: off-list services dropped, over 8 KB dropped.
     not listed.
   - `serviceChecks`: `{ lastRunAt|null, runs, latest[], byServer[] }`.
     `latest` is the newest result per target key (`key, label, host, ok,
-    stage, dnsMs, connectMs, tlsMs, firstByteMs, status, addressKind,
+    stage, dnsMs, connectMs, tlsMs, firstByteMs, status, address, addressKind,
     error, at, server, protocol, via`). `byServer` counts runs per
     route (`server, protocol, via, runs, perService`). Only a run with
     `via: "tunnel"` is counted under a server, as in the fleet summary;

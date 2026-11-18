@@ -6,6 +6,7 @@ import {
   detailFactGroups,
   deviceFactsLine,
   addressKindText,
+  resolvedText,
   diagnosticsHref,
   egressText,
   factsByDevice,
@@ -40,6 +41,7 @@ function result(over: Partial<InsightServiceResult> = {}): InsightServiceResult 
     tlsMs: 200,
     firstByteMs: 300,
     status: 204,
+    address: "198.51.100.4",
     addressKind: "public",
     error: null,
     at: "2026-11-18T10:00:00.000Z",
@@ -194,6 +196,10 @@ describe("service checks", () => {
   it("says the kind of address, never an address", () => {
     expect(addressKindText("private")).toBe("a private address");
     expect(addressKindText(null)).toBeNull();
+    expect(resolvedText("203.0.113.7", "reserved")).toBe("203.0.113.7 (a reserved address)");
+    expect(resolvedText("198.51.100.4", null)).toBe("198.51.100.4");
+    expect(resolvedText(null, "public")).toBe("a public address");
+    expect(resolvedText(null, null)).toBeNull();
   });
 });
 

@@ -12,12 +12,22 @@ export type DetailsVerdict =
   | { details: Prisma.InputJsonObject; dropped: null; servicesDropped: number }
   | { details: null; dropped: "empty" | "too-large"; servicesDropped: number; bytes?: number };
 
-/** What kind of address a service target resolved to. The raw address is
- * never stored: nothing ties it to the target, so a modified client could
- * put any address there, a visited site's included. The kind keeps the
- * signal that matters (a well-known name resolving to a private or
- * reserved address is what a poisoned lookup looks like) and names no
- * address at all. */
+/** What kind of address a service target resolved to, stored beside the
+ * address itself.
+ *
+ * The address is kept on purpose. It is the answer the customer's line or
+ * tunnel gave for a name on OUR list, and it is the one fact that tells a
+ * poisoned answer (which block-page address), a wrong region's edge or an
+ * IPv6-only answer apart; the owner asked for it by name. It is not a
+ * visited site: the app reports it only for the fixed targets, and the
+ * key and host beside it are held to the server's list below. A modified
+ * client can put some other address there, but only into its own report,
+ * and that is the customer misreporting themselves, not this feature
+ * recording where anybody went.
+ *
+ * The kind is worked out here so every reader agrees on it: a well-known
+ * name resolving to a private or reserved address is what a poisoned
+ * lookup looks like. */
 export const ADDRESS_KINDS = ["public", "private", "loopback", "link-local", "reserved"] as const;
 export type AddressKind = (typeof ADDRESS_KINDS)[number];
 
@@ -86,8 +96,8 @@ export function addressKind(address: string): AddressKind | null {
  *    for a site it did not choose, nor file one under a name it made up.
  *    The host stored is the list's own spelling. If no result is left the
  *    key goes.
- * 3. A result's `address` is replaced by its kind (`addressKind`); the
- *    address itself is never stored.
+ * 3. A result's `address` is kept only when it is an IP literal, in its
+ *    trimmed form, with its kind (`addressKind`) stored beside it.
  * 4. Over DETAILS_MAX_BYTES the whole object is dropped.
  */
 export function keepServiceResults(input: ReportDetailsDto | undefined | null): DetailsVerdict {
@@ -107,7 +117,11 @@ export function keepServiceResults(input: ReportDetailsDto | undefined | null): 
       if (!target) continue;
       const { address, ...rest } = result;
       const kind = typeof address === "string" ? addressKind(address) : null;
-      kept.push({ ...rest, host: target.host, ...(kind ? { addressKind: kind } : {}) });
+      kept.push({
+        ...rest,
+        host: target.host,
+        ...(kind && typeof address === "string" ? { address: address.trim(), addressKind: kind } : {}),
+      });
     }
     servicesDropped = details.services.length - kept.length;
     if (kept.length > 0) details.services = kept;
