@@ -257,8 +257,11 @@ describe("the guarded call sites", () => {
     expect(dash.match(/pushSplitTunnel\(/g)).toHaveLength(2);
   });
 
-  it("Support offers its diagnostics only where the helper has them", () => {
-    expect(support).toContain("{supportsRepair() ? <DiagnosticsCard /> : null}");
+  it("Support offers its diagnostics only where the helper has them, and never on a phone", () => {
+    // The phone app renders this screen without setting a desktop
+    // platform, so the default ("windows") alone would show it the card.
+    expect(support).toContain("{hasPlatformDiagnostics() ? <DiagnosticsCard /> : null}");
+    expect(support).toMatch(/function hasPlatformDiagnostics(): boolean {s+return supportsRepair() && !isMobile();/);
   });
 
   it("Support's engine line is WebView2's on Windows as before, and WebKitGTK's on Linux", () => {

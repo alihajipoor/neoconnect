@@ -155,7 +155,7 @@ function TicketList({
           Linux helper's (`vpn_linux_diagnostics`); a desktop without a
           helper (the macOS shell) shows none rather than a button that
           can only fail. */}
-      {supportsRepair() ? <DiagnosticsCard /> : null}
+      {hasPlatformDiagnostics() ? <DiagnosticsCard /> : null}
 
       {/* On every platform: the fixed-list test, and the bundle the
           customer may choose to send. */}
@@ -186,6 +186,14 @@ function TicketList({
  * credentials, no keys, no subscription identifiers, no protocol config
  * -- and the account name is stripped out of any path the log quoted.
  */
+/** Whether this build has the desktop's own diagnostics text (the service's
+ * or the helper's sweep). The phone app renders this same screen and never
+ * sets a desktop platform, so the shared default ("windows") would show
+ * it a card whose only button can fail: seen on an Android emulator. */
+function hasPlatformDiagnostics(): boolean {
+  return supportsRepair() && !isMobile();
+}
+
 function DiagnosticsCard() {
   const { t } = useI18n();
   const [text, setText] = useState<string | null>(null);
@@ -516,7 +524,7 @@ export async function gatherBundle(check: ServiceCheckAnswer | null): Promise<Bu
     reportedPlatform(),
     getVersion().catch(() => "unknown"),
     bundleDetails(check),
-    supportsRepair() ? collectPlatformText(true).catch(() => undefined) : Promise.resolve(undefined),
+    hasPlatformDiagnostics() ? collectPlatformText(true).catch(() => undefined) : Promise.resolve(undefined),
   ]);
   return {
     platform,
