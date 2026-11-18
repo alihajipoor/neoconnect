@@ -57,12 +57,24 @@ How the server holds the line, rather than trusting the app to:
   (`net.dns`, `services[].address`) accept IP literals only; `tunnel.dns`
   accepts an IP literal or a resolver URL (the app's own DoH/DoT setting),
   nothing else.
-- A service result whose `host` is not on the server's list (the
-  current one or the previous one) is **dropped at intake**
-  (`keepServiceResults` in `report-details.ts`), and the drop is logged
-  as a count, never with the host. A modified client can send anything
-  the validator accepts; it cannot make the server keep a result for a
-  site the server did not choose.
+- A service result is kept only when its `key` and `host` together
+  name one entry of the server's list (the current one or the previous
+  one); anything else is **dropped at intake** (`keepServiceResults` in
+  `report-details.ts`), and the drop is logged as a count, never with
+  the host. The host is stored in the list's own spelling. A modified
+  client can send anything the validator accepts; it cannot make the
+  server keep a result for a site the server did not choose, nor file an
+  allowed host's result under a name of its own (the key is what the
+  panel groups by and shows). The readers also skip any key on neither
+  list.
+- A result's `address` (where the target resolved to) is **never
+  stored**: nothing ties it to the target, so a modified client could put
+  any address there. The intake replaces it with `addressKind`:
+  `public`, `private` (RFC 1918, CGNAT, ULA), `loopback`, `link-local`
+  or `reserved` (unspecified, documentation, benchmarking, multicast and
+  the rest of 224/3). A well-known name resolving to a private or
+  reserved address is what a poisoned lookup looks like, and that signal
+  survives.
 - The free-text fields that remain are the app's own words about its own
   failures (`errorKind`, `services[].error`, the `reason` that already
   existed) and the customer's own note and diagnostics text in a bundle
@@ -100,13 +112,15 @@ which is why the backend ships first (see *Rollout*).
 | `sessionEnd` | `{ cause: "disconnected"\|"lost"\|"replaced"\|"app_closed"\|"unknown", seconds: int 0..604800 }` |
 | `via` | `"tunnel"\|"direct"` |
 | `targetsVersion` | int >=0: the list version the app ran |
-| `services` | <=16 of `{ key: string<=32, host: string<=128, ok: boolean, stage: "dns"\|"connect"\|"tls"\|"http"\|"ok", dnsMs?, connectMs?, tlsMs?, firstByteMs? (each int 0..120000), status?: int 0..999, address?: IP, error?: string<=120 }` |
+| `services` | <=16 of `{ key: string<=32, host: string<=128 (key and host must match one list entry), ok: boolean, stage: "dns"\|"connect"\|"tls"\|"http"\|"ok", dnsMs?, connectMs?, tlsMs?, firstByteMs? (each int 0..120000), status?: int 0..999, address?: IP, error?: string<=120 }` |
 
 What is stored:
 
-- `client_attempts.detailsJson`: the validated object, undefined keys
-  removed, services off the list removed (and the `services` key with
-  them when none is left). Over **8 KB** serialized (`DETAILS_MAX_BYTES`)
+- `client_attempts.detailsJson`: the validated object, undefined and
+  null keys removed (a null is "not reported", the same as leaving the
+  key out), services off the list removed (and the `services` key with
+  them when none is left), each service's `address` replaced by
+  `addressKind`. Over **8 KB** serialized (`DETAILS_MAX_BYTES`)
   the whole object is dropped and the report kept, with a warning that
   gives the size and never the content. An object left empty is stored
   as NULL.
@@ -176,15 +190,22 @@ same intake as A: off-list services dropped, over 8 KB dropped.
     not listed.
   - `serviceChecks`: `{ lastRunAt|null, runs, latest[], byServer[] }`.
     `latest` is the newest result per target key (`key, label, host, ok,
-    stage, dnsMs, connectMs, tlsMs, firstByteMs, status, address, error,
-    at, server, protocol, via`). `byServer` counts runs per server and
-    protocol; a direct run is counted under server and protocol null.
+    stage, dnsMs, connectMs, tlsMs, firstByteMs, status, addressKind,
+    error, at, server, protocol, via`). `byServer` counts runs per
+    route (`server, protocol, via, runs, perService`). Only a run with
+    `via: "tunnel"` is counted under a server, as in the fleet summary;
+    direct runs (`via: "direct"`) and runs that did not say (`via:
+    null`) each form a group of their own with server and protocol null.
 - `GET /customers/:id/diagnostics?take&skip`: `[{ id, reference,
   createdAt, platform, appVersion, sessionId, note, bundle }]`, newest
   first, X-Total-Count.
 - `GET /customers/:id/history` gains `DIAGNOSTICS_SENT`: title with the
   reference, detail "platform, version", link
   `/customers/:id?view=diagnostics&ref=<reference>`.
+- `GET /client-attempts` (the existing admin page): `summary` never
+  counts a `SERVICE_CHECK` row, and the failures-only list leaves them
+  out unless the kind filter asks for them. One unreachable target makes
+  a run `OTHER`; it is not a failed connect.
 - `GET /service-checks/summary?hours=24` (1..336): `{ hours, runs,
   customers, targets, byServer[], byNetwork[] }`. `byServer` counts
   **only runs made through the tunnel** (`details.via = "tunnel"`), with
@@ -208,8 +229,14 @@ Every view states counts of what the apps reported; none names a cause.
 1. **Backend first.** A server from before this change rejects every
    unknown field with a 400, and the apps count a 400 as delivered: a
    new app talking to an old server would lose every report it sent,
-   silently. Deploy the backend (the migration is additive and safe while
-   the previous backend runs) before any app sends a new field.
+   silently. Deploy the backend before any app sends a new field. The
+   migration is additive and safe to apply while the API serves.
+   **Rollback** to the previous backend is safe only while no
+   `SERVICE_CHECK` row exists: the previous Prisma client throws on an
+   enum value it does not know, so its attempt lists, `/customers/:id/activity`
+   and `/insight` would fail. Once checks have arrived, run
+   `DELETE FROM "client_attempts" WHERE "kind" = 'SERVICE_CHECK';`
+   first (only the checks are lost), then start the previous image.
 2. **The privacy page and the in-app notice**, saying in plain words
    what is collected and the boundary above, before any app collects it.
 3. **The apps**, each reading `GET /customer/service-checks/targets`

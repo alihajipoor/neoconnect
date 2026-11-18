@@ -12,8 +12,14 @@
 -- * One new table, customer_diagnostics, which the previous backend never
 --   touches; it cascades with the customer like customer_sessions.
 --
--- Safe to apply while the API is serving, and safe for the previous
--- backend to run against.
+-- Safe to apply while the API is serving. The previous backend runs
+-- against it only until the first SERVICE_CHECK row is stored: its Prisma
+-- client does not know the value and throws reading any row that has it,
+-- so every list of client_attempts that selects kind (GET /client-attempts,
+-- /customers/:id/activity and /insight) would fail. To roll back after
+-- that, first:
+--   DELETE FROM "client_attempts" WHERE "kind" = 'SERVICE_CHECK';
+-- (the checks are lost; nothing else is), then run the previous image.
 
 ALTER TYPE "ClientAttemptKind" ADD VALUE IF NOT EXISTS 'SERVICE_CHECK';
 
