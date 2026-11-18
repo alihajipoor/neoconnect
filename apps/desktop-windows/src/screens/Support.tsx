@@ -25,7 +25,8 @@ import { bundleDetails, runServiceCheckNow, type ServiceCheckAnswer } from "../l
 import { bundleBody, NOTE_MAX, sendDiagnostics, type BundleParts } from "../lib/diagnostics-bundle";
 import { chromiumFromUserAgent, engineLine, webkitGtkVersion, webkitLine, webviewVersion } from "../lib/webview-engine";
 import { isLinux, supportsRepair } from "../lib/desktop-platform";
-import { useI18n } from "../lib/i18n";
+import { supportWords, useI18n } from "../lib/i18n";
+import { isMobile } from "../lib/social-auth";
 import { failureText } from "../lib/failure-text";
 import { swapView } from "../lib/view-transition";
 import { motionReduced } from "../lib/motion";
@@ -222,7 +223,7 @@ function DiagnosticsCard() {
 
   return (
     <Card className="flex flex-col gap-3">
-      <CardHead icon={<ClipboardList />} title={t("diag.title")} hint={t("diag.subtitle")} />
+      <CardHead icon={<ClipboardList />} title={t("diag.title")} hint={t(supportWords("diag.subtitle", isMobile()))} />
 
       <p className="nx-csub m-0">{t("diag.privacy")}</p>
 

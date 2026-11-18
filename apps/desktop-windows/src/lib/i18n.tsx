@@ -924,6 +924,9 @@ const en = {
   "diag.title": "Details for support",
   "diag.subtitle":
     "A short summary of Neoxify's state on this computer. Paste it into your message so we can see what you see.",
+  // The same on a phone, which is not a computer (`PHONE_SUPPORT_WORDS`).
+  "diag.subtitlePhone":
+    "A short summary of Neoxify's state on this device. Paste it into your message so we can see what you see.",
   "diag.collect": "Collect details",
   "diag.collecting": "Collecting...",
   "diag.copy": "Copy",
@@ -2158,6 +2161,8 @@ const fa: Record<TranslationKey, string> = {
   "diag.title": "اطلاعات برای پشتیبانی",
   "diag.subtitle":
     "خلاصهٔ کوتاهی از وضعیت نئوکسیفای روی این کامپیوتر. آن را در پیامتان بگذارید تا ما هم همان چیزی را ببینیم که شما می‌بینید.",
+  "diag.subtitlePhone":
+    "خلاصهٔ کوتاهی از وضعیت نئوکسیفای روی این دستگاه. آن را در پیامتان بگذارید تا ما هم همان چیزی را ببینیم که شما می‌بینید.",
   "diag.collect": "جمع کردن اطلاعات",
   "diag.collecting": "در حال جمع کردن...",
   "diag.copy": "کپی",
@@ -2762,6 +2767,19 @@ const fa: Record<TranslationKey, string> = {
  * placeholders survived translation, and that no string in either language
  * makes a speed claim this product has measured to be false. */
 export const DICTIONARIES: Record<Language, Record<TranslationKey, string>> = { en, fa };
+
+/** The Support screen's sentences (the diagnostics, the connection test,
+ * Send diagnostics) whose shared words speak of a computer, said as a
+ * phone has them -- the same pattern as the Dashboard's `PHONE_HINT`.
+ * Every other sentence there is the shared one. */
+export const PHONE_SUPPORT_WORDS: Partial<Record<TranslationKey, TranslationKey>> = {
+  "diag.subtitle": "diag.subtitlePhone",
+};
+
+/** `key` in a phone's words when `phone`, else as it is. */
+export function supportWords(key: TranslationKey, phone: boolean): TranslationKey {
+  return phone ? (PHONE_SUPPORT_WORDS[key] ?? key) : key;
+}
 
 const STORE_FILE = "settings.json";
 const STORE_KEY = "language";

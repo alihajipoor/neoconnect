@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DICTIONARIES } from "./i18n";
+import { DICTIONARIES, supportWords } from "./i18n";
 
 /** Honesty and parity guards on the shipped strings.
  *
@@ -334,5 +334,29 @@ describe("waiting for a network", () => {
       expect(en[key], key).not.toMatch(/server|unreachable|blocked|couldn't reach|you're protected/i);
       expect(fa[key], key).not.toBe(en[key]);
     }
+  });
+});
+
+describe("the Support screen on a phone", () => {
+  // The diagnostics card, the connection test, Send diagnostics and the
+  // diagnostics notice, as a phone resolves them (`supportWords`).
+  const supportKeys = keys.filter((k) => /^(diag|check|send)\./.test(k) || k.startsWith("notice.diag"));
+  const computer = /computer|\bPC\b|laptop|desktop/i;
+  const computerFa = /کامپیوتر|رایانه|لپ‌?تاپ/;
+
+  it("never calls the device a computer, in either language", () => {
+    expect(supportKeys.length).toBeGreaterThan(10);
+    const said = supportKeys
+      .map((k) => supportWords(k, true))
+      .filter((k) => computer.test(en[k]) || computerFa.test(fa[k]));
+    expect(said).toEqual([]);
+  });
+
+  it("keeps the desktop's own words on a desktop", () => {
+    expect(supportWords("diag.subtitle", false)).toBe("diag.subtitle");
+    expect(en["diag.subtitle"]).toMatch(/this computer/);
+    expect(supportWords("diag.subtitle", true)).toBe("diag.subtitlePhone");
+    expect(en["diag.subtitlePhone"]).toMatch(/this device/);
+    expect(fa["diag.subtitlePhone"]).toMatch(/این دستگاه/);
   });
 });
