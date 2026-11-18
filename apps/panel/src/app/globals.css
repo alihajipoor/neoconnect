@@ -239,7 +239,10 @@
      on the row above, an action this row does not have) is not worth a
      labelled gap. */
   table[data-stack] > tbody > tr > td:empty,
-  table[data-stack] > tbody > tr > td.max-sm\:hidden {
+  table[data-stack] > tbody > tr > td.max-sm\:hidden,
+  /* A row drawn only from 640px (a device's facts line, which a stacked
+     row carries as one of its own labelled facts instead). */
+  table[data-stack] > tbody > tr.max-sm\:hidden {
     display: none;
   }
 

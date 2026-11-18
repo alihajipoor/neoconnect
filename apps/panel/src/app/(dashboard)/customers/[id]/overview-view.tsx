@@ -98,7 +98,12 @@ export async function OverviewView({
 
       {/* Signing a device out is SUPERADMIN or SUPPORT on the backend, so
           nobody else is shown a button that would only answer 403. */}
-      <DevicesCard customerId={id} devices={activity?.devices ?? null} canSignOut={canSupport} />
+      <DevicesCard
+        customerId={id}
+        devices={activity?.devices ?? null}
+        canSignOut={canSupport}
+        facts={insight ? (insight.deviceFacts ?? []) : null}
+      />
 
       {customer.recoveryCodeSetAt && <MoveAddressCard customerId={id} />}
 
