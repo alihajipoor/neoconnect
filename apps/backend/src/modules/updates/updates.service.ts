@@ -180,15 +180,58 @@ export class UpdatesService {
    * (iOS, whose version the App Store holds). For staff pages, which
    * must not wait on GitHub per page view. */
   cachedVersion(platform: string): string | null {
-    const cache =
+    return this.cacheFor(platform)?.peek()?.version ?? null;
+  }
+
+  private cacheFor(platform: string): ReleaseCache<{ version: string }> | null {
+    return platform === "windows"
+      ? this.windowsCache
+      : platform === "android"
+        ? this.androidCache
+        : platform === "linux"
+          ? this.linuxCache
+          : null;
+  }
+
+  /** Lookups already under way, one per platform, so a burst of page
+   * views asks GitHub once. */
+  private readonly renewing = new Map<string, Promise<void>>();
+
+  /** Gets the caches cachedVersion() reads ready for a staff page.
+   *
+   * On the live system those caches were found empty half an hour after
+   * a restart: only an app's own update check filled them, and nobody
+   * had opened one. So a page that wants to say "this customer's app is
+   * behind" asks here first. What is held and still fresh costs nothing.
+   * What has aged is renewed behind the page, which goes on with the old
+   * answer. Only when nothing is held at all does the page wait, and
+   * then for at most `waitMs`: a staff page must never hang on GitHub. */
+  async primeVersions(platforms: Iterable<string>, waitMs = 1500): Promise<void> {
+    const waits: Promise<void>[] = [];
+    for (const platform of new Set(platforms)) {
+      const cache = this.cacheFor(platform);
+      if (!cache || !cache.due()) continue;
+      const renewed = this.renewBehind(platform);
+      if (cache.peek() === null) waits.push(renewed);
+    }
+    if (waits.length > 0) await Promise.race([Promise.all(waits), delay(waitMs)]);
+  }
+
+  private renewBehind(platform: string): Promise<void> {
+    const running = this.renewing.get(platform);
+    if (running) return running;
+    const lookup: Promise<unknown> =
       platform === "windows"
-        ? this.windowsCache
+        ? this.newestBuild()
         : platform === "android"
-          ? this.androidCache
-          : platform === "linux"
-            ? this.linuxCache
-            : null;
-    return cache?.peek()?.version ?? null;
+          ? this.newestAndroidBuild()
+          : this.newestLinuxBuild();
+    const done = lookup.then(
+      () => undefined,
+      () => undefined,
+    ).finally(() => this.renewing.delete(platform));
+    this.renewing.set(platform, done);
+    return done;
   }
 
   /** What the updater should be told, for a client on `currentVersion`. */
@@ -572,6 +615,12 @@ class ReleaseCache<T> {
    * build when the last answer was a failure. */
   peek(): T | null {
     return this.entry?.value ?? this.lastGood?.value ?? null;
+  }
+
+  /** Whether resolve() would ask the feed again: nothing held, or what is
+   * held has outlived its period. */
+  due(): boolean {
+    return !this.entry || Date.now() - this.entry.at >= this.entry.ttl;
   }
 
   async resolve(

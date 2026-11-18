@@ -229,7 +229,12 @@ export class CustomerInsightService {
     const reports = Object.fromEntries(CATEGORIES.map((c) => [c, 0])) as Record<ReportCategory, number>;
     for (const d of rows) reports[d.category] += 1;
 
-    const apps = this.apps(rows, newestEver ? derive(newestEver) : null);
+    const newestDerived = newestEver ? derive(newestEver) : null;
+    // The release caches are filled by the apps' own update checks, and
+    // were found empty on the live system after a restart; see
+    // primeVersions for how long this may wait (briefly, and only then).
+    await this.updates.primeVersions([...rows.map((d) => d.row.platform), ...(newestDerived ? [newestDerived.row.platform] : [])]);
+    const apps = this.apps(rows, newestDerived);
     const networks = await this.networks(customerId, rows, now);
 
     const successes = attempts.filter((d) => d.row.outcome === "SUCCESS");
@@ -242,7 +247,6 @@ export class CustomerInsightService {
     const sessionRows = rows.filter((d) => d.category === "session");
     const seconds = sessionRows.map((d) => d.row.sessionSeconds ?? 0);
 
-    const newestDerived = newestEver ? derive(newestEver) : null;
     const findings = findingsFor({
       now,
       windowDays,

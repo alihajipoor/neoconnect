@@ -569,6 +569,52 @@ describe("UpdatesService", () => {
     });
   });
 
+  /** The customer page's "this app is behind" reads what the update
+   * checks have cached. On the live system that was empty half an hour
+   * after a restart, because no app had asked yet. */
+  describe("versions for staff pages", () => {
+    it("holds nothing after a start, and has it after priming", async () => {
+      const service = new UpdatesService(configWith({}));
+      expect(service.cachedVersion("android")).toBeNull();
+
+      await settle(service.primeVersions(["android", "windows", "android", "ios"]));
+
+      expect(service.cachedVersion("android")).toBe("0.9.25");
+      expect(service.cachedVersion("windows")).toBe("0.9.25");
+      // No feed here for iOS: the App Store holds its version.
+      expect(service.cachedVersion("ios")).toBeNull();
+    });
+
+    it("does not ask again while what it holds is fresh", async () => {
+      const service = new UpdatesService(configWith({}));
+      await settle(service.primeVersions(["android"]));
+      const calls = releasesCalls().length;
+
+      await settle(service.primeVersions(["android"]));
+
+      expect(releasesCalls().length).toBe(calls);
+    });
+
+    it("stops waiting for a feed that does not answer, and the page goes on without it", async () => {
+      fetchMock.mockImplementation(() => new Promise(() => undefined));
+      const service = new UpdatesService(configWith({}));
+      let done = false;
+      const primed = service.primeVersions(["android"], 1500).then(() => {
+        done = true;
+      });
+
+      await Promise.resolve();
+      jest.advanceTimersByTime(1_400);
+      await Promise.resolve();
+      expect(done).toBe(false);
+      jest.advanceTimersByTime(200);
+      await primed;
+
+      expect(done).toBe(true);
+      expect(service.cachedVersion("android")).toBeNull();
+    });
+  });
+
   describe("releaseSummary", () => {
     it("reports every platform from one feed read", async () => {
       const service = new UpdatesService(configWith({}));

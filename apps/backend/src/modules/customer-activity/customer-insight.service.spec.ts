@@ -69,7 +69,10 @@ function build(rows: ReturnType<typeof row>[] = []) {
     $queryRaw: jest.fn().mockResolvedValue([]),
   };
   const asn = { orgOf: jest.fn(() => "Example Net"), countryOfAsn: jest.fn(() => "ZZ") };
-  const updates = { cachedVersion: jest.fn((p: string) => (p === "windows" ? "0.9.57" : null)) };
+  const updates = {
+    cachedVersion: jest.fn((p: string) => (p === "windows" ? "0.9.57" : null)),
+    primeVersions: jest.fn(() => Promise.resolve()),
+  };
   const activity = new CustomerActivityService(prisma as never, asn as never, {} as never);
   const service = new CustomerInsightService(prisma as never, activity, asn as never, updates as never);
   return { prisma, service, updates };

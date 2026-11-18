@@ -146,7 +146,7 @@ const MIN = 60_000;
   });
 
   it("buckets usage by UTC hour in SQL, for this customer and window only, and rebuilds sessions", async () => {
-    const insight = new CustomerInsightService(prisma as never, service, { orgOf: () => null } as never, { cachedVersion: () => null } as never);
+    const insight = new CustomerInsightService(prisma as never, service, { orgOf: () => null } as never, { cachedVersion: () => null, primeVersions: () => Promise.resolve() } as never);
     const usage = await insight.usage(ids.customer, { hours: 72 }, now);
     const since = Math.floor(now / 3_600_000) * 3_600_000 - 71 * 3_600_000;
 
