@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { KINDS, OUTCOMES } from "../../client-attempts/client-attempts-view";
+import { KINDS, OUTCOMES } from "@/lib/attempt-labels";
 
 /** This customer's sign-ins and connects, newest first, as the apps
  * reported them.
