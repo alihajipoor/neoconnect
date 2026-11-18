@@ -7,6 +7,7 @@ import { getTokens } from "./session";
 import { currentAttestation, currentClientIp } from "./network-identity";
 import { takeEngineNote } from "./webview-engine";
 import { desktopPlatform } from "./desktop-platform";
+import { collectDetails, type ReportDetails } from "./report-details";
 
 /** Telling the panel how an attempt went, so a beta can be watched from
  * somewhere other than screenshots.
@@ -29,8 +30,9 @@ import { desktopPlatform } from "./desktop-platform";
  *    `occurredAt`.
  */
 
-/** SESSION is "the tunnel kept carrying traffic" -- see session-report.ts. */
-export type AttemptKind = "REGISTER" | "SIGN_IN" | "CONNECT" | "SESSION";
+/** SESSION is "the tunnel kept carrying traffic" -- see session-report.ts.
+ * SERVICE_CHECK is one run of the fixed-list test (service-check.ts). */
+export type AttemptKind = "REGISTER" | "SIGN_IN" | "CONNECT" | "SESSION" | "SERVICE_CHECK";
 
 export type AttemptOutcome =
   | "SUCCESS"
@@ -55,6 +57,8 @@ export interface AttemptRung {
    * Only on the landed rung, and only the legs that were measured. */
   downKbps?: number;
   upKbps?: number;
+  /** How long this server try took, in milliseconds (`timedRungs`). */
+  ms?: number;
 }
 
 /** One rung's dial, for the per-ISP tags: which route was tried from
@@ -109,6 +113,11 @@ export interface AttemptReport {
   apiEndpoint?: string;
   /** For a SESSION report: seconds the tunnel has carried traffic. */
   sessionSeconds?: number;
+  /** What the caller knows for the report's `details` (report-details.ts):
+   * an error kind, a session's end, a service check's results. The device,
+   * network, tunnel and the last measurements are added here
+   * (`collectDetails`), and the whole is held to the server's bounds. */
+  details?: ReportDetails;
 }
 
 interface QueuedReport extends AttemptReport {
@@ -435,6 +444,13 @@ async function send(queued: QueuedReport): Promise<boolean> {
     sent = { ...sent, apiEndpoint: clipTrace(sent.apiEndpoint!, LEGACY_API_ENDPOINT_MAX) };
     result = await post(sent);
   }
+  // A server that refuses the details or a rung's time -- one older than
+  // them, or a validator this client does not match -- still gets the
+  // basic report: sent once more without either, never lost over them.
+  if (!result.ok && result.status === 400 && carriesDetails(sent)) {
+    sent = withoutDetails(sent);
+    result = await post(sent);
+  }
   if (!result.ok && result.status === 400 && carriesSpeeds(sent)) {
     result = await post(withoutSpeeds(sent));
   }
@@ -452,6 +468,21 @@ async function send(queued: QueuedReport): Promise<boolean> {
   // answered and whose own request then was not is told it in other
   // words ("stopped responding"), and it never arrived either.
   return !result.noResponse;
+}
+
+/** Whether `report` carries what only a server with
+ * docs/client-diagnostics.md accepts: `details`, or a rung's `ms`. */
+export function carriesDetails(report: Pick<AttemptReport, "attempts" | "details">): boolean {
+  return report.details !== undefined || (report.attempts?.some((rung) => rung.ms !== undefined) ?? false);
+}
+
+/** `report` without its details and its rungs' times, the rest as it was. */
+export function withoutDetails<T extends Pick<AttemptReport, "attempts" | "details">>(report: T): T {
+  const { details: _details, ...rest } = report;
+  return {
+    ...(rest as T),
+    ...(report.attempts ? { attempts: report.attempts.map(({ ms: _ms, ...rung }) => rung) } : {}),
+  };
 }
 
 /** Whether any rung of `report` carries a speed, the fields a server
@@ -502,11 +533,14 @@ export function withNetwork(
   const { sessionSeconds: _unused, ...rest } = report;
   return {
     ...rest,
-    attempts: report.attempts?.map(({ protocol, result, downKbps, upKbps }) => ({
+    attempts: report.attempts?.map(({ protocol, result, downKbps, upKbps, ms }) => ({
       protocol,
       result,
       ...(downKbps !== undefined ? { downKbps } : {}),
       ...(upKbps !== undefined ? { upKbps } : {}),
+      // Not per-ISP evidence either; a server too old for it is answered
+      // by `send`, as for the speeds.
+      ...(ms !== undefined ? { ms } : {}),
     })),
   };
 }
@@ -645,8 +679,13 @@ export async function reportAttempt(
       },
     );
 
+    // The device, the network under the tunnel and what the connect
+    // measured, beside what the caller knows. Absent when none is known.
+    const details = await collectDetails(report.kind, report.details);
+    const { details: _own, ...plain } = shaped;
     const queued: QueuedReport = {
-      ...shaped,
+      ...plain,
+      ...(details ? { details } : {}),
       platform: await reportedPlatform(),
       appVersion: await appVersion(),
       // Stamped now, even for the report that goes out immediately. The
@@ -774,13 +813,20 @@ export function outcomeFromError(kind: string): AttemptOutcome {
  * sees under "show details", and having the report say something
  * different from the screen would defeat the purpose of collecting it.
  */
-export function rungsFrom(lines: string[], dials: Dial[] = []): AttemptRung[] {
+export function rungsFrom(lines: string[], dials: Dial[] = [], ms: ReadonlyArray<number | undefined> = []): AttemptRung[] {
   return lines.map((line, i) => {
     const split = line.indexOf(": ");
-    const rung: AttemptRung =
+    const base: AttemptRung =
       split === -1
         ? { protocol: line.slice(0, 64), result: "" }
         : { protocol: line.slice(0, split).slice(0, 64), result: line.slice(split + 2).slice(0, 200) };
+    // How long the rung took, by index like the dials (`timedRungs`),
+    // within the server's bound.
+    const took = ms[i];
+    const rung: AttemptRung =
+      typeof took === "number" && Number.isFinite(took)
+        ? { ...base, ms: Math.min(Math.max(Math.round(took), 0), RUNG_MS_MAX) }
+        : base;
     // Parallel to the lines, by index: the dashboards push one of each
     // per rung. A missing or null entry leaves the rung as it always was.
     const dial = dials[i];
@@ -794,4 +840,50 @@ export function rungsFrom(lines: string[], dials: Dial[] = []): AttemptRung[] {
       ...(upKbps !== undefined ? { upKbps } : {}),
     };
   });
+}
+
+/** The longest a rung may claim to have taken: the server's bound
+ * (`RUNG_MS_MAX` in report-attempt.dto.ts). */
+const RUNG_MS_MAX = 600_000;
+
+/** The ladder's lines, with how long each rung took.
+ *
+ * `lines` is the array the dashboards push each rung's line to, as they
+ * always did; each push also records the time since `start`, which the
+ * ladder calls as each rung begins. By index, so a line taken back (a
+ * `pop`, the list emptied for a fresh start) is simply written over by
+ * the next one. `landed` is the times so far with the landing rung's,
+ * whose line is added only in the report. */
+export interface RungClock {
+  readonly lines: string[];
+  readonly ms: number[];
+  start(): void;
+  landed(): number[];
+}
+
+export function timedRungs(now: () => number = Date.now): RungClock {
+  const lines: string[] = [];
+  const ms: number[] = [];
+  let startedAt = now();
+  const push = Array.prototype.push;
+  Object.defineProperty(lines, "push", {
+    enumerable: false,
+    value: (...items: string[]) => {
+      for (const item of items) {
+        push.call(lines, item);
+        ms[lines.length - 1] = Math.max(0, now() - startedAt);
+      }
+      return lines.length;
+    },
+  });
+  return {
+    lines,
+    ms,
+    start() {
+      startedAt = now();
+    },
+    landed() {
+      return [...ms.slice(0, lines.length), Math.max(0, now() - startedAt)];
+    },
+  };
 }

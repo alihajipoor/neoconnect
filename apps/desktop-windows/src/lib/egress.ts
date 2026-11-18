@@ -6,6 +6,7 @@ import { isKnownBlockPage } from "./endpoint-bundle-store";
 import { clearDemotion, demotedLast, isDemoted, isNameDemoted } from "./endpoint-demotion";
 import { rememberNetwork } from "./network-identity";
 import { isAddressLiteral, resolveIpv4, RESOLVE_TIMEOUT_MS } from "./tunnel-server";
+import { noteEgress } from "./report-details";
 
 /** Proving a tunnel actually carries traffic, rather than merely existing.
  *
@@ -814,8 +815,21 @@ export type VerifyOptions = {
  * instead, since the one endpoint it would ask cannot answer through the
  * tunnel, and silence from it would read as a dead tunnel wherever the
  * public-internet probe is not there to say otherwise.
+ *
+ * Its verdict and how long it took are kept for the next connect report's
+ * details (`noteEgress`); nothing else changes.
  */
 export async function verifyEgress(
+  baseline: BaselineIp | null,
+  options: VerifyOptions = {},
+): Promise<EgressVerdict> {
+  const started = Date.now();
+  const verdict = await verifyEgressOnce(baseline, options);
+  noteEgress(verdict.state, Date.now() - started);
+  return verdict;
+}
+
+async function verifyEgressOnce(
   baseline: BaselineIp | null,
   options: VerifyOptions = {},
 ): Promise<EgressVerdict> {
@@ -957,7 +971,8 @@ export function confirmEgressWithin(
   } = {},
 ): Promise<EgressVerdict> {
   const { sameEndpointOnly = false, intervalMs = VERIFY_INTERVAL_MS, tunnelServer, baselineFirst } = options;
-  const deadline = Date.now() + budgetMs;
+  const started = Date.now();
+  const deadline = started + budgetMs;
   let last: EgressVerdict = { state: "unreachable" };
 
   return new Promise((resolve) => {
@@ -968,6 +983,8 @@ export function confirmEgressWithin(
       done = true;
       clearTimeout(next);
       clearTimeout(cutoff);
+      // The whole check, for the connect report's details.
+      noteEgress(verdict.state, Date.now() - started);
       resolve(verdict);
     };
     const cutoff = setTimeout(() => finish(last), budgetMs);
@@ -975,7 +992,7 @@ export function confirmEgressWithin(
     const attempt = () => {
       const remaining = deadline - Date.now();
       if (done || remaining <= 0) return;
-      verifyEgress(baseline, {
+      verifyEgressOnce(baseline, {
         attemptMs: Math.min(EGRESS_TIMEOUT_MS, remaining),
         sameEndpointOnly,
         tunnelServer,

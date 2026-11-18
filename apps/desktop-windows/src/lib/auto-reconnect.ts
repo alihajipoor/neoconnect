@@ -285,6 +285,9 @@ export interface ReconnectAttempt {
    * Nothing once the attempt is over. Optional: a pass that never waits
    * (the phone's) need not call it. */
   readonly waitingForNetwork?: (waiting: boolean) => void;
+  /** The episode as this attempt began, for the report's details
+   * (`asReconnectReport`). Optional: a test's attempt need not carry it. */
+  readonly episodeFacts?: { readonly quickDeaths: number; readonly spentMs: number; readonly droppedAt: number };
 }
 
 /** Whether a ladder pass has been told to stop: the stop flag a press
@@ -470,8 +473,32 @@ export const RECONNECT_REASON_PREFIX = "auto-reconnect";
  * connect, and up to six of them per drop would swamp the numbers the
  * panel filters on. The rungs go as they are; the backend keeps each
  * customer's latest dial per route, so retries add no weight. */
-export function asReconnectReport(report: AttemptReport, attempt: ReconnectAttempt | undefined): AttemptReport {
+export function asReconnectReport(
+  report: AttemptReport,
+  attempt: ReconnectAttempt | undefined,
+  now: () => number = Date.now,
+): AttemptReport {
   if (!attempt) return report;
+  // Where the episode stood, for the report's details: which attempt, how
+  // many quick deaths, how much of the budget is spent, how long ago the
+  // tunnel dropped.
+  const facts = attempt.episodeFacts;
+  report = {
+    ...report,
+    details: {
+      ...report.details,
+      reconnect: {
+        attempt: attempt.attempt,
+        ...(facts
+          ? {
+              quickDeaths: facts.quickDeaths,
+              spentMs: Math.max(0, Math.round(facts.spentMs)),
+              droppedSecondsAgo: Math.max(0, Math.floor((now() - facts.droppedAt) / 1000)),
+            }
+          : {}),
+      },
+    },
+  };
   const tag = `${RECONNECT_REASON_PREFIX} attempt ${attempt.attempt} of at most ${attempt.maxAttempts} after the tunnel dropped`;
   if (report.outcome === "SUCCESS") {
     return { ...report, reason: report.reason ? `${tag}; ${report.reason}` : tag };
@@ -1228,6 +1255,7 @@ export class AutoReconnect {
           attempt: attempt + 1,
           maxAttempts: RECONNECT_MAX_ATTEMPTS,
           resumeRouteId: episode.routeId,
+          episodeFacts: { quickDeaths: episode.quickDeaths, spentMs: episode.spentMs, droppedAt: episode.droppedAt },
           live,
           progress: () => {
             if (live()) this.watch(running, true);

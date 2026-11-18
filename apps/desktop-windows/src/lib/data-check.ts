@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ProtocolUser, RouteOption } from "./types";
+import { noteDataCheck } from "./report-details";
 
 /** Whether a tunnel whose address check passed is any use: a timed
  * download and upload through it, before the app says "Connected".
@@ -157,6 +158,9 @@ export async function checkDataMoves(base: string | undefined, upLegMs: number =
       }),
       stalled,
     ]);
+    // The legs themselves, for the report's details; the verdict is not
+    // changed by it.
+    noteDataCheck(check);
     const verdict = judgeDataCheck(check);
     return longer && verdict.state !== "unmeasured" ? { ...verdict, upLegMs: upMs } : verdict;
   } catch {
