@@ -89,16 +89,28 @@ function AttemptRow({ attempt }: { attempt: CustomerAttemptDetail }) {
         <TableCell label="Network" wide phoneOrder={3} className="text-sm">
           <NetworkName network={attempt.network} />
         </TableCell>
-        <TableCell label="Landed on" phoneOrder={1} className="text-sm whitespace-nowrap">
-          {attempt.protocol ? protocolLabel(attempt.protocol) : <span className="text-muted-foreground">—</span>}
-          {/* The server it landed on, beside the protocol: which one it
-              was is half of what a support question needs. */}
-          {attempt.server && <span className="ml-1.5 text-xs text-muted-foreground">on {attempt.server}</span>}
-          {attempt.sessionSeconds !== null && (
-            <span className="ml-1.5 text-xs text-muted-foreground">up {duration(attempt.sessionSeconds)}</span>
-          )}
+        {/* Wraps between its parts, each kept whole, so the table fits its
+            card at 1280 px instead of running past it. */}
+        <TableCell label="Landed on" phoneOrder={1} className="text-sm">
+          <span className="inline-flex flex-wrap items-baseline gap-x-1.5">
+            {attempt.protocol ? protocolLabel(attempt.protocol) : <span className="text-muted-foreground">—</span>}
+            {/* The server it landed on, beside the protocol: which one it
+                was is half of what a support question needs. */}
+            {attempt.server && <span className="text-xs text-muted-foreground">on {attempt.server}</span>}
+            {attempt.sessionSeconds !== null && (
+              <span className="text-xs text-muted-foreground">up {duration(attempt.sessionSeconds)}</span>
+            )}
+          </span>
         </TableCell>
-        <TableCell hideOnPhone className="max-w-72 truncate text-xs text-muted-foreground" title={attempt.reason ?? undefined}>
+        {/* A table cell ignores max-width, so the cap alone let a long
+            reason widen the table past its card; full width with a zero
+            max-width makes this column take what the others leave and
+            shorten to it. */}
+        <TableCell
+          hideOnPhone
+          className="w-full max-w-0 truncate text-xs text-muted-foreground"
+          title={attempt.reason ?? undefined}
+        >
           {attempt.reason ?? ""}
         </TableCell>
       </TableRow>
@@ -128,7 +140,11 @@ function AttemptRow({ attempt }: { attempt: CustomerAttemptDetail }) {
               {attempt.reason && (
                 <div>
                   <Label>What the app said</Label>
-                  <p className="font-mono text-xs break-words">{attempt.reason}</p>
+                  {/* The apps send several lines ("tried 3 of 4
+                      available\nStealth: ..."); keep them, and still wrap
+                      a long one -- anywhere, so one long token cannot
+                      widen the table past its card. */}
+                  <p className="font-mono text-xs whitespace-pre-wrap [overflow-wrap:anywhere]">{attempt.reason}</p>
                 </div>
               )}
 

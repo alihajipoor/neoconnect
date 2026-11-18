@@ -224,7 +224,12 @@ function RoutesCard({ insight, days }: { insight: CustomerInsight; days: number 
                       label="Last result"
                       wide
                       phoneOrder={6}
-                      className="max-w-56 truncate text-xs text-muted-foreground"
+                      // A table cell ignores max-width, so the cap alone let
+                      // the text widen the table past its card. Full width
+                      // with a zero max-width makes this column take what
+                      // the others leave and shorten to it (from 640px; a
+                      // phone stacks the row).
+                      className="truncate text-xs text-muted-foreground max-sm:max-w-56 sm:w-full sm:max-w-0"
                       title={r.lastResult}
                     >
                       {r.lastResult}
