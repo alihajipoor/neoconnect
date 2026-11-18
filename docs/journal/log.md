@@ -10476,3 +10476,108 @@ commit and not on the notes commit above it, whose message skips CI.
 - The helper keeps a 20 MB copy of the package after a good install.
 - Never run: the rpm update from inside the app on a real machine, an
   install interrupted halfway, an install while apt's lock is held.
+
+## 2026-11-18 — Android: what can leave outside the tunnel, measured
+
+**An environment fact first: this PC's line has IPv6 now.** On
+2026-11-18 the Wi-Fi adapter held global IPv6 addresses and a default
+route, and `curl -6` to a public site returned 200. `CLAUDE.md` said the
+line had none, and the reading of the Windows guest's captures ("a leak
+shows as packets sent, never as a reply") was built on that. Run
+`curl -6` before reading a capture either way. The Android emulator
+passes the host's IPv6 through to the guest, so IPv6 can be exercised
+for real from it.
+
+**The question.** With the VPN connected, `ss` on the emulator had shown
+an established IPv6 connection on port 443 owned by the app's own uid
+(and once by the Google app). The Xray service gives its tunnel one IPv4
+address and `0.0.0.0/0`, on the assumption that Android then blocks
+IPv6.
+
+**What Android says it does.** `VpnService.Builder.allowFamily`: a
+family with no address, route or DNS server in the VPN is blocked; one
+of the three, or `allowFamily`, unblocks it and its traffic falls
+through to the network underneath. `allowBypass` is off unless called.
+In the source: `Vpn.makeLinkProperties` adds `unreachable ::/0`, and
+`ConnectivityService.updateVpnUidRanges` closes the TCP connections of
+every uid in the VPN except the VPN's owner.
+
+**Measured.** Own AVD (Android 16, kernel 6.6), the 0.2.42 build of
+`claude/phone-dns-quic`, whose Android plugin is byte for byte the
+released 0.2.41's and main's. tcpdump on the guest's Wi-Fi and mobile
+interfaces; a probe run as the app's uid, the Google app's, shell and
+root; the exit address read back from a public "what is my address"
+page.
+
+| | Stealth (Xray) | Fast (WireGuard) | Built-in (IKEv2) |
+|---|---|---|---|
+| new IPv6, TCP and UDP | fails at once, "no route to host" | goes into the tunnel, times out | as WireGuard |
+| new IPv4 | leaves at the node | same | same |
+| another app's connections from before | closed by Android | same | same |
+| this app's connections from before | IPv4 reset from inside the tunnel, IPv6 silent | both silent | both silent |
+| outside interface once the uid rules are in | the server only | the server only | the server only |
+
+Android adds the uid rules 0.05 to 0.1 s after `establish()`. Seen
+outside in that gap, and nothing else: the last FIN and ACK of the app's
+own connect-only latency probes, and the RSTs of the connections Android
+closed. One more pair 0.45 s in was the kernel acknowledging a FIN for a
+connection the app had already closed; answers to what arrives on the
+outside interface leave by it. No payload in any of them.
+
+**The connection `ss` showed.** Not reproduced as such: in these runs
+the app spoke IPv4 to the API before connecting. The earlier listing was
+`ss -tn` with no capture beside it. By mechanism it is a connection of
+the app's own uid from before the tunnel: Android exempts the owner from
+its close, so it stays in the socket table, and it can carry nothing.
+Held connections of that uid, IPv4 and IPv6, sent no packet outside
+after the tunnel was up. `ss` shows that a socket exists, not that it
+works.
+
+**The app's own check cannot be answered over one.** Every `/health/ip`
+call builds its own IPv4-only client (`health_ip.rs`), and
+tauri-plugin-http 2.5.9 builds a client per `fetch`, so no request
+reuses a connection. In the captures every check went through the
+tunnel.
+
+**What does leave, and is Android's to stop:** a socket bound to the
+outside interface (SO_BINDTODEVICE).
+
+- From the app's own uid, and from shell, it works in both directions
+  with the line's own address, IPv4 and IPv6. Nothing in the app binds
+  one; `android-tunnel-families.test.ts` holds that, with the lines the
+  rest of this entry depends on.
+- From an ordinary app the SYN or the UDP datagram leaves (a DNS
+  question went out in clear) and the answer is dropped by Android's
+  per-uid interface filter, so nothing completes.
+- Android's "Block connections without VPN" is its documented stop.
+  Not tested here.
+
+**Left open.**
+
+- On WireGuard and IKEv2 an IPv6 attempt waits for a timeout instead of
+  failing at once, because `::/0` is routed into a tunnel that drops it.
+  On a dual-stack line that is a delay for every app that tries IPv6
+  first. Not measured on a phone. Leaving `::/0` out of AllowedIPs on
+  Android would make it fail at once, as on Xray; IKEv2's routes come
+  from the node.
+- The app keeps one finished connection to the API open (CLOSE-WAIT)
+  for as long as it runs. Harmless; a descriptor not closed.
+- Not measured: any other Android version (that the owner's old IPv6
+  connection goes silent depends on the kernel re-routing it; proven on
+  6.6 only), a real phone, mobile data, Custom mode, always-on with the
+  block.
+
+**Gotchas.**
+
+- Android logs what it closes: `InetDiagMessage: Destroyed live tcp
+  sockets for uids={...} exemptUids={1016, <owner>}`. It does not close
+  shell's, so a probe run as shell is not "another app".
+- A probe run as the uid of an app that is in the background and not
+  allowed there (Chrome) gets no network at all on Android 16:
+  `dumpsys connectivity trafficcontroller` shows no `BACKGROUND_MATCH`
+  for it. The Google app's uid is allowed.
+- `docker exec -i` inside `ssh host bash -s <<EOF` reads the rest of the
+  script as its own input. Give it `</dev/null`.
+- The probe, the scripts and the results are in
+  `C:\Users\aliha\Claude\vm\android\ipv6-check`, outside the repo: the
+  captures hold the home address.

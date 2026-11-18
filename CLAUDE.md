@@ -74,10 +74,12 @@ What carries over from the one-machine period, unchanged:
   decided, and -- since 2026-10-05 -- what leaves the guest, captured at
   the NIC miniport with `pktmon --comp nics`. **Not** with VirtualBox's
   own `--nic-trace`, which silently misses the guest's outgoing global
-  IPv6. The guest has IPv6 addressing but this PC has no IPv6, so
-  nothing ever answers: a leak shows as packets *sent*, never as a
-  reply. This matters more than anything else in this file; see *How
-  work is expected to be done here* below.
+  IPv6. The guest has IPv6 addressing. Until November 2026 this PC's
+  line had no IPv6, so nothing ever answered and a leak showed as
+  packets *sent*, never as a reply. On 2026-11-18 the line had working
+  IPv6: run `curl -6` before reading a capture either way. This matters
+  more than anything else in this file; see *How work is expected to be
+  done here* below.
 - **There is a Linux guest too** (2026-11-16): `Neoxify-Linux`, Ubuntu
   24.04 with a real GNOME session, reached over SSH. It builds and
   proves the Linux client, with a capture taken inside the guest at its
