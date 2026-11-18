@@ -355,9 +355,14 @@ export const FACTS_WAIT_MS = 1_500;
 export const NET_FRESH_MS = 30_000;
 
 type Facts = { device?: DeviceDetails; net?: NetDetails };
+/** What cannot change while the app runs: kept from the first good read. */
+type FixedDevice = Pick<DeviceDetails, "model" | "os" | "osVersion">;
+/** What can (free memory, battery saver, data saver): read again with the
+ * network, at most every `NET_FRESH_MS`. */
+type LiveDevice = Pick<DeviceDetails, "lowPower" | "dataSaver" | "memFreeMb">;
 
-let deviceCache: DeviceDetails | null | undefined;
-let netCache: { net: NetDetails | undefined; at: number } | null = null;
+let deviceCache: FixedDevice | null | undefined;
+let netCache: { net: NetDetails | undefined; live: LiveDevice | undefined; at: number } | null = null;
 let factsInFlight: Promise<Facts | null> | null = null;
 let languageOf: () => string | undefined = () => undefined;
 
@@ -387,9 +392,10 @@ async function askFacts(): Promise<Facts | null> {
   }
 }
 
-/** The device (asked once a run) and the network (at most every
- * `NET_FRESH_MS`). Both absent when the command is missing or failed:
- * the language alone is not sent as if the device had been read. */
+/** The device's model and system (asked once a run), and its free memory,
+ * battery saver and data saver with the network (at most every
+ * `NET_FRESH_MS`). All absent when the command is missing or failed: the
+ * language alone is not sent as if the device had been read. */
 export async function readFacts(now: () => number = Date.now): Promise<Facts> {
   const netFresh = netCache !== null && now() - netCache.at < NET_FRESH_MS;
   if (deviceCache === undefined || !netFresh) {
@@ -398,17 +404,23 @@ export async function readFacts(now: () => number = Date.now): Promise<Facts> {
     });
     const facts = await factsInFlight;
     if (facts !== null) {
+      const device = facts.device ?? {};
       // A failed read is asked again next time; a good one is kept.
-      if (deviceCache === undefined || deviceCache === null) deviceCache = facts.device ?? null;
-      netCache = { net: facts.net, at: now() };
+      if (deviceCache === undefined || deviceCache === null) {
+        deviceCache = compact<FixedDevice>({ model: device.model, os: device.os, osVersion: device.osVersion }) ?? null;
+      }
+      const live = compact<LiveDevice>({ lowPower: device.lowPower, dataSaver: device.dataSaver, memFreeMb: device.memFreeMb });
+      netCache = { net: facts.net, live, at: now() };
     } else {
-      // An old reading of the network is not sent as the current one.
+      // An old reading of the network, or of the free memory, is not sent
+      // as the current one.
       netCache = null;
       if (deviceCache === undefined) return {};
     }
   }
   const language = str(languageOf(), 16);
-  const device = deviceCache ? { ...deviceCache, ...(language ? { language } : {}) } : undefined;
+  const known = compact<DeviceDetails>({ ...deviceCache, ...netCache?.live });
+  const device = known ? { ...known, ...(language ? { language } : {}) } : undefined;
   return compact<Facts>({ device, net: netCache?.net }) ?? {};
 }
 

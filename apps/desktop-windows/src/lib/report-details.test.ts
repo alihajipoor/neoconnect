@@ -49,19 +49,48 @@ describe("the device and network facts", () => {
     });
   });
 
-  it("ask for the device once a run, and the network at most every 30 s", async () => {
+  it("keep the model and system for the run, and read free memory, savers and the network at most every 30 s", async () => {
     let clock = 1_000_000;
     invoke.mockResolvedValue(FACTS);
     await rd.readFacts(() => clock);
     clock += 10_000;
-    await rd.readFacts(() => clock);
+    invoke.mockResolvedValue({ ...FACTS, memFreeMb: 1, lowPower: true });
+    const soon = await rd.readFacts(() => clock);
     expect(invoke).toHaveBeenCalledTimes(1);
+    expect(soon.device).toMatchObject({ memFreeMb: 4096, lowPower: false });
     clock += rd.NET_FRESH_MS;
-    invoke.mockResolvedValue({ ...FACTS, model: "changed", net: { type: "cellular" } });
+    invoke.mockResolvedValue({
+      ...FACTS,
+      model: "changed",
+      os: "changed",
+      osVersion: "changed",
+      memFreeMb: 1024,
+      lowPower: true,
+      dataSaver: true,
+      net: { type: "cellular" },
+    });
     const again = await rd.readFacts(() => clock);
     expect(invoke).toHaveBeenCalledTimes(2);
-    expect(again.device?.model).toBe("Example Laptop 13");
+    expect(again.device).toEqual({
+      model: "Example Laptop 13",
+      os: "Windows",
+      osVersion: "11 26100.2314",
+      memFreeMb: 1024,
+      lowPower: true,
+      dataSaver: true,
+    });
     expect(again.net).toEqual({ type: "cellular" });
+  });
+
+  it("do not send an old free-memory reading when a later read fails", async () => {
+    let clock = 1_000_000;
+    invoke.mockResolvedValue(FACTS);
+    await rd.readFacts(() => clock);
+    clock += rd.NET_FRESH_MS;
+    invoke.mockRejectedValue(new Error("gone"));
+    const after = await rd.readFacts(() => clock);
+    expect(after.device).toEqual({ model: "Example Laptop 13", os: "Windows", osVersion: "11 26100.2314" });
+    expect(after.net).toBeUndefined();
   });
 
   it("drop every field the server would refuse, keeping the rest", async () => {
