@@ -157,6 +157,30 @@ describe("classifyFailure", () => {
       undefined,
       "NO_RESPONSE_UDP_BLOCKED",
     ],
+    // Texts real reports carried that matched nothing at first (two weeks
+    // of production reports run through this table, 2026-11-18).
+    ["device-limit-reached", undefined, "DEVICE_LIMIT"],
+    ["Sign in to your Apple Account in Settings, then try again.", "REJECTED", "APPLE_ACCOUNT_NEEDED"],
+    ["اول در تنظیمات دستگاه وارد حساب اپل خود شوید، بعد دوباره امتحان کنید.", "REJECTED", "APPLE_ACCOUNT_NEEDED"],
+    ["OpenVPN did not finish connecting within 30s: 2026-11-10 10:00:00 library versions: OpenSSL 3.0.0, LZO 2.10", undefined, "OPENVPN_DID_NOT_CONNECT"],
+    [
+      "OpenVPN exited immediately (exit code: 1): 2026-11-10 10:00:00 Exiting due to fatal error | 2026-11-10 10:00:00 Failed to open wintun adapter: Neoxify-OpenVPN",
+      undefined,
+      "ADAPTER_MISSING",
+    ],
+    ["OpenVPN exited immediately (exit code: 1): 2026-11-10 10:00:00 Options error", undefined, "OPENVPN_DID_NOT_CONNECT"],
+    ["The VPN service did not start", undefined, "ENGINE_FAILED"],
+    [
+      "Unable to start service Intent { cmp=com.neoxify.mobile/com.neoxify.vpn.NeoxifyTunService (has extras) }: Unable to launch app com.neoxify.mobile/10200 for service",
+      undefined,
+      "ENGINE_FAILED",
+    ],
+    ["connect failed: com.wireguard.android.backend.BackendException", undefined, "ENGINE_FAILED"],
+    ["setting the tunnel's DNS failed (exit code: 1)", undefined, "ENGINE_FAILED"],
+    ["strongSwan for Built-in (IKEv2) (the packages charon-cmd, libcharon-extra-plugins and libcharon-extauth-plugins on Debian and Ubuntu", undefined, "ENGINE_FAILED"],
+    ["the tunnel adapter (neoconnect0) took no address within 20s, so the tunnel's routes would have had no next hop", undefined, "ADAPTER_MISSING"],
+    ["server: must be a hostname, not an address", undefined, "SERVER_SETTINGS_UNUSABLE"],
+    ["There was an internal authentication error.", undefined, "IKEV2_REFUSED"],
     ["something nobody wrote yet", "OTHER", "UNKNOWN"],
   ];
   it.each(cases)("%s -> %s", (text, outcome, expected) => {

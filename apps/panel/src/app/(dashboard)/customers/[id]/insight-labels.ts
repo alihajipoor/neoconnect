@@ -49,6 +49,9 @@ export const FAILURE_LABELS: Record<CustomerFailureCode, string> = {
   IKEV2_REFUSED: "IKEv2: server refused the connection or login",
   TUNNEL_DROPPED: "Phone saw its tunnel drop",
   RECONNECT_GAVE_UP: "Automatic reconnect stopped without a tunnel",
+  APPLE_ACCOUNT_NEEDED: "Apple sign-in: device not signed in to an Apple Account",
+  OPENVPN_DID_NOT_CONNECT: "OpenVPN did not finish connecting",
+  SERVER_SETTINGS_UNUSABLE: "IKEv2: the app had no hostname for the server",
   UNKNOWN: "Not recognised (see the app's words)",
 };
 

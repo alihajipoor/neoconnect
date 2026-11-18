@@ -146,6 +146,9 @@ export type FailureCode =
   | "IKEV2_REFUSED"
   | "TUNNEL_DROPPED"
   | "RECONNECT_GAVE_UP"
+  | "APPLE_ACCOUNT_NEEDED"
+  | "OPENVPN_DID_NOT_CONNECT"
+  | "SERVER_SETTINGS_UNUSABLE"
   | "UNKNOWN";
 
 /** What staff read for each code: what the app reported, never a cause
@@ -177,6 +180,9 @@ export const FAILURE_LABELS: Record<FailureCode, string> = {
   IKEV2_REFUSED: "IKEv2: the server refused the connection or its credentials",
   TUNNEL_DROPPED: "A phone saw its tunnel drop",
   RECONNECT_GAVE_UP: "An automatic reconnect stopped without a tunnel",
+  APPLE_ACCOUNT_NEEDED: "Apple sign-in: the device was not signed in to an Apple Account",
+  OPENVPN_DID_NOT_CONNECT: "OpenVPN did not finish connecting or exited",
+  SERVER_SETTINGS_UNUSABLE: "IKEv2: the app had no hostname for the server, so it did not dial",
   UNKNOWN: "Not recognised; see the example text",
 };
 
@@ -190,20 +196,31 @@ const FAILURE_PATTERNS: [FailureCode, RegExp][] = [
     /could not reach neoxify|config refresh failed|no answer from neoxify|only pages from in front of neoxify|no answer to the session renewal/,
   ],
   ["CUSTOM_MODE_FAILED", /custom mode|split[- ]tunnel|حالت سفارشی/],
+  // The phone's Apple sign-in sheet, in the app's language (English and
+  // Persian are the two the apps ship). Found unmatched in real reports.
+  ["APPLE_ACCOUNT_NEEDED", /sign in to your apple account|وارد حساب اپل/],
   ["NO_RESPONSE_UDP_BLOCKED", /no response from the server|udp is likely blocked/],
   ["DID_NOT_COMPLETE", /the connection did not complete/],
   [
     "IKEV2_REFUSED",
-    /the server refused the connection\. check your account|server rejected these credentials|server ended the connection, usually because the credentials|server's certificate was not accepted/,
+    /the server refused the connection\. check your account|server rejected these credentials|server ended the connection, usually because the credentials|server's certificate was not accepted|internal authentication error/,
   ],
+  // The plugin's own check and the phone ladder's sentence: no hostname
+  // for an IKEv2 server, so nothing was dialled.
+  ["SERVER_SETTINGS_UNUSABLE", /must be a hostname, not an address|has no hostname recorded/],
   ["SERVICE_NOT_ANSWERING", /background service|\bpipe\b|not running/],
   [
     "ADAPTER_MISSING",
-    /adapter[^;]*(never appeared|was not found|disappeared|could not be (read|named|created))|wintun would not create an adapter|wintun adapters[^;]*in use or disabled/,
+    /adapter[^;]*(never appeared|was not found|disappeared|took no address|could not be (read|named|created))|wintun would not create an adapter|wintun adapters[^;]*in use or disabled|failed to open wintun adapter/,
   ],
+  // After the adapter line above: an OpenVPN that exited because Wintun
+  // would not open is an adapter fault, and its text carries both.
+  ["OPENVPN_DID_NOT_CONNECT", /^openvpn (did not finish connecting|exited)/],
   ["OTHER_VPN_ACTIVE", /another vpn|vpn that is none of ours|other vpn|chosen over ours/],
   ["PERMISSION_DENIED", /permission (was )?(declined|denied)|vpn permission|permission is no longer/],
-  ["DEVICE_LIMIT", /device_limit|takeover_limit|device limit|concurrent|too many (active )?connections/],
+  // "device-limit-reached" is what the ladder writes on a rung the device
+  // limit refused; DEVICE_LIMIT / TAKEOVER_LIMIT are the server's codes.
+  ["DEVICE_LIMIT", /device[-_ ]limit|takeover_limit|concurrent|too many (active )?connections/],
   ["DATA_CAP_REACHED", /quota|data cap|out of data/],
   // The backend's sign-in sentences, above the vaguer "expired" below.
   ["CODE_NOT_ACCEPTED", /invalid (or expired |email or )?(verification|reset|recovery) (code|link)/],
@@ -213,7 +230,10 @@ const FAILURE_PATTERNS: [FailureCode, RegExp][] = [
   ["EMAIL_EXISTS", /already exists/],
   ["BAD_REFERRAL_CODE", /referral code is not valid|referral programme is not currently running/],
   ["TUNNEL_DROPPED", /drop seen|dropped run summed up/],
-  ["ENGINE_FAILED", /is missing from the install|engine failed to start|could not start|failed to start|tunnel extension (did not start|had not finished starting)/],
+  [
+    "ENGINE_FAILED",
+    /is missing from the install|engine failed to start|could not start|failed to start|tunnel extension (did not start|had not finished starting)|the vpn service did not start|unable to start service intent|backendexception|setting the tunnel's dns failed|^strongswan for built-in/,
+  ],
   ["NO_NETWORK", /no network connection with a gateway/],
   ["TOO_SLOW", /too slow/],
   // "up but unreachable", "up but bypassingTunnel", "up but indeterminate"

@@ -994,6 +994,9 @@ export type CustomerFailureCode =
   | "IKEV2_REFUSED"
   | "TUNNEL_DROPPED"
   | "RECONNECT_GAVE_UP"
+  | "APPLE_ACCOUNT_NEEDED"
+  | "OPENVPN_DID_NOT_CONNECT"
+  | "SERVER_SETTINGS_UNUSABLE"
   | "UNKNOWN";
 
 export interface InsightNetworkRef {
