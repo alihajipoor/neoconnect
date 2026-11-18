@@ -361,7 +361,11 @@ export class CustomerInsightService {
 
     return [...byAsn.values()]
       .sort((a, b) => b.tried - a.tried || b.rows - a.rows)
-      .map(({ rows: _rows, ...n }) => n);
+      .map((n) => {
+        const { rows, ...network } = n;
+        void rows;
+        return network;
+      });
   }
 
   /** How other signed-in customers fared on one network in the last

@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { CustomerActivityService } from "./customer-activity.service";
+import { CustomerInsightService } from "./customer-insight.service";
 
 /** The customer activity reads against a real, migrated Postgres -- what
  * the other spec cannot check, since it stands in for Prisma: the raw
@@ -142,6 +143,38 @@ const MIN = 60_000;
       lastTrafficAt: new Date(now - 2 * MIN).toISOString(),
       bytesLast10Min: "300",
     });
+  });
+
+  it("buckets usage by UTC hour in SQL, for this customer and window only, and rebuilds sessions", async () => {
+    const insight = new CustomerInsightService(prisma as never, service, { orgOf: () => null } as never, { cachedVersion: () => null } as never);
+    const usage = await insight.usage(ids.customer, { hours: 72 }, now);
+    const since = Math.floor(now / 3_600_000) * 3_600_000 - 71 * 3_600_000;
+
+    const expected = new Map<string, { hour: string; protocol: string; up: bigint; down: bigint }>();
+    for (const r of rows.filter((x) => x.mine && x.at - 30_000 >= since)) {
+      const start = r.at - 30_000;
+      const hour = new Date(Math.floor(start / 3_600_000) * 3_600_000).toISOString();
+      const protocol = r.credential ? "SHADOWSOCKS" : "unknown";
+      const key = `${hour} ${protocol}`;
+      const e = expected.get(key) ?? { hour, protocol, up: 0n, down: 0n };
+      e.up += r.up;
+      e.down += r.down;
+      expected.set(key, e);
+    }
+    expect(usage.hours).toEqual(
+      [...expected.values()]
+        .sort((a, b) => a.hour.localeCompare(b.hour) || a.protocol.localeCompare(b.protocol))
+        .map((e) => ({ hour: e.hour, nodeName: `ca-${tag}`, protocol: e.protocol, bytesUp: String(e.up), bytesDown: String(e.down) })),
+    );
+    // Newest first: the period flowing now is a session of its own.
+    expect(usage.sessions[0]).toMatchObject({
+      nodeName: `ca-${tag}`,
+      protocol: "SHADOWSOCKS",
+      end: new Date(now - 2 * MIN).toISOString(),
+      bytesUp: "100",
+    });
+    expect(usage.sessionsCapped).toBe(false);
+    expect(usage.days.every((d) => d.nodeName === `ca-${tag}`)).toBe(true);
   });
 
   it("lists everyone flowing now, each with their own server and bytes", async () => {
