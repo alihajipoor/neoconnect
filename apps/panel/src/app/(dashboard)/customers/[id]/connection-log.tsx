@@ -1,87 +1,60 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
-import { ChevronDown, ChevronRight, Server } from "lucide-react";
-import type { ClientAttemptKind, ClientAttemptOutcome, CustomerAttempt, CustomerAttemptRung } from "@/lib/types";
+import { ChevronDown, ChevronRight, Copy, Server } from "lucide-react";
+import { toast } from "sonner";
+import type {
+  ApiTrace,
+  ClientAttemptKind,
+  ClientAttemptOutcome,
+  CustomerAttemptDetail,
+  CustomerAttemptRung,
+} from "@/lib/types";
 import { protocolLabel } from "@/lib/protocol-labels";
 import { ago, duration } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { KINDS, OUTCOMES } from "@/lib/attempt-labels";
+import { categoryLabel, failureLabel } from "./insight-labels";
+import { speedText, supportText, timesDiffer } from "./insight-format";
 
-/** This customer's sign-ins and connects, newest first, as the apps
- * reported them.
+/** This customer's reports, newest first, as the apps sent them: the
+ * rows of the Connections view's full log.
  *
  * The same reports as the Client Attempts page, narrowed to one person
  * and with the ladder's servers named -- which is what turns "they can't
  * connect" into "every server was too slow on this network" or "Stealth
- * came up on the German server and carried nothing". The ladder stays
- * folded away per row: most rows have one, and fifty open ladders is a
- * wall nobody reads.
+ * came up on the German server and carried nothing". The detail stays
+ * folded away per row: fifty open ladders is a wall nobody reads.
  */
-export function ConnectionLog({
-  attempts,
-  shown,
-}: {
-  /** Null when the activity endpoint failed. */
-  attempts: CustomerAttempt[] | null;
-  /** How many the page asked for, so a full card says it is a window. */
-  shown: number;
-}) {
+export function AttemptTable({ attempts }: { attempts: CustomerAttemptDetail[] }) {
   return (
-    <Card className="gap-4">
-      <CardHeader>
-        <CardTitle className="text-base">
-          Connection log
-          {attempts && attempts.length >= shown && (
-            <span className="ml-2 text-sm font-normal text-muted-foreground">newest {shown}</span>
-          )}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        {attempts === null ? (
-          <p className="text-sm text-muted-foreground">Could not load this customer&apos;s attempts.</p>
-        ) : attempts.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No sign-ins or connects reported in the last 14 days. A report needs the app to reach us
-            at some point, so someone whose every attempt failed before signing in shows up only on
-            the{" "}
-            <Link href="/client-attempts" className="underline hover:text-foreground">
-              Client Attempts
-            </Link>{" "}
-            page, without a name.
-          </p>
-        ) : (
-          <div className="rounded-lg border border-white/8 bg-card/40">
-            <Table stack>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-8" />
-                  <TableHead>When</TableHead>
-                  <TableHead>Outcome</TableHead>
-                  <TableHead>App</TableHead>
-                  <TableHead>Network</TableHead>
-                  <TableHead>Landed on</TableHead>
-                  <TableHead>Reason</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {attempts.map((attempt) => (
-                  <AttemptRow key={attempt.id} attempt={attempt} />
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        )}
-      </CardContent>
-    </Card>
+    <div className="rounded-lg border border-white/8 bg-card/40">
+      <Table stack>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-8" />
+            <TableHead>When</TableHead>
+            <TableHead>Outcome</TableHead>
+            <TableHead>App</TableHead>
+            <TableHead>Network</TableHead>
+            <TableHead>Landed on</TableHead>
+            <TableHead>Reason</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {attempts.map((attempt) => (
+            <AttemptRow key={attempt.id} attempt={attempt} />
+          ))}
+        </TableBody>
+      </Table>
+    </div>
   );
 }
 
-function AttemptRow({ attempt }: { attempt: CustomerAttempt }) {
+function AttemptRow({ attempt }: { attempt: CustomerAttemptDetail }) {
   const [open, setOpen] = useState(false);
   const outcome = OUTCOMES[attempt.outcome as ClientAttemptOutcome] ?? OUTCOMES.OTHER;
   const kind = KINDS[attempt.kind as ClientAttemptKind] ?? attempt.kind;
@@ -134,7 +107,23 @@ function AttemptRow({ attempt }: { attempt: CustomerAttempt }) {
         <TableRow className="hover:bg-transparent">
           <TableCell colSpan={7} className="bg-black/20 whitespace-normal">
             <div className="flex flex-col gap-3 py-1 pl-8 max-sm:pl-0">
-              <p className="text-xs text-muted-foreground">{outcome.hint}</p>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <p className="text-xs text-muted-foreground">{outcome.hint}</p>
+                <CopyForSupport attempt={attempt} />
+              </div>
+
+              <div className="flex flex-wrap gap-6">
+                <div>
+                  <Label>Type</Label>
+                  <p className="text-xs">{categoryLabel(attempt.category)}</p>
+                </div>
+                {attempt.failureCode && (
+                  <div>
+                    <Label>Failure cause, as the app reported it</Label>
+                    <p className="text-xs">{failureLabel(attempt.failureCode)}</p>
+                  </div>
+                )}
+              </div>
 
               {attempt.reason && (
                 <div>
@@ -156,11 +145,29 @@ function AttemptRow({ attempt }: { attempt: CustomerAttempt }) {
                 <p className="text-xs text-muted-foreground">No ladder in this report.</p>
               )}
 
+              {attempt.apiTrace && <TraceTable trace={attempt.apiTrace} />}
+
               <div className="flex flex-wrap gap-6">
-                <div>
-                  <Label>Exact time</Label>
-                  <p className="text-xs">{new Date(attempt.at).toLocaleString()}</p>
-                </div>
+                {/* The apps queue reports while offline, so a report can
+                    arrive long after it happened; both are shown only when
+                    they differ, as one time otherwise. */}
+                {timesDiffer(attempt) ? (
+                  <>
+                    <div>
+                      <Label>Happened</Label>
+                      <p className="text-xs">{new Date(attempt.occurredAt ?? attempt.at).toLocaleString()}</p>
+                    </div>
+                    <div>
+                      <Label>Received</Label>
+                      <p className="text-xs">{new Date(attempt.receivedAt).toLocaleString()}</p>
+                    </div>
+                  </>
+                ) : (
+                  <div>
+                    <Label>Exact time</Label>
+                    <p className="text-xs">{new Date(attempt.at).toLocaleString()}</p>
+                  </div>
+                )}
                 <div>
                   <Label>From address</Label>
                   <FromAddress attempt={attempt} />
@@ -177,6 +184,65 @@ function AttemptRow({ attempt }: { attempt: CustomerAttempt }) {
         </TableRow>
       )}
     </>
+  );
+}
+
+/** How the app tried to reach our API: each step, the address it dialled
+ * and what came back, as the app wrote it. */
+function TraceTable({ trace }: { trace: ApiTrace }) {
+  return (
+    <div>
+      <Label>How the app tried to reach our API</Label>
+      {trace.noneDialled && <p className="text-xs text-muted-foreground">No address was dialled.</p>}
+      {trace.entries.length > 0 && (
+        <div className="max-w-full overflow-x-auto">
+          <table className="text-xs">
+            <thead>
+              <tr className="text-left text-muted-foreground">
+                <th className="py-0.5 pr-4 font-medium">Step</th>
+                <th className="py-0.5 pr-4 font-medium">Address</th>
+                <th className="py-0.5 pr-4 font-medium">Result</th>
+                <th className="py-0.5 text-right font-medium">ms</th>
+              </tr>
+            </thead>
+            <tbody>
+              {trace.entries.map((entry, index) => (
+                <tr key={index}>
+                  <td className="py-0.5 pr-4 text-muted-foreground">{entry.leg ?? "—"}</td>
+                  <td className="py-0.5 pr-4 font-mono break-all">{entry.target}</td>
+                  <td className="py-0.5 pr-4 font-mono">{entry.outcome ?? "—"}</td>
+                  <td className="py-0.5 text-right tabular-nums">{entry.ms ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {trace.cut > 0 && (
+        <p className="text-xs text-muted-foreground">{trace.cut} more steps did not fit in the report.</p>
+      )}
+      {trace.probe && <p className="mt-1 font-mono text-xs break-words text-muted-foreground">{trace.probe}</p>}
+    </div>
+  );
+}
+
+/** Copies a plain-text account of this one attempt, without the
+ * customer's email or address (insight-format.ts `supportText`). */
+function CopyForSupport({ attempt }: { attempt: CustomerAttemptDetail }) {
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={(event) => {
+        event.stopPropagation();
+        navigator.clipboard
+          .writeText(supportText(attempt))
+          .then(() => toast.success("Copied"))
+          .catch(() => toast.error("Could not copy"));
+      }}
+    >
+      <Copy /> Copy for support
+    </Button>
   );
 }
 
@@ -211,21 +277,9 @@ function RungLine({ rung, index }: { rung: CustomerAttemptRung; index: number })
   );
 }
 
-/** "about 12 Mbps down / 1.7 up", or null when nothing was measured. The
- * download is the app's sample after it said "Connected", the upload the
- * data check's; a rung with only one of them says that one. */
 function speedLine(rung: Pick<CustomerAttemptRung, "downKbps" | "upKbps">): string | null {
-  const down = rung.downKbps === null ? null : `${mbps(rung.downKbps)} Mbps down`;
-  const up = rung.upKbps === null ? null : `${mbps(rung.upKbps)}${down ? "" : " Mbps"} up`;
-  if (!down && !up) return null;
-  return `about ${[down, up].filter(Boolean).join(" / ")}`;
-}
-
-/** Kilobits a second as megabits, to one decimal under ten and whole
- * above: "0.3", "1.7", "12", "240". */
-function mbps(kbps: number): string {
-  const value = kbps / 1000;
-  return value < 10 ? value.toFixed(1) : String(Math.round(value));
+  const text = speedText(rung.downKbps, rung.upKbps);
+  return text ? `about ${text}` : null;
 }
 
 function rungTone(result: string): "slow" | "dead" | null {
@@ -244,7 +298,7 @@ function rungTone(result: string): "slow" | "dead" | null {
  * other; one still naming a server is one where that could not be done
  * -- a node too old to send addresses, a report the app sent late, or
  * two devices where saying which sent it would be a guess. */
-function FromAddress({ attempt }: { attempt: CustomerAttempt }) {
+function FromAddress({ attempt }: { attempt: CustomerAttemptDetail }) {
   if (attempt.ip) return <p className="font-mono text-xs">{attempt.ip}</p>;
   const [text, note] = attempt.throughServer
     ? ["Not known", `the app's report came through ${attempt.throughServer}`]
@@ -261,7 +315,7 @@ function FromAddress({ attempt }: { attempt: CustomerAttempt }) {
   );
 }
 
-function NetworkName({ network }: { network: CustomerAttempt["network"] }) {
+function NetworkName({ network }: { network: CustomerAttemptDetail["network"] }) {
   if (!network) return <span className="text-muted-foreground">unknown</span>;
   return (
     <span className="whitespace-nowrap">

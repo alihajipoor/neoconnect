@@ -13,7 +13,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
  * interesting case -- so both are on the page. Days are UTC, because the
  * usage behind them is bucketed in UTC.
  */
-export function TrafficCard({ traffic }: { traffic: CustomerTrafficRow[] | null }) {
+export function TrafficCard({
+  traffic,
+  days = 14,
+  title = "Traffic by server",
+}: {
+  traffic: CustomerTrafficRow[] | null;
+  /** How many UTC days the rows cover, for the title and the empty line. */
+  days?: number;
+  title?: string;
+}) {
   const rows = [...(traffic ?? [])].sort(
     (a, b) =>
       b.day.localeCompare(a.day) || a.nodeName.localeCompare(b.nodeName) || a.protocol.localeCompare(b.protocol),
@@ -25,10 +34,10 @@ export function TrafficCard({ traffic }: { traffic: CustomerTrafficRow[] | null 
     <Card className="gap-4">
       <CardHeader>
         <CardTitle className="text-base">
-          Traffic by server
+          {title}
           {rows.length > 0 && (
             <span className="ml-2 text-sm font-normal text-muted-foreground tabular-nums">
-              14 days: {megabytes(totalUp)} up, {megabytes(totalDown)} down
+              {days} days: {megabytes(totalUp)} up, {megabytes(totalDown)} down
             </span>
           )}
         </CardTitle>
@@ -37,7 +46,7 @@ export function TrafficCard({ traffic }: { traffic: CustomerTrafficRow[] | null 
         {traffic === null ? (
           <p className="text-sm text-muted-foreground">Could not load this customer&apos;s traffic.</p>
         ) : rows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No traffic through any server in the last 14 days.</p>
+          <p className="text-sm text-muted-foreground">No traffic through any server in the last {days} days.</p>
         ) : (
           <div className="rounded-lg border border-white/8 bg-card/40">
             <Table stack>

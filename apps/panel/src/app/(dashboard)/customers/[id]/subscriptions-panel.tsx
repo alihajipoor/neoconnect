@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import { ArrowLeftRight, CalendarPlus, Gauge, MoreHorizontal, Pause, Play, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import type { Subscription, SubscriptionPlan, SubscriptionStatus } from "@/lib/types";
+import type { InsightCredentials, Subscription, SubscriptionPlan, SubscriptionStatus } from "@/lib/types";
 import {
   assignPlan,
   changeSubscriptionPlan,
@@ -12,7 +12,8 @@ import {
   resetSubscriptionUsage,
   setSubscriptionStatus,
 } from "./actions";
-import { formatBytes } from "@/lib/utils";
+import { cn, formatBytes } from "@/lib/utils";
+import { credentialLine } from "./insight-format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -35,10 +36,14 @@ export function SubscriptionsPanel({
   customerId,
   subscriptions,
   plans,
+  credentials,
 }: {
   customerId: string;
   subscriptions: Subscription[];
   plans: SubscriptionPlan[];
+  /** Per subscription, from the insight endpoint; null when that read
+   * failed, which is said once rather than read as "no credentials". */
+  credentials?: InsightCredentials[] | null;
 }) {
   const [pending, startTransition] = useTransition();
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -62,7 +67,10 @@ export function SubscriptionsPanel({
             that only exists once there is already a subscription. */}
         <AssignPlanButton customerId={customerId} plans={plans} />
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-3">
+        {credentials === null && subscriptions.length > 0 && (
+          <p className="text-xs text-muted-foreground">Could not load whether the credentials are on the servers.</p>
+        )}
         {subscriptions.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             No subscriptions. Nothing to manage yet.
@@ -77,6 +85,7 @@ export function SubscriptionsPanel({
               const percent = cap && cap > 0 ? Math.min(100, (used / cap) * 100) : 0;
               const busy = pending && busyId === subscription.id;
               const active = subscription.status === "ACTIVE";
+              const creds = credentials?.find((c) => c.subscriptionId === subscription.id);
 
               return (
                 <div
@@ -200,6 +209,12 @@ export function SubscriptionsPanel({
                       </span>
                     </span>
                   </div>
+
+                  {creds && (
+                    <p className={cn("text-xs text-muted-foreground", creds.notProvisioned > 0 && "text-amber-300")}>
+                      {credentialLine(creds)}
+                    </p>
+                  )}
 
                   {/* Only drawn when there is a proportion to draw. An
                       unlimited plan has no bar to fill. */}
