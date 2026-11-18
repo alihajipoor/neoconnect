@@ -67,7 +67,20 @@ function AttemptRow({ attempt }: { attempt: CustomerAttemptDetail }) {
     <>
       <TableRow className="cursor-pointer" onClick={() => setOpen((v) => !v)}>
         <TableCell cell="lead" className="text-muted-foreground">
-          {open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+          {/* The row toggles on a click anywhere; this button is the same
+              toggle for a keyboard and a screen reader. */}
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-label={open ? "Hide this report's detail" : "Show this report's detail"}
+            onClick={(event) => {
+              event.stopPropagation();
+              setOpen((v) => !v);
+            }}
+            className="-m-1.5 flex size-7 items-center justify-center rounded-md outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+          >
+            {open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+          </button>
         </TableCell>
         <TableCell cell="primary" className="text-sm whitespace-nowrap" title={new Date(attempt.at).toLocaleString()}>
           <span suppressHydrationWarning>{ago(attempt.at)}</span>
@@ -249,6 +262,7 @@ function CopyForSupport({ attempt }: { attempt: CustomerAttemptDetail }) {
     <Button
       variant="outline"
       size="sm"
+      className="max-sm:h-11 max-sm:w-full"
       onClick={(event) => {
         event.stopPropagation();
         navigator.clipboard

@@ -1,16 +1,19 @@
 import Link from "next/link";
+import { SlidersHorizontal, X } from "lucide-react";
 import { apiFetch, apiFetchList } from "@/lib/api";
 import type { CustomerAttemptDetail, CustomerInsight } from "@/lib/types";
 import { KINDS, OUTCOMES } from "@/lib/attempt-labels";
 import { protocolLabel } from "@/lib/protocol-labels";
+import { cn } from "@/lib/utils";
 import { Pager } from "@/components/dashboard/pager";
 import { buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AttemptTable } from "./connection-log";
-import { CATEGORY_LABELS, FAILURE_LABELS, failureLabel } from "./insight-labels";
+import { CATEGORY_LABELS, FAILURE_LABELS, categoryLabel, failureLabel } from "./insight-labels";
 import {
   DAY_WINDOWS,
+  FILTER_KEYS,
   attemptsQuery,
   customerHref,
   hasFilters,
@@ -18,8 +21,21 @@ import {
   speedText,
   type AttemptFilters,
 } from "./insight-format";
+import { percent, topFailure } from "./insight-layout";
 import { windowText } from "./overview-view";
-import { Muted, NetworkLabel, Section, TableBox, When, WindowSwitch, orNull } from "./view-parts";
+import {
+  FoldedText,
+  Muted,
+  NetworkLabel,
+  Ratio,
+  Section,
+  StatTile,
+  TableBox,
+  Tiles,
+  When,
+  WindowSwitch,
+  orNull,
+} from "./view-parts";
 
 /** Where this customer's connections go wrong: by network, by server and
  * connection type, by failure cause, and then every report. */
@@ -59,6 +75,7 @@ export async function ConnectionsView({
         </Section>
       ) : (
         <>
+          <ConnectionTiles insight={insight} customerId={customerId} days={days} />
           <NetworksCard insight={insight} customerId={customerId} days={days} />
           <RoutesCard insight={insight} days={days} />
           <FailuresCard insight={insight} customerId={customerId} days={days} />
@@ -95,6 +112,67 @@ export async function ConnectionsView({
   );
 }
 
+/** The answer before the tables: how many tries worked, how often the app
+ * could not reach us, and the cause reported most. */
+function ConnectionTiles({ insight, customerId, days }: { insight: CustomerInsight; customerId: string; days: number }) {
+  const { tried, succeeded } = insight.connect;
+  const share = percent(succeeded, tried);
+  // The same sum the backend's API_UNREACHABLE_OFTEN finding and the
+  // network table's column are counted from.
+  const apiUnreachable = insight.networks.reduce((sum, n) => sum + n.apiUnreachable, 0);
+  const top = topFailure(insight.failures);
+  const window = windowText(days);
+  return (
+    <Tiles>
+      <StatTile label="Attempts" value={tried} sub={`connects and reconnect passes, last ${window}`} />
+      <StatTile
+        label="Succeeded"
+        value={
+          tried === 0 ? (
+            "—"
+          ) : (
+            <>
+              {succeeded} of {tried}
+              <span className="ml-1.5 text-sm font-normal text-muted-foreground">{share}%</span>
+            </>
+          )
+        }
+        tone={tried > 0 && succeeded === 0 ? "problem" : "neutral"}
+        bar={tried > 0 ? { part: succeeded, whole: tried } : undefined}
+        sub={tried === 0 ? `no attempts in the last ${window}` : undefined}
+      />
+      <StatTile
+        label="Could not reach our API"
+        value={apiUnreachable}
+        sub="background reports"
+        tone={apiUnreachable > 0 ? "warning" : "neutral"}
+      />
+      <StatTile
+        label="Most common cause"
+        value={
+          top ? (
+            <Link
+              href={customerHref(customerId, { view: "connections", days, failureCode: top.failure.code })}
+              className="text-sm font-medium underline-offset-2 hover:underline"
+            >
+              {failureLabel(top.failure.code)}
+            </Link>
+          ) : (
+            <span className="text-sm font-normal text-muted-foreground">No failures reported</span>
+          )
+        }
+        sub={
+          top
+            ? `${top.failure.count} ${top.failure.count === 1 ? "time" : "times"}${
+                top.tiedWith > 0 ? `, tied with ${top.tiedWith} other ${top.tiedWith === 1 ? "cause" : "causes"}` : ""
+              }`
+            : undefined
+        }
+      />
+    </Tiles>
+  );
+}
+
 function NetworksCard({ insight, customerId, days }: { insight: CustomerInsight; customerId: string; days: number }) {
   const known = insight.networks.filter((n) => n.asn !== null).length;
   return (
@@ -109,8 +187,7 @@ function NetworksCard({ insight, customerId, days }: { insight: CustomerInsight;
                 <TableRow>
                   <TableHead>Network</TableHead>
                   <TableHead>Country</TableHead>
-                  <TableHead className="text-right">Tried</TableHead>
-                  <TableHead className="text-right">Succeeded</TableHead>
+                  <TableHead className="w-24 text-right leading-tight whitespace-normal">Succeeded of tried</TableHead>
                   <TableHead className="text-right">API not reached</TableHead>
                   <TableHead>Last success</TableHead>
                   <TableHead>Other customers here (48 h)</TableHead>
@@ -135,13 +212,10 @@ function NetworksCard({ insight, customerId, days }: { insight: CustomerInsight;
                     <TableCell label="Country" phoneOrder={1} className="text-sm">
                       {n.country ?? <span className="text-muted-foreground">—</span>}
                     </TableCell>
-                    <TableCell label="Tried" phoneOrder={2} className="text-right text-sm tabular-nums">
-                      {n.tried}
+                    <TableCell label="Succeeded of tried" phoneOrder={2} className="text-right text-sm">
+                      <Ratio part={n.succeeded} whole={n.tried} />
                     </TableCell>
-                    <TableCell label="Succeeded" phoneOrder={3} className="text-right text-sm tabular-nums">
-                      {n.succeeded}
-                    </TableCell>
-                    <TableCell label="API not reached" phoneOrder={4} className="text-right text-sm tabular-nums">
+                    <TableCell label="API not reached" phoneOrder={3} className="text-right text-sm tabular-nums">
                       {n.apiUnreachable}
                     </TableCell>
                     <TableCell label="Last success" phoneOrder={5} className="text-sm">
@@ -185,8 +259,8 @@ function RoutesCard({ insight, days }: { insight: CustomerInsight; days: number 
                 <TableHead>Server</TableHead>
                 <TableHead>Protocol</TableHead>
                 <TableHead className="text-right">Dialled</TableHead>
-                <TableHead className="text-right">Connected</TableHead>
-                <TableHead className="text-right">Carried</TableHead>
+                <TableHead className="w-24 text-right leading-tight whitespace-normal">Connected of dialled</TableHead>
+                <TableHead className="w-24 text-right leading-tight whitespace-normal">Carried of connected</TableHead>
                 <TableHead>Typical speed</TableHead>
                 <TableHead>Last result</TableHead>
                 <TableHead>When</TableHead>
@@ -203,21 +277,23 @@ function RoutesCard({ insight, days }: { insight: CustomerInsight; days: number 
                     <TableCell label="Protocol" phoneOrder={1} className="text-sm text-muted-foreground">
                       {protocolLabel(r.protocol)}
                     </TableCell>
-                    <TableCell
-                      label="Dialled"
-                      phoneOrder={2}
-                      className="text-right text-sm tabular-nums"
-                      title={r.notDialled > 0 ? `Passed over without dialling ${r.notDialled} times` : undefined}
-                    >
+                    <TableCell label="Dialled" phoneOrder={2} className="text-right text-sm tabular-nums">
                       {r.dialled}
+                      {/* Said in words, not only on hover: a touch screen
+                          never shows a title. */}
+                      {r.notDialled > 0 && (
+                        <span className="block text-[11px] text-muted-foreground">
+                          not dialled {r.notDialled} {r.notDialled === 1 ? "time" : "times"}
+                        </span>
+                      )}
                     </TableCell>
-                    <TableCell label="Connected" phoneOrder={3} className="text-right text-sm tabular-nums">
-                      {r.connected}
+                    <TableCell label="Connected of dialled" phoneOrder={3} className="text-right text-sm">
+                      <Ratio part={r.connected} whole={r.dialled} />
                     </TableCell>
-                    <TableCell label="Carried" phoneOrder={4} className="text-right text-sm tabular-nums">
-                      {r.carried}
+                    <TableCell label="Carried of connected" phoneOrder={4} className="text-right text-sm">
+                      <Ratio part={r.carried} whole={r.connected} />
                     </TableCell>
-                    <TableCell label="Typical speed" phoneOrder={5} className="text-sm">
+                    <TableCell label="Typical speed" phoneOrder={5} className="text-sm whitespace-normal">
                       {speed ?? <span className="text-muted-foreground">not measured</span>}
                     </TableCell>
                     <TableCell
@@ -229,10 +305,9 @@ function RoutesCard({ insight, days }: { insight: CustomerInsight; days: number 
                       // with a zero max-width makes this column take what
                       // the others leave and shorten to it (from 640px; a
                       // phone stacks the row).
-                      className="truncate text-xs text-muted-foreground max-sm:max-w-56 sm:w-full sm:max-w-0"
-                      title={r.lastResult}
+                      className="text-xs text-muted-foreground sm:w-full sm:max-w-0"
                     >
-                      {r.lastResult}
+                      <FoldedText text={r.lastResult} />
                     </TableCell>
                     <TableCell label="When" phoneOrder={7} className="text-sm">
                       <When at={r.lastAt} />
@@ -267,7 +342,7 @@ function FailuresCard({ insight, customerId, days }: { insight: CustomerInsight;
             <TableBody>
               {insight.failures.map((f) => (
                 <TableRow key={f.code}>
-                  <TableCell cell="primary" className="text-sm whitespace-normal">
+                  <TableCell cell="primary" className="text-sm whitespace-normal sm:min-w-56">
                     <Link
                       href={customerHref(customerId, { view: "connections", days, failureCode: f.code })}
                       className="hover:underline"
@@ -286,10 +361,9 @@ function FailuresCard({ insight, customerId, days }: { insight: CustomerInsight;
                     label="Example"
                     wide
                     phoneOrder={3}
-                    className="max-w-80 truncate font-mono text-xs text-muted-foreground"
-                    title={f.example}
+                    className="font-mono text-xs text-muted-foreground sm:w-full sm:max-w-0"
                   >
-                    {f.example}
+                    <FoldedText text={f.example} />
                   </TableCell>
                 </TableRow>
               ))}
@@ -302,7 +376,7 @@ function FailuresCard({ insight, customerId, days }: { insight: CustomerInsight;
 }
 
 const selectClass =
-  "h-9 max-w-48 min-w-0 rounded-md border border-input bg-background px-2 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/50 max-lg:h-10";
+  "h-9 w-full min-w-0 rounded-md border border-input bg-background px-2 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/50 max-lg:h-10 md:w-auto md:max-w-48";
 
 /** The log's filters as a plain GET form, so it works without client
  * JavaScript. The view and window ride along as hidden fields. */
@@ -334,8 +408,59 @@ function FilterBar({
     });
   }
 
+  const chipText: Record<keyof AttemptFilters, (value: string) => string> = {
+    kind: (v) => `Kind: ${KINDS[v as keyof typeof KINDS] ?? v}`,
+    outcome: (v) => `Outcome: ${OUTCOMES[v as keyof typeof OUTCOMES]?.label ?? v}`,
+    category: (v) => `Type: ${categoryLabel(v)}`,
+    failureCode: (v) => `Cause: ${failureLabel(v)}`,
+    platform: (v) => `Platform: ${v}`,
+    asn: (v) => {
+      const name = networks.find((n) => String(n.asn) === v)?.name;
+      return `Network: ${name ? `${name} (AS${v})` : `AS${v}`}`;
+    },
+    q: (v) => `Words: “${v}”`,
+  };
+  const active = FILTER_KEYS.filter((key) => filters[key] !== undefined);
+
+  // On a phone the controls fold behind "Filters" (a checkbox, so no
+  // script), and what is set shows as chips that each remove themselves.
   return (
-    <form method="get" action={`/customers/${customerId}`} className="flex flex-wrap items-end gap-2">
+    <div className="flex flex-wrap items-center gap-2">
+      <input id="log-filters-toggle" type="checkbox" className="peer sr-only" />
+      <label
+        htmlFor="log-filters-toggle"
+        className={cn(
+          buttonVariants({ variant: "outline", size: "sm" }),
+          "cursor-pointer select-none peer-focus-visible:ring-2 peer-focus-visible:ring-ring/50 md:hidden",
+        )}
+      >
+        <SlidersHorizontal />
+        Filters{active.length > 0 && ` (${active.length})`}
+      </label>
+      {active.map((key) => (
+        <Link
+          key={key}
+          href={customerHref(customerId, { view: "connections", days, ...filters, [key]: undefined })}
+          className="inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-full border border-white/10 bg-white/5 py-1 pr-2 pl-3 text-xs transition-colors hover:bg-white/10 max-md:min-h-10"
+          aria-label={`Remove filter ${chipText[key](filters[key] as string)}`}
+        >
+          <span className="truncate">{chipText[key](filters[key] as string)}</span>
+          <X className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+        </Link>
+      ))}
+      {active.length > 0 && (
+        <Link
+          href={customerHref(customerId, { view: "connections", days })}
+          className="inline-flex min-h-8 items-center px-1 text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10"
+        >
+          Clear all
+        </Link>
+      )}
+      <form
+        method="get"
+        action={`/customers/${customerId}`}
+        className="hidden basis-full grid-cols-1 gap-2 peer-checked:grid sm:grid-cols-2 md:flex md:flex-wrap md:items-end md:peer-checked:flex"
+      >
       <input type="hidden" name="view" value="connections" />
       {days !== 7 && <input type="hidden" name="days" value={days} />}
       <FilterSelect name="kind" label="Kind" value={filters.kind} options={Object.entries(KINDS)} />
@@ -354,22 +479,15 @@ function FilterBar({
         value={filters.asn}
         options={networks.map((n) => [String(n.asn), `${n.name ?? "Unnamed"} (AS${n.asn})`])}
       />
-      <label className="flex min-w-40 flex-1 flex-col gap-1 text-xs text-muted-foreground">
+      <label className="flex min-w-40 flex-1 flex-col gap-1 text-xs text-muted-foreground sm:col-span-2">
         Words in the report
-        <Input name="q" defaultValue={filters.q ?? ""} placeholder="e.g. timed out" maxLength={200} />
+        <Input name="q" defaultValue={filters.q ?? ""} placeholder="e.g. timed out" maxLength={200} className="max-md:h-10" />
       </label>
-      <button type="submit" className={buttonVariants({ size: "sm" })}>
+      <button type="submit" className={cn(buttonVariants({ size: "sm" }), "sm:col-span-2 md:w-auto")}>
         Filter
       </button>
-      {hasFilters(filters) && (
-        <Link
-          href={customerHref(customerId, { view: "connections", days })}
-          className={buttonVariants({ variant: "ghost", size: "sm" })}
-        >
-          Clear
-        </Link>
-      )}
-    </form>
+      </form>
+    </div>
   );
 }
 
