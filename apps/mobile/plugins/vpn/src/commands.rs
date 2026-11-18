@@ -216,6 +216,51 @@ pub async fn vpn_tunnel_gone<R: Runtime>(app: AppHandle<R>) -> Result<TunnelGone
 /// the app sends when it sees a drop. iOS only: Android's plugin has no
 /// such command, and the call there rejects, which the app reads as "no
 /// record".
+/// The device and the network under the tunnel, for a report's details
+/// (device_facts.rs has the shape, docs/client-diagnostics.md the fields).
+///
+/// Asks the platform plugin's `deviceFacts`, which resolves an object with
+/// the same camelCase keys -- `model`, `os`, `osVersion`, `lowPower`,
+/// `dataSaver`, `memFreeMb` (a whole number), and `net` with `type`,
+/// `metered`, `ipv4`, `ipv6`, `otherVpn`, `dns`, `privateDns`,
+/// `privateDnsHost` -- each left out when it cannot be told. Read field by
+/// field (`DeviceFacts::from_value`), so one field of the wrong type costs
+/// only itself.
+///
+/// Never an error, and never longer than `FACTS_TIME_LIMIT`: on a plugin
+/// that fails, is missing the method, or is slow, the answer is what is
+/// certain without it -- the OS this was compiled for.
+#[tauri::command]
+pub async fn device_facts<R: Runtime>(app: AppHandle<R>) -> crate::DeviceFacts {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        use std::sync::mpsc;
+        const FACTS_TIME_LIMIT: std::time::Duration = std::time::Duration::from_millis(1_000);
+        let os = if cfg!(target_os = "ios") { "iOS" } else { "Android" };
+        let (tx, rx) = mpsc::channel();
+        // On a thread of its own: run_mobile_plugin blocks until the
+        // platform answers, and a slow answer is abandoned, not awaited.
+        std::thread::spawn(move || {
+            let answer = handle(&app)
+                .ok()
+                .and_then(|vpn| vpn.0.run_mobile_plugin::<serde_json::Value>("deviceFacts", ()).ok());
+            let _ = tx.send(answer);
+        });
+        let answer = tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(FACTS_TIME_LIMIT).ok().flatten())
+            .await
+            .ok()
+            .flatten();
+        let mut facts = answer.map(crate::DeviceFacts::from_value).unwrap_or_default();
+        facts.os = Some(os.into());
+        facts
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = app;
+        crate::DeviceFacts::default()
+    }
+}
+
 #[tauri::command]
 pub async fn vpn_last_run<R: Runtime>(app: AppHandle<R>) -> Result<LastRunFiles, String> {
     #[cfg(target_os = "ios")]

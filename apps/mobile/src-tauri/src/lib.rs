@@ -52,6 +52,12 @@ mod door_http;
 #[path = "../../../desktop-windows/src-tauri/src/bundle_scope.rs"]
 mod bundle_scope;
 
+/// The service check's one request, step by step -- the Windows app's
+/// file, compiled here by path like the probe above, whose TLS
+/// configuration it shares.
+#[path = "../../../desktop-windows/src-tauri/src/service_probe.rs"]
+mod service_probe;
+
 /// The OS this binary was compiled for: "android" or "ios" here, as the
 /// platform on attempt reports.
 ///
@@ -99,6 +105,10 @@ pub fn run() {
             tauri_plugin_neoxify_vpn::vpn_iap_purchase,
             tauri_plugin_neoxify_vpn::vpn_iap_unfinished,
             tauri_plugin_neoxify_vpn::vpn_iap_finish,
+            // The phone and the network under the tunnel, for a report's
+            // details: the platform plugin's `deviceFacts`, read into the
+            // shape the Windows app answers with.
+            tauri_plugin_neoxify_vpn::device_facts,
             // The location picker calls this for every route. Absent
             // here, every call rejected and every server showed "--"
             // where its latency should be -- for the whole life of the
@@ -130,7 +140,9 @@ pub fn run() {
             door_http::door_request,
             // A signed bundle's hosts into the HTTP scope; see
             // `mod bundle_scope` above.
-            bundle_scope::grant_bundle_scope
+            bundle_scope::grant_bundle_scope,
+            // The service check; see `mod service_probe` above.
+            service_probe::probe_service
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -15,7 +15,13 @@
 
 mod commands;
 
+/// The answer to `device_facts`: the Windows app's file, compiled here by
+/// path, so the phones and the PC put one shape on the wire.
+#[path = "../../../../desktop-windows/src-tauri/src/device_facts.rs"]
+mod device_facts;
+
 pub use commands::*;
+pub use device_facts::{DeviceFacts, NetFacts};
 
 /// Answer to `vpn_tunnel_gone`: false while the device is still routed
 /// through any VPN, ours or otherwise.

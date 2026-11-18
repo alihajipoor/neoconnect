@@ -1,13 +1,16 @@
 mod autostart;
 mod bundle_scope;
 mod control_plane_probe;
+mod device_facts;
 mod door_http;
 mod health_ip;
 mod notify;
 mod relay_http;
+mod service_probe;
 mod vpn;
 mod webview_floor;
 mod window_fit;
+mod windows_facts;
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -227,6 +230,12 @@ pub fn run() {
             control_plane_probe::probe_control_plane,
             // And its stop, for when a connect starts while it runs.
             control_plane_probe::cancel_control_plane_probe,
+            // The service check: one HTTPS request to a target on the
+            // server's fixed list, timed step by step. See service_probe.rs.
+            service_probe::probe_service,
+            // The PC and the network under the tunnel, for a report's
+            // details. See windows_facts.rs.
+            windows_facts::device_facts,
             // The relay of last resort: an allowed API call, by address
             // and SPKI pin, when no ordinary route answers. See
             // relay_http.rs.

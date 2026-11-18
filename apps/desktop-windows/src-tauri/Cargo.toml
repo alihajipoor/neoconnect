@@ -104,5 +104,10 @@ features = [
   # see. Only answerable here -- the helper service is in
   # session 0 and cannot see the interactive desktop at all.
   "Win32_UI_WindowsAndMessaging",
+  # GetSystemPowerStatus and GlobalMemoryStatusEx: battery saver and free
+  # memory for a report's device details (windows_facts.rs). Bindings
+  # only; the service already builds this crate with the second.
+  "Win32_System_Power",
+  "Win32_System_SystemInformation",
 ]
 
