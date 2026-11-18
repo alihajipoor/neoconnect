@@ -188,6 +188,27 @@ describe("CustomerInsightService.attempts", () => {
     expect(page.items[0].failureCode).toBe("NOT_CARRYING");
   });
 
+  it("matches a failureCode the way the failures card counts it, rungs included", async () => {
+    const { service } = build([
+      // Landed after a failed rung: the report has no code of its own.
+      row({ outcome: "SUCCESS", attemptsJson: [{ protocol: "Fast", result: "timed out" }, { protocol: "Stealth", result: "connected" }] }),
+      // Failed on two rungs whose causes differ.
+      row({
+        outcome: "OTHER",
+        reason: "tried 2 of 2",
+        attemptsJson: [{ protocol: "Stealth", result: "up but unreachable" }, { protocol: "Fast", result: "timed out" }],
+      }),
+      // A phone rung skipped without dialling is not a failure.
+      row({ outcome: "SUCCESS", platform: "android", attemptsJson: [{ protocol: "IKEv2", result: "not available with selected apps" }, { protocol: "Fast", result: "connected" }] }),
+    ]);
+    const insight = await service.insight(ME, {}, NOW);
+    expect(insight.failures.reduce((n, f) => n + f.count, 0)).toBe(3);
+    for (const f of insight.failures) {
+      const page = await service.attempts(ME, { failureCode: f.code }, NOW);
+      expect({ code: f.code, total: page.total }).toEqual({ code: f.code, total: f.count });
+    }
+  });
+
   it("refuses an unknown filter value rather than querying with it", async () => {
     const { service } = build();
     await expect(service.attempts(ME, { kind: "NOPE" }, NOW)).rejects.toBeInstanceOf(BadRequestException);

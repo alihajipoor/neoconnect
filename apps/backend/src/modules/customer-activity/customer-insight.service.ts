@@ -104,6 +104,23 @@ function derive(row: AttemptRecord): Derived {
   };
 }
 
+/** The causes one report adds to "Why it failed", each with the text
+ * shown as its example. A report with failed rungs counts by its rungs,
+ * since its reason is usually the last rung's words again; a report
+ * without counts by its own code. The log's failureCode filter matches
+ * on this same list, so a cause's count and the log it links to agree. */
+function countedFailures(d: Derived): { code: FailureCode; text: string }[] {
+  if (d.category === "session" || d.category === "config") return [];
+  const failedRungs = d.category === "connect" || d.category === "reconnect" || d.category === "cancelled"
+    ? d.rungs.filter((r) => rungFailed(r.result))
+    : [];
+  const out = failedRungs.map((rung) => ({ code: classifyFailure(rung.result), text: `${rung.protocol ?? "?"}: ${rung.result}` }));
+  if (d.failureCode && (failedRungs.length === 0 || d.failureCode === "CANCELLED_BY_CUSTOMER")) {
+    out.push({ code: d.failureCode, text: d.row.reason ?? d.row.outcome });
+  }
+  return out;
+}
+
 const iso = (ms: number) => new Date(ms).toISOString();
 
 function median(values: number[]): number | null {
@@ -440,28 +457,18 @@ export class CustomerInsightService {
       .sort((a, b) => b.dialled - a.dialled || b.lastAt.localeCompare(a.lastAt));
   }
 
-  /** Causes across failed reports and failed rungs. A report with failed
-   * rungs is counted by its rungs, since its reason is usually the last
-   * rung's words again; a report without is counted by its reason. */
+  /** Causes across failed reports and failed rungs, per `countedFailures`. */
   private failures(rows: Derived[]): InsightFailure[] {
     const groups = new Map<FailureCode, InsightFailure>();
-    const add = (code: FailureCode, at: number, text: string) => {
-      const g = groups.get(code);
-      if (g) {
-        g.count += 1;
-        return;
-      }
-      // Rows are newest first, so the first text is the newest.
-      groups.set(code, { code, label: FAILURE_LABELS[code], count: 1, lastAt: iso(at), example: scrubAddresses(text) });
-    };
     for (const d of rows) {
-      if (d.category === "session" || d.category === "config") continue;
-      const failedRungs = d.category === "connect" || d.category === "reconnect" || d.category === "cancelled"
-        ? d.rungs.filter((r) => rungFailed(r.result))
-        : [];
-      for (const rung of failedRungs) add(classifyFailure(rung.result), d.at, `${rung.protocol ?? "?"}: ${rung.result}`);
-      if (d.failureCode && (failedRungs.length === 0 || d.failureCode === "CANCELLED_BY_CUSTOMER")) {
-        add(d.failureCode, d.at, d.row.reason ?? d.row.outcome);
+      for (const { code, text } of countedFailures(d)) {
+        const g = groups.get(code);
+        if (g) {
+          g.count += 1;
+          continue;
+        }
+        // Rows are newest first, so the first text is the newest.
+        groups.set(code, { code, label: FAILURE_LABELS[code], count: 1, lastAt: iso(d.at), example: scrubAddresses(text) });
       }
     }
     return [...groups.values()].sort((a, b) => b.count - a.count || b.lastAt.localeCompare(a.lastAt));
@@ -604,7 +611,7 @@ export class CustomerInsightService {
       });
       const matched = rows.map(derive).filter((d) => {
         if (query.category && d.category !== query.category) return false;
-        if (query.failureCode && d.failureCode !== query.failureCode) return false;
+        if (query.failureCode && !countedFailures(d).some((f) => f.code === query.failureCode)) return false;
         if (needle !== "") {
           const texts = [d.row.reason ?? "", ...d.rungs.map((r) => r.result)];
           if (!texts.some((t) => t.toLowerCase().includes(needle))) return false;
