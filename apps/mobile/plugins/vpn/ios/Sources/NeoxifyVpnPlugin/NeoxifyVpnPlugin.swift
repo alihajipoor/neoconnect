@@ -656,6 +656,16 @@ class NeoxifyVpnPlugin: Plugin {
         }
     }
 
+    /// What the phone and the network under the tunnel are, for a connect
+    /// report (DeviceFacts.swift). Never rejects: a fact that cannot be
+    /// read is left out.
+    @objc public func deviceFacts(_ invoke: Invoke) {
+        Task {
+            let facts: JsonObject = await DeviceFacts.read()
+            invoke.resolve(facts)
+        }
+    }
+
     /// Whether iOS shows this app's notifications: "enabled", "canAsk"
     /// (never asked, so asking shows the system's question) or
     /// "disabledForApp" (turned off, which only Settings can change).
