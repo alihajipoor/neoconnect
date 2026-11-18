@@ -1,5 +1,6 @@
 import type { ReportDetails, ReportServiceResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { serviceCheckLabel } from "@/lib/service-check-labels";
 import { serviceOutcome } from "./insight-labels";
 import {
   addressKindOdd,
@@ -117,7 +118,7 @@ export function ServiceResults({ services, title }: { services: ReportServiceRes
       <ul className="flex flex-col divide-y divide-white/5 rounded-md border border-white/8">
         {services.map((s, index) => (
           <li key={`${s.key}-${index}`} className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-0.5 px-2.5 py-1.5 text-xs sm:grid-cols-[10rem_minmax(0,1fr)_auto]">
-            <span className="font-medium">{s.key}</span>
+            <span className="font-medium">{serviceCheckLabel(s.key)}</span>
             <span className={cn("text-right sm:text-left", s.ok ? "text-success" : "text-red-300")}>
               {serviceOutcome(s.ok, s.stage)}
               {typeof s.status === "number" && <span className="ml-1.5 text-muted-foreground tabular-nums">HTTP {s.status}</span>}
