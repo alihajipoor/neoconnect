@@ -5,7 +5,8 @@
 //! pulled in by path and not edited, so a fix to either client is a fix to
 //! both. The rest are this app's: vpn.rs (the helper over a Unix socket and
 //! the network tables from /proc), linux_requests.rs (the helper requests
-//! only Linux has), update.rs (downloading an update and relaunching),
+//! only Linux has), linux_facts.rs (the device and network facts for
+//! connect reports), update.rs (downloading an update and relaunching),
 //! apps.rs (Custom mode's picker, from desktop entries), activation.rs
 //! (raising the window for a second launch on Wayland), autostart.rs (an
 //! XDG autostart entry) and notify.rs (D-Bus notifications).
@@ -14,6 +15,10 @@
 mod bundle_scope;
 #[path = "../../../desktop-windows/src-tauri/src/control_plane_probe.rs"]
 mod control_plane_probe;
+// The one shape every platform answers `device_facts` with, and its
+// filters; linux_facts.rs fills it in.
+#[path = "../../../desktop-windows/src-tauri/src/device_facts.rs"]
+mod device_facts;
 #[path = "../../../desktop-windows/src-tauri/src/door_http.rs"]
 mod door_http;
 #[path = "../../../desktop-windows/src-tauri/src/health_ip.rs"]
@@ -30,6 +35,7 @@ mod window_fit;
 mod activation;
 mod apps;
 mod autostart;
+mod linux_facts;
 mod linux_requests;
 mod notify;
 mod opener_scope;
@@ -181,6 +187,7 @@ pub fn run() {
             control_plane_probe::probe_control_plane,
             control_plane_probe::cancel_control_plane_probe,
             service_probe::probe_service,
+            linux_facts::device_facts,
             relay_http::relay_request,
             door_http::door_request,
             bundle_scope::grant_bundle_scope,

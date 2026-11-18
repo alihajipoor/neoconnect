@@ -380,7 +380,7 @@ async function askFacts(): Promise<Facts | null> {
     if (!raw) return null;
     return { device: cleanDevice(raw), net: cleanNet(raw.net) };
   } catch {
-    // A shell without the command (the Linux app): nothing is known.
+    // A shell without the command (the macOS shell): nothing is known.
     return null;
   } finally {
     clearTimeout(timer);
