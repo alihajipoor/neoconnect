@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState } from "rea
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { apiRequest, publicRequest } from "./api";
 import { getTokens } from "./session";
+import { setLanguageSource } from "./report-details";
 
 /** Supported interface languages.
  *
@@ -933,6 +934,34 @@ const en = {
   "diag.privacy":
     "It has no passwords, keys or server details, and nothing about the sites you visit. You can read all of it before sending.",
   "diag.failed": "The Neoxify service isn't answering, so there's nothing to collect.",
+  "check.title": "Connection test",
+  "check.subtitle": "Tries a short list of well-known services and shows which ones can be reached.",
+  "check.run": "Test connection",
+  "check.running": "Testing...",
+  "check.again": "Test again",
+  "check.reachable": "Reachable",
+  "check.unreachable": "Not reachable",
+  "check.allOk": "Every service on the list could be reached.",
+  "check.someOk": "{ok} of {total} services could be reached.",
+  "check.untested": "{count} couldn't be tested in time.",
+  "check.viaTunnel": "Tested through the VPN.",
+  "check.viaDirect": "Tested without the VPN.",
+  "check.off": "The connection test isn't available right now.",
+  "check.unavailable": "The test couldn't start. Try again in a moment.",
+  "send.title": "Send diagnostics to support",
+  "send.subtitle": "Sends this device's connection details to our support team, so they can look into a problem with you.",
+  "send.note": "Anything you'd like to add (optional)",
+  "send.notePlaceholder": "What were you trying to do, and what happened?",
+  "send.preview": "What will be sent",
+  "send.previewHint": "Exactly this goes to support, and nothing else. It never includes the sites you visit.",
+  "send.previewLoading": "Gathering the details...",
+  "send.previewCheck": "Run the connection test first if you'd like its results included.",
+  "send.send": "Send",
+  "send.sending": "Sending...",
+  "send.sentTitle": "Sent to support",
+  "send.reference": "Your reference code",
+  "send.referenceHint": "Support can find your report with this code. Mention it when you write to them.",
+  "send.failed": "It wasn't sent. Check your connection and try again. Your note is still here.",
 
   "plans.back": "Back",
   "plans.perDays": "for {days} days",
@@ -1153,7 +1182,7 @@ const en = {
   "disclosure.dataSupport":
     "Support messages you send from the app, so we can answer them.",
   "disclosure.dataDiagnostics":
-    "Connection diagnostics, so we can find and fix problems. This includes whether a connection worked, which server and protocol it used, the app version and any error message.",
+    "Connection diagnostics, so we can find and fix problems. This includes whether a connection worked, which server and connection type it used and how long it took, the app version, your device model and system version, whether you were on Wi-Fi or mobile data, your device's DNS settings and any error message. About once a day the app also tests whether a short list of well-known services can be reached through the VPN. It never records the sites you visit.",
   "disclosure.dataServerLogs":
     "Our VPN servers keep operating logs, which can include connection records, so we can run the service and find problems.",
   "disclosure.dataNotSold":
@@ -2130,6 +2159,34 @@ const fa: Record<TranslationKey, string> = {
   "diag.privacy":
     "هیچ رمز عبور، کلید یا مشخصات سروری در آن نیست و چیزی دربارهٔ سایت‌هایی که باز می‌کنید ندارد. پیش از ارسال می‌توانید همه‌اش را بخوانید.",
   "diag.failed": "سرویس نئوکسیفای جواب نمی‌دهد، برای همین چیزی برای جمع کردن نیست.",
+  "check.title": "آزمایش اتصال",
+  "check.subtitle": "چند سرویس شناخته‌شده را امتحان می‌کند و نشان می‌دهد کدام‌ها در دسترس‌اند.",
+  "check.run": "آزمایش اتصال",
+  "check.running": "در حال آزمایش...",
+  "check.again": "آزمایش دوباره",
+  "check.reachable": "در دسترس است",
+  "check.unreachable": "در دسترس نیست",
+  "check.allOk": "همهٔ سرویس‌های فهرست در دسترس بودند.",
+  "check.someOk": "{ok} سرویس از {total} سرویس در دسترس بود.",
+  "check.untested": "{count} سرویس به‌موقع جواب نداد و آزمایش نشد.",
+  "check.viaTunnel": "از طریق وی‌پی‌ان آزمایش شد.",
+  "check.viaDirect": "بدون وی‌پی‌ان آزمایش شد.",
+  "check.off": "آزمایش اتصال الان در دسترس نیست.",
+  "check.unavailable": "آزمایش شروع نشد. کمی بعد دوباره امتحان کنید.",
+  "send.title": "فرستادن اطلاعات عیب‌یابی برای پشتیبانی",
+  "send.subtitle": "مشخصات اتصال این دستگاه را برای تیم پشتیبانی می‌فرستد تا بتوانند مشکل را همراه شما بررسی کنند.",
+  "send.note": "اگر چیزی می‌خواهید اضافه کنید (اختیاری)",
+  "send.notePlaceholder": "می‌خواستید چه کار کنید و چه پیش آمد؟",
+  "send.preview": "چه چیزی فرستاده می‌شود",
+  "send.previewHint": "دقیقاً همین برای پشتیبانی فرستاده می‌شود و نه چیز دیگری. سایت‌هایی که باز می‌کنید هرگز در آن نیست.",
+  "send.previewLoading": "در حال جمع کردن اطلاعات...",
+  "send.previewCheck": "اگر می‌خواهید نتیجهٔ آزمایش اتصال هم فرستاده شود، اول آزمایش را اجرا کنید.",
+  "send.send": "فرستادن",
+  "send.sending": "در حال فرستادن...",
+  "send.sentTitle": "برای پشتیبانی فرستاده شد",
+  "send.reference": "کد پیگیری شما",
+  "send.referenceHint": "پشتیبانی با این کد گزارش شما را پیدا می‌کند. وقتی به آن‌ها پیام می‌دهید، این کد را بگویید.",
+  "send.failed": "فرستاده نشد. اتصالتان را بررسی کنید و دوباره امتحان کنید. یادداشتتان سر جایش است.",
 
   "plans.back": "بازگشت",
   "plans.perDays": "برای {days} روز",
@@ -2248,7 +2305,7 @@ const fa: Record<TranslationKey, string> = {
   "disclosure.dataSupport":
     "پیام‌هایی که از داخل برنامه به پشتیبانی می‌فرستید، تا بتوانیم جواب بدهیم.",
   "disclosure.dataDiagnostics":
-    "اطلاعات عیب‌یابی اتصال، تا بتوانیم مشکل‌ها را پیدا و رفع کنیم. این شامل موفق بودن یا نبودن اتصال، سرور و پروتکلی که استفاده شد، نسخهٔ برنامه و پیام خطاست.",
+    "اطلاعات عیب‌یابی اتصال، تا بتوانیم مشکل‌ها را پیدا و رفع کنیم. این شامل موفق بودن یا نبودن اتصال، سرور و نوع اتصالی که استفاده شد و مدت زمانی که طول کشید، نسخهٔ برنامه، مدل دستگاه و نسخهٔ سیستم‌عامل، وصل بودن به وای‌فای یا اینترنت همراه، تنظیمات DNS دستگاه و پیام خطاست. برنامه تقریباً روزی یک بار هم بررسی می‌کند که آیا چند سرویس شناخته‌شده از طریق وی‌پی‌ان در دسترس‌اند یا نه. سایت‌هایی که باز می‌کنید هرگز ثبت نمی‌شود.",
   "disclosure.dataServerLogs":
     "سرورهای وی‌پی‌ان ما برای اداره کردن سرویس و پیدا کردن مشکل‌ها گزارش کار نگه می‌دارند که ممکن است سابقهٔ اتصال‌ها هم در آن باشد.",
   "disclosure.dataNotSold":
@@ -2808,6 +2865,9 @@ let current: Language = detectLanguage();
 export function currentLanguage(): Language {
   return current;
 }
+
+// What a report's details say the interface is in (report-details.ts).
+setLanguageSource(() => current);
 
 /** Tells the server which language to write this customer's email in.
  *
