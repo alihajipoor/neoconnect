@@ -46,7 +46,7 @@ import { iapAvailable } from "@shared/lib/iap";
 import { endedNotice } from "@shared/lib/subscription-state";
 import { customerProtocolLabel } from "@shared/lib/protocol-labels";
 import { askedAroundTunnel, type BaselineIp, type TunnelServer } from "@shared/lib/egress";
-import { tunnelServerOf } from "@shared/lib/tunnel-server";
+import { setTunnelServer as setEndpointTunnelServer, tunnelServerFromService } from "@shared/lib/api-endpoints";
 import {
   classifyConnectionError,
   type ClassifiedError,
@@ -248,6 +248,7 @@ import { loadChosenRoute, saveChosenRoute } from "../lib/route-preference";
 import {
   confirmEgress,
   nodeAddressesOf,
+  phoneTunnelServerOf,
   pollEgress,
   pollState,
   rejectionIsEvidence,
@@ -612,6 +613,22 @@ export function Dashboard({
    * like the baseline the pass took, so a screen that adopts the tunnel a
    * pass left can go on checking it -- see `adoptPlatform`. */
   const tunnelServerRef = ladderPass.tunnelServer;
+  /** Tells the API's endpoint order which server the tunnel now up is
+   * dialled at, as the Windows dashboard does: that server's own mirrors
+   * are asked last while it is up (`setTunnelServer` in the shared
+   * api-endpoints.ts). Through its own Xray tunnel such a mirror cannot
+   * answer (`phoneTunnelServerOf`), and the phones never said which server
+   * was up, so a config refresh or report led with it whenever it was the
+   * endpoint that last worked. From what the platform says
+   * (`tunnelServerFromService`), never from this screen's first state, and
+   * only once a tunnel is up: told at the dial, as Windows is, it would
+   * also end the backup route and "doors first" for a rung that never
+   * came up, which on the phones only a landed pass does. */
+  const followTunnelForEndpoints = (observed: ConnectionState) => {
+    const up = tunnelUp(observed) ? true : observed === "disconnected" ? false : null;
+    const told = tunnelServerFromService(up, ladderPass.inFlight(), tunnelServerRef.current);
+    if (told !== undefined) setEndpointTunnelServer(told);
+  };
   /** Names the protocol actually in use when it is not the one the
    * customer asked for.
    *
@@ -1426,6 +1443,7 @@ export function Dashboard({
       // that times out is one nobody answered.
       const status = await withTimeout(vpnStatus(), "vpn_status");
       adopted = stateFromStatus(status);
+      followTunnelForEndpoints(adopted);
       platformProtocol = status.protocol;
       answered = true;
       if (overtaken()) return;
@@ -1589,6 +1607,7 @@ export function Dashboard({
         return;
       }
       if (!live) return;
+      followTunnelForEndpoints(fromStatus);
 
       if (fromStatus === "disconnected") {
         // The tunnel went on its own -- this poll runs only while one is
@@ -1839,6 +1858,7 @@ export function Dashboard({
    * and nothing measured that. */
   function settleTeardown(result: "down" | "stuck" | null) {
     if (result === "down") {
+      followTunnelForEndpoints("disconnected");
       setConnectionState("disconnected");
       setConnectedAt(null);
       setExitIp(null);
@@ -2235,6 +2255,7 @@ export function Dashboard({
     }
     const tearingDown = slotTeardown.owed() || customerTeardown.owed();
     const leftOver = state !== "disconnected" && !tearingDown && passTunnel.current === "unproven";
+    followTunnelForEndpoints(state);
     setConnectionState(leftOver ? "disconnected" : state);
   }
 
@@ -2771,16 +2792,15 @@ export function Dashboard({
       // "before". Not gone within the wait, there is no baseline: the
       // rung can still land, as "unverified", never as proven.
       //
-      // And never from an endpoint on this rung's own server where the
-      // phone reaches that address around the tunnel -- IKEv2, by
-      // assumption; Xray and WireGuard send it through the tunnel, by the
-      // source (`reachesServerAround` in the shared tunnel-server.ts).
-      // There, once the tunnel is up, the node's own mirror answers with
-      // the phone's own address however well the tunnel works, and a
-      // baseline from it read a working tunnel as a leak (`TunnelServer`
-      // in the shared egress.ts). The pass's first baseline was taken
-      // before the rung was known; if it came from there, nothing is up
-      // yet and it is simply taken again, passing that endpoint over.
+      // And never from an endpoint on this rung's own server, whatever the
+      // engine (`phoneTunnelServerOf`). Once its tunnel is up, the node's
+      // own mirror either answers around it with the phone's own address
+      // (IKEv2, by assumption) or, through its own Xray tunnel, not at all
+      // -- the node refuses its Xray's connections to itself -- and every
+      // rung on that server was torn down as not carrying. The pass's
+      // first baseline was taken before the rung was known; if it came
+      // from there, nothing is up yet and it is simply taken again,
+      // passing that endpoint over.
       //
       // Names resolve once nothing of ours is up -- for every rung after
       // the first, after the wait -- so the lookup cannot go into the
@@ -2790,13 +2810,13 @@ export function Dashboard({
       let baseline: BaselineIp | null;
       if (pendingBaseline !== undefined) {
         // The first rung: the pass tore everything down before it began.
-        tunnelServer = await tunnelServerOf(candidate, "phone");
+        tunnelServer = await phoneTunnelServerOf(candidate);
         baseline = askedAroundTunnel(pendingBaseline, tunnelServer)
           ? await takeBaseline({ nodeAddresses, tunnelServer })
           : pendingBaseline;
       } else {
         const nothingUp = await waitForTeardown();
-        tunnelServer = await tunnelServerOf(candidate, "phone");
+        tunnelServer = await phoneTunnelServerOf(candidate);
         baseline = nothingUp ? await takeBaseline({ nodeAddresses, tunnelServer }) : null;
       }
       pendingBaseline = undefined;
@@ -3007,6 +3027,8 @@ export function Dashboard({
           // this network or counted for the per-ISP tags -- the same rule
           // the Windows ladder follows for `unverified`.
           setConnectionState(outcome);
+          // The rung's tunnel is up: its server's mirrors go last.
+          setEndpointTunnelServer(tunnelServer);
           const proven = outcome === "connected";
           // The slow fallback carried, but leading with it next time would
           // only cost a check to find it slow again.

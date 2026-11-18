@@ -9,6 +9,7 @@ import {
   type EgressVerdict,
   type TunnelServer,
 } from "@shared/lib/egress";
+import { tunnelServerOf, type DialledCredential } from "@shared/lib/tunnel-server";
 import type { VpnStatus } from "./vpn";
 
 /** What the phone is entitled to say about its tunnel, given what it has
@@ -181,6 +182,48 @@ export function rejectionIsEvidence(verdict: EgressVerdict): boolean {
   return verdict.state === "bypassingTunnel" || verdict.state === "unreachable";
 }
 
+/** A rung's server for the phone's egress check, its baseline, the health
+ * poll and the API's endpoint order: its addresses, with every endpoint on
+ * them passed over while its tunnel is up -- whatever the engine.
+ *
+ * The shared rule (`reachesServerAround` in tunnel-server.ts) takes the
+ * phones' Xray and WireGuard to reach their server through the tunnel, and
+ * so kept that server's own mirror as a witness. For Xray that was read
+ * from the source and is wrong in effect: the node refuses its own Xray's
+ * connections to its own address (the self-loop guard,
+ * installer/lib/agent.sh `install_self_loop_guard`: an iptables OUTPUT
+ * reject of NEW connections from the uid Xray runs as to the node's own
+ * public IPv4). Measured on the emulator on 2026-11-17: through its own
+ * tunnel the node's mirror ended every TLS handshake with EOF, while
+ * through another location's tunnel and on the bare line it answered.
+ * With the pass's baseline from that mirror -- the last endpoint that
+ * worked leads the list, and on a filtered network that is often a mirror
+ * -- every rung on that server asked only it (`sameEndpointOnly`), heard
+ * nothing, and was torn down as not carrying, over a tunnel that worked.
+ *
+ * So the check never depends on an endpoint hosted on the server it
+ * tunnels through. The proof is unchanged in kind -- a baseline and a
+ * reading from the same endpoint, an endpoint elsewhere -- and it is taken
+ * from elsewhere: the baseline walk passes that server's endpoints over
+ * (`askedAroundTunnel` sends the dashboard back for a fresh one when the
+ * pass's first baseline came from there), and so does every reading. What
+ * this costs: where that server's mirror is the only endpoint answering on
+ * the bare line, there is no baseline, and the rung lands as "Connected,
+ * not confirmed" -- never as proven, never as accused. A relay's entry,
+ * whose own mirror is reached through the exit and would have answered,
+ * loses that witness too; the credential does not say which routes are
+ * relays. WireGuard is treated the same: its path to the node's own
+ * address has not been measured either way, and "not confirmed" is the
+ * cheaper mistake.
+ *
+ * `reachedAround: true` is the egress check's word for exactly that
+ * treatment (see `TunnelServer` in the shared egress.ts); the shared rule
+ * stays as it is for the desktop clients. */
+export async function phoneTunnelServerOf(user: DialledCredential): Promise<TunnelServer> {
+  const server = await tunnelServerOf(user, "phone");
+  return { addresses: server.addresses, reachedAround: true };
+}
+
 /** Our nodes' public addresses, for `captureBaselineIp`'s
  * `nodeAddresses`. Shared with Windows, which passes them too now; see
  * `nodeAddressesOf` in the shared tunnel-server.ts. */
@@ -225,11 +268,11 @@ export function takeBaseline(
  * "bypassingTunnel" on every poll of a working tunnel. The dashboard
  * keeps those out of baselines; see `nodeAddressesOf`.
  *
- * `tunnelServer` is the connected rung's server. Where the phone reaches
- * it around the tunnel (IKEv2, by assumption), an endpoint on it is
- * passed over on every walk here, and a baseline from one is never asked
- * alone; through the tunnel (Xray, WireGuard, by the source) it is as
- * good a witness as any. See `TunnelServer` in the shared egress.ts. */
+ * `tunnelServer` is the connected rung's server, as `phoneTunnelServerOf`
+ * gives it: an endpoint on it is passed over on every walk here, and a
+ * baseline from one is never asked alone, whatever the engine -- through
+ * its own Xray tunnel the node does not answer at all. See
+ * `phoneTunnelServerOf`, and `TunnelServer` in the shared egress.ts. */
 export async function pollEgress(baseline: BaselineIp | null, tunnelServer?: TunnelServer): Promise<EgressVerdict> {
   if (baseline === null) return verifyEgress(null, { tunnelServer });
   const own = await verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer });
