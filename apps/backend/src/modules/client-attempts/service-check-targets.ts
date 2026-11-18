@@ -53,6 +53,18 @@ export function isServiceCheckHost(host: string): boolean {
   return ALLOWED_HOSTS.has(normaliseHost(host));
 }
 
+/** The list entry a result names: its key and its host must both match
+ * one entry of the current or previous list. The key is what the panel
+ * groups by and shows, so a key not tied to its host would let a modified
+ * client file an allowed host's result under any name it liked. */
+export function serviceCheckTargetFor(key: string, host: string): ServiceCheckTarget | null {
+  const wanted = normaliseHost(host);
+  return (
+    [...SERVICE_CHECK_TARGETS, ...PREVIOUS_SERVICE_CHECK_TARGETS].find((t) => t.key === key && normaliseHost(t.host) === wanted) ??
+    null
+  );
+}
+
 /** The label staff read for a key, from the current list or the previous. */
 export function serviceCheckLabel(key: string): string | null {
   return [...SERVICE_CHECK_TARGETS, ...PREVIOUS_SERVICE_CHECK_TARGETS].find((t) => t.key === key)?.label ?? null;
