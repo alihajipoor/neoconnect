@@ -49,15 +49,18 @@ export class CustomerActivityController {
   }
 
   /** Diagnostics bundles the customer sent from the app, newest first,
-   * paged; X-Total-Count carries the total. The same staff as /activity. */
+   * paged; X-Total-Count carries the total. `ref` (8 hex characters)
+   * narrows it to the customer's bundle with that reference. The same
+   * staff as /activity. */
   @Get(":id/diagnostics")
   async diagnostics(
     @Param("id", new ParseUUIDPipe()) id: string,
     @Res({ passthrough: true }) res: Response,
     @Query("take") take?: string,
     @Query("skip") skip?: string,
+    @Query("ref") ref?: string,
   ) {
-    return sendPage(res, await this.insights.diagnostics(id, { take, skip }));
+    return sendPage(res, await this.insights.diagnostics(id, { take, skip, ref }));
   }
 
   /** What the servers counted, per hour and as sessions over `hours`

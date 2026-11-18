@@ -7,7 +7,9 @@ import {
   deviceFactsLine,
   addressKindText,
   resolvedText,
+  diagnosticsApiPath,
   diagnosticsHref,
+  lookupReference,
   egressText,
   factsByDevice,
   lastRunCounts,
@@ -217,6 +219,15 @@ describe("diagnostics links", () => {
   });
 
   it("accepts only a hex reference from the query", () => {
+    expect(diagnosticsApiPath(ID, { take: 20, skip: 0 })).toBe(`/customers/${ID}/diagnostics?take=20`);
+    expect(diagnosticsApiPath(ID, { take: 20, skip: 40 })).toBe(`/customers/${ID}/diagnostics?take=20&skip=40`);
+    // A reference asks for that one bundle, whatever page it is on.
+    expect(diagnosticsApiPath(ID, { take: 20, skip: 40 }, "4F2A9C1E")).toBe(`/customers/${ID}/diagnostics?ref=4f2a9c1e`);
+    expect(diagnosticsApiPath(ID, { take: 20, skip: 0 }, "4f2a9c1e-0000-4000-8000-000000000000")).toBe(
+      `/customers/${ID}/diagnostics?ref=4f2a9c1e`,
+    );
+    expect(diagnosticsApiPath(ID, { take: 20, skip: 0 }, "4f2a")).toBe(`/customers/${ID}/diagnostics?take=20`);
+    expect(lookupReference("4f2a")).toBeNull();
     expect(parseReference("4F2A9C1E")).toBe("4f2a9c1e");
     expect(parseReference(" 4f2a9c1e ")).toBe("4f2a9c1e");
     expect(parseReference("nope!")).toBeUndefined();

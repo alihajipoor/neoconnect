@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import { Pager } from "@/components/dashboard/pager";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { CopyTextButton } from "./copy-text-button";
-import { diagnosticsHref, platformName, utcStamp } from "./diagnostics-format";
+import { diagnosticsApiPath, diagnosticsHref, lookupReference, platformName, utcStamp } from "./diagnostics-format";
 import { ReportDetailsBlock } from "./report-details";
 import { FoldedText, Muted, Section, TableBox, When, orNull } from "./view-parts";
 
@@ -25,10 +25,12 @@ export async function DiagnosticsView({
   skip: number;
 }) {
   const id = encodeURIComponent(customerId);
-  const query = new URLSearchParams({ take: String(take) });
-  if (skip > 0) query.set("skip", String(skip));
-  const [page, activity] = await Promise.all([
-    orNull(apiFetchList<CustomerDiagnostics>(`/customers/${id}/diagnostics?${query.toString()}`)),
+  // The referenced bundle is fetched on its own, so it opens whatever
+  // page of the list it is on; the list below stays paged.
+  const byRef = reference && lookupReference(reference) ? reference : undefined;
+  const [page, found, activity] = await Promise.all([
+    orNull(apiFetchList<CustomerDiagnostics>(diagnosticsApiPath(customerId, { take, skip }))),
+    byRef ? orNull(apiFetchList<CustomerDiagnostics>(diagnosticsApiPath(customerId, { take, skip }, byRef))) : null,
     // Only to name the device a bundle came from; without it the
     // platform is said instead.
     orNull(apiFetch<CustomerActivity>(`/customers/${id}/activity?attemptsTake=1`)),
@@ -53,8 +55,9 @@ export async function DiagnosticsView({
   }
 
   const devices = activity?.devices ?? [];
+  const matches = (b: CustomerDiagnostics) => b.reference.toLowerCase() === reference || b.id.toLowerCase() === reference;
   const selected = reference
-    ? (page.items.find((b) => b.reference.toLowerCase() === reference || b.id.toLowerCase() === reference) ?? null)
+    ? (found?.items.find(matches) ?? page.items.find(matches) ?? null)
     : (page.items[0] ?? null);
 
   return (
@@ -62,8 +65,9 @@ export async function DiagnosticsView({
       {reference && !selected ? (
         <Section title={`Bundle ${reference}`}>
           <Muted>
-            No bundle with this reference on this page of the list. It may be on another page, or older than the 60
-            days bundles are kept.
+            {byRef
+              ? "No bundle with this reference for this customer. It may be older than the 60 days bundles are kept."
+              : "No bundle with this reference on this page of the list. A full reference is 8 characters."}
           </Muted>
         </Section>
       ) : (

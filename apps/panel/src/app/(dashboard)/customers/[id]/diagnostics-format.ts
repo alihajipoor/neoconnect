@@ -315,6 +315,28 @@ export function diagnosticsHref(
   });
 }
 
+/** The API path for a customer's bundles: the page of the list, or, with
+ * a reference, the one bundle it names wherever it sits in the list
+ * (the API takes the 8-character reference; a full id is cut to it). */
+export function diagnosticsApiPath(customerId: string, page: { take: number; skip: number }, reference?: string): string {
+  const query = new URLSearchParams();
+  const ref = reference ? lookupReference(reference) : null;
+  if (ref) {
+    query.set("ref", ref);
+  } else {
+    query.set("take", String(page.take));
+    if (page.skip > 0) query.set("skip", String(page.skip));
+  }
+  return `/customers/${encodeURIComponent(customerId)}/diagnostics?${query.toString()}`;
+}
+
+/** The 8 hex characters the API looks a bundle up by, or null when the
+ * reference is too short to be one. */
+export function lookupReference(reference: string): string | null {
+  const ref = reference.trim().toLowerCase().slice(0, 8);
+  return /^[0-9a-f]{8}$/.test(ref) ? ref : null;
+}
+
 /** The bundle reference in a history link (`...&ref=ab12cd34`), or null. */
 export function referenceFromLink(link: string | null | undefined): string | null {
   if (!link) return null;

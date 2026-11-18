@@ -398,6 +398,23 @@ describe("CustomerInsightService client diagnostics", () => {
     });
   });
 
+  it("finds one bundle by its reference, scoped to the customer, whatever page it is on", async () => {
+    const { service, prisma } = build();
+    prisma.customerDiagnostics.count.mockResolvedValue(1);
+    await service.diagnostics(ME, { ref: " 0F1E2D3C ", skip: "40", take: "20" });
+    const where = { customerId: ME, id: { startsWith: "0f1e2d3c" } };
+    expect(prisma.customerDiagnostics.count.mock.calls[0][0]).toEqual({ where });
+    expect(prisma.customerDiagnostics.findMany.mock.calls[0][0]).toMatchObject({ where, skip: 0, take: 1 });
+  });
+
+  it("refuses a reference that is not 8 hex characters", async () => {
+    const { service, prisma } = build();
+    for (const ref of ["", "0f1e2d3", "0f1e2d3c4", "0f1e2d3g", "0f1e%"]) {
+      await expect(service.diagnostics(ME, { ref })).rejects.toBeInstanceOf(BadRequestException);
+    }
+    expect(prisma.customerDiagnostics.findMany).not.toHaveBeenCalled();
+  });
+
   it("404s diagnostics for a customer that does not exist", async () => {
     const { service, prisma } = build();
     prisma.customer.findUnique.mockResolvedValue(null);

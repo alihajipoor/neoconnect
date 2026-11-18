@@ -385,14 +385,22 @@ export class CustomerInsightService {
     return new Map(sessions.map((s) => [s.id, s.label]));
   }
 
-  /** The bundles the customer sent, newest first, paged. */
-  async diagnostics(customerId: string, query: { take?: string; skip?: string }): Promise<Page<CustomerDiagnosticsItem>> {
+  /** The bundles the customer sent, newest first, paged. With `ref` (the
+   * eight hex characters a bundle is quoted by), only the customer's
+   * bundle with that reference, whatever page it is on. */
+  async diagnostics(
+    customerId: string,
+    query: { take?: string; skip?: string; ref?: string },
+  ): Promise<Page<CustomerDiagnosticsItem>> {
+    const ref = query.ref === undefined ? undefined : query.ref.trim().toLowerCase();
+    if (ref !== undefined && !/^[0-9a-f]{8}$/.test(ref)) throw new BadRequestException("ref must be 8 hex characters");
     await this.mustExist(customerId);
-    const window = listWindow(query, { defaultTake: 20, maxTake: 100 });
+    const window = ref ? { skip: 0, take: 1 } : listWindow(query, { defaultTake: 20, maxTake: 100 });
+    const where: Prisma.CustomerDiagnosticsWhereInput = ref ? { customerId, id: { startsWith: ref } } : { customerId };
     const [total, rows] = await Promise.all([
-      this.prisma.customerDiagnostics.count({ where: { customerId } }),
+      this.prisma.customerDiagnostics.count({ where }),
       this.prisma.customerDiagnostics.findMany({
-        where: { customerId },
+        where,
         orderBy: { createdAt: "desc" },
         skip: window.skip,
         take: window.take,

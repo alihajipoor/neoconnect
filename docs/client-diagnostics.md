@@ -205,7 +205,9 @@ same intake as A: off-list services dropped, over 8 KB dropped.
     null`) each form a group of their own with server and protocol null.
 - `GET /customers/:id/diagnostics?take&skip`: `[{ id, reference,
   createdAt, platform, appVersion, sessionId, note, bundle }]`, newest
-  first, X-Total-Count.
+  first, X-Total-Count. `?ref=<8 hex>` instead returns only that
+  customer's bundle with that reference (400 for anything else), so the
+  viewer opens a bundle from History whatever page of the list it is on.
 - `GET /customers/:id/history` gains `DIAGNOSTICS_SENT`: title with the
   reference, detail "platform, version", link
   `/customers/:id?view=diagnostics&ref=<reference>`.

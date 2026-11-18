@@ -1310,7 +1310,8 @@ export interface InsightServiceChecks {
   }[];
 }
 
-/** One row of GET /customers/:id/diagnostics (X-Total-Count = total). */
+/** One row of GET /customers/:id/diagnostics (X-Total-Count = total);
+ * with `?ref=<8 hex>`, the customer's one bundle with that reference. */
 export interface CustomerDiagnostics {
   id: string;
   /** First 8 characters of id; what the customer quotes. */
