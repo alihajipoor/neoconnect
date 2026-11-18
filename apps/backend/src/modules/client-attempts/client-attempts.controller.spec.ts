@@ -154,3 +154,34 @@ describe("ClientAttemptsController.report customer", () => {
     });
   });
 });
+
+/** The device session a report is filed under comes from the verified
+ * token, never the body; the service then checks it is the customer's. */
+describe("ClientAttemptsController.report session", () => {
+  const jwt = new JwtService({});
+  const record = jest.fn();
+  const controller = new ClientAttemptsController(
+    { record } as unknown as ClientAttemptsService,
+    jwt,
+    new ConfigService({ customerJwt: { accessSecret: SECRET } }),
+  );
+  const contextFor = async (token: string | undefined, body: Record<string, unknown> = {}) => {
+    record.mockClear();
+    const req = { headers: token ? { authorization: `Bearer ${token}` } : {} } as unknown as Request;
+    await controller.report(body as unknown as ReportAttemptDto, req);
+    return record.mock.calls[0][1] as { customerId?: string; sessionId?: string };
+  };
+
+  it("hands the service the token's session with its customer", async () => {
+    expect(await contextFor(jwt.sign({ sub: "cust-1", sid: "s1" }, { secret: SECRET }))).toMatchObject({
+      customerId: "cust-1",
+      sessionId: "s1",
+    });
+  });
+
+  it("never takes one from the body, or from a token that does not verify", async () => {
+    expect((await contextFor(undefined, { sessionId: "s1" })).sessionId).toBeUndefined();
+    expect((await contextFor(jwt.sign({ sub: "cust-1", sid: "s1" }, { secret: "not-ours" }))).sessionId).toBeUndefined();
+    expect((await contextFor(jwt.sign({ sub: "cust-1" }, { secret: SECRET }))).sessionId).toBeUndefined();
+  });
+});

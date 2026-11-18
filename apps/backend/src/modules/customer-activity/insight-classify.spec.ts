@@ -216,6 +216,17 @@ describe("classifyFailure", () => {
     ).toBeNull();
   });
 
+  /** docs/client-diagnostics.md: a service check is its own category,
+   * never an attempt, and its failures are per target, not a cause. */
+  it("files a service check as 'check': not an attempt, no failure code, whatever its words", () => {
+    for (const outcome of ["SUCCESS", "OTHER"]) {
+      const r = report("SERVICE_CHECK", outcome, "connection timed out; handshake refused", true);
+      expect(classifyReport(r)).toBe("check");
+      expect(isConnectAttempt(r)).toBe(false);
+      expect(reportFailureCode({ ...r, rungResults: ["timed out"] })).toBeNull();
+    }
+  });
+
   it("falls back to the last failed rung when the reason is empty", () => {
     expect(
       reportFailureCode({ ...report("CONNECT", "OTHER", null, true), rungResults: ["up but unreachable", "up but too slow (1 kbps down, 1 kbps up)"] }),

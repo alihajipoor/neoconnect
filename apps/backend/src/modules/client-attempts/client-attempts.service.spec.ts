@@ -1,6 +1,7 @@
 import { ClientAttemptKind, ClientAttemptOutcome, Prisma } from "@prisma/client";
 import {
   ClientAttemptsService,
+  DIAGNOSTICS_KEEP_DAYS,
   KEEP_WITHOUT_ADDRESS_DAYS, RETENTION_DAYS,
   plausibleOccurredAt,
   recordedPlatform,
@@ -38,12 +39,22 @@ const build = () => {
       Promise.resolve(ip.startsWith("198.51.100.") ? { asn: 64500 } : ip.startsWith("192.0.2.") ? { asn: 64501 } : null),
   };
   const expectAddress = jest.fn().mockResolvedValue(undefined);
+  // Session "s-mine" belongs to customer "cust-1"; nothing else matches.
+  const findSession = jest.fn().mockImplementation(({ where }) =>
+    Promise.resolve(where.id === "s-mine" && where.customerId === "cust-1" ? { id: "s-mine" } : null),
+  );
+  const createBundle = jest.fn().mockResolvedValue({ id: "0f1e2d3c-4b5a-4968-8776-655443322110" });
+  const deleteBundles = jest.fn().mockResolvedValue({ count: 0 });
   const service = new ClientAttemptsService(
-    { clientAttempt: { create, deleteMany, updateMany, findMany, groupBy } } as unknown as PrismaService,
+    {
+      clientAttempt: { create, deleteMany, updateMany, findMany, groupBy },
+      customerSession: { findFirst: findSession },
+      customerDiagnostics: { create: createBundle, deleteMany: deleteBundles },
+    } as unknown as PrismaService,
     identity as unknown as NetworkIdentityService,
     { expect: expectAddress } as unknown as SourceAddressesService,
   );
-  return { service, create, deleteMany, updateMany, findMany, groupBy, expectAddress, created };
+  return { service, create, deleteMany, updateMany, findMany, groupBy, expectAddress, created, findSession, createBundle, deleteBundles };
 };
 
 /** The per-ISP tags count people by network, so the network on a row has
@@ -392,5 +403,101 @@ describe("ClientAttemptsService.record asks the server for the customer's addres
     expectAddress.mockRejectedValue(new Error("unexpected"));
     await expect(service.record(report({ routeId: "route-1" }), through)).resolves.toBeUndefined();
     expect(create).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** docs/client-diagnostics.md: the device session, the details, bundles. */
+describe("ClientAttemptsService client diagnostics", () => {
+  it("stores the session only when the token's session is that customer's", async () => {
+    const { service, create } = build();
+    await service.record(report(), { customerId: "cust-1", sessionId: "s-mine" });
+    expect(create.mock.calls[0][0].data.sessionId).toBe("s-mine");
+
+    create.mockClear();
+    await service.record(report(), { customerId: "cust-1", sessionId: "s-someone-else" });
+    expect(create.mock.calls[0][0].data.sessionId).toBeNull();
+
+    create.mockClear();
+    await service.record(report(), { sessionId: "s-mine" });
+    expect(create.mock.calls[0][0].data.sessionId).toBeNull();
+  });
+
+  it("drops the session with the customer when the foreign key refuses the row", async () => {
+    const { service, create } = build();
+    create.mockRejectedValueOnce(new Error("foreign key")).mockResolvedValueOnce({});
+    await service.record(report(), { customerId: "cust-1", sessionId: "s-mine" });
+    expect(create.mock.calls[1][0].data).toMatchObject({ customerId: null, sessionId: null });
+  });
+
+  it("stores no details for an old payload, unchanged otherwise", async () => {
+    const { service, create } = build();
+    await service.record(report({ attempts: [{ protocol: "Fast", result: "connected" }] }), {});
+    const data = create.mock.calls[0][0].data;
+    expect(data.detailsJson).toBe(Prisma.DbNull);
+    expect(data.sessionId).toBeNull();
+    expect(data.attemptsJson).toEqual([{ protocol: "Fast", result: "connected" }]);
+  });
+
+  it("stores the details with off-list service results removed", async () => {
+    const { service, create } = build();
+    await service.record(
+      report({
+        kind: ClientAttemptKind.SERVICE_CHECK,
+        outcome: ClientAttemptOutcome.OTHER,
+        details: {
+          via: "tunnel",
+          targetsVersion: 1,
+          services: [
+            { key: "google", host: "www.google.com", ok: true, stage: "ok", tlsMs: 120 },
+            { key: "mine", host: "private.example.com", ok: false, stage: "dns" },
+          ],
+        },
+      }),
+      {},
+    );
+    expect(create.mock.calls[0][0].data.detailsJson).toEqual({
+      via: "tunnel",
+      targetsVersion: 1,
+      services: [{ key: "google", host: "www.google.com", ok: true, stage: "ok", tlsMs: 120 }],
+    });
+  });
+
+  it("keeps the report and drops details over 8 KB", async () => {
+    const { service, create } = build();
+    await service.record(report({ reason: "kept", details: { errorKind: "x".repeat(9000) } }), {});
+    expect(create.mock.calls[0][0].data).toMatchObject({ reason: "kept", detailsJson: Prisma.DbNull });
+  });
+
+  it("files a diagnostics bundle under the customer and answers with its reference", async () => {
+    const { service, createBundle } = build();
+    const answer = await service.recordDiagnostics(
+      {
+        platform: "windows",
+        appVersion: "0.9.57",
+        note: "slow",
+        platformDiagnostics: "text",
+        details: { device: { os: "windows" }, services: [{ key: "a", host: "example.org", ok: true, stage: "ok" }] },
+      },
+      { customerId: "cust-1", sessionId: "s-mine" },
+    );
+    expect(answer).toEqual({ id: "0f1e2d3c-4b5a-4968-8776-655443322110", reference: "0f1e2d3c" });
+    expect(createBundle.mock.calls[0][0].data).toEqual({
+      customerId: "cust-1",
+      sessionId: "s-mine",
+      platform: "windows",
+      appVersion: "0.9.57",
+      note: "slow",
+      bundleJson: { details: { device: { os: "windows" } }, platformDiagnostics: "text" },
+    });
+  });
+
+  it("deletes bundles older than 60 days in the same sweep", async () => {
+    const { service, deleteBundles } = build();
+    const before = Date.now();
+    await service.prune();
+    const cutoff = (deleteBundles.mock.calls[0][0].where.createdAt.lt as Date).getTime();
+    expect(DIAGNOSTICS_KEEP_DAYS).toBe(60);
+    expect(cutoff).toBeGreaterThanOrEqual(before - 60 * 86_400_000);
+    expect(cutoff).toBeLessThanOrEqual(Date.now() - 60 * 86_400_000);
   });
 });

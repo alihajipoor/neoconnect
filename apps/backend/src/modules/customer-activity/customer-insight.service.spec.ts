@@ -66,6 +66,7 @@ function build(rows: ReturnType<typeof row>[] = []) {
     paymentTransaction: { findMany: jest.fn().mockResolvedValue([]) },
     supportTicket: { findMany: jest.fn().mockResolvedValue([]) },
     adminAuditEntry: { findMany: jest.fn().mockResolvedValue([]) },
+    customerDiagnostics: { findMany: jest.fn().mockResolvedValue([]), count: jest.fn().mockResolvedValue(0) },
     $queryRaw: jest.fn().mockResolvedValue([]),
   };
   const asn = { orgOf: jest.fn(() => "Example Net"), countryOfAsn: jest.fn(() => "ZZ") };
@@ -297,5 +298,138 @@ describe("CustomerInsightService.history", () => {
 describe("shortenIds", () => {
   it("cuts each uuid to eight characters", () => {
     expect(shortenIds(`/api/subscriptions/${SUB}/renew`)).toBe("/api/subscriptions/bbbbbbbb…/renew");
+  });
+});
+
+/** docs/client-diagnostics.md, on the staff side. */
+describe("CustomerInsightService client diagnostics", () => {
+  const SESSION = "cccccccc-3333-4333-8333-333333333333";
+  const google = { key: "google", host: "www.google.com", ok: true, stage: "ok", tlsMs: 110, firstByteMs: 240, status: 204 };
+
+  it("reads device facts and service checks into the insight, a check never counted as an attempt", async () => {
+    const rows = [
+      row({
+        kind: "SERVICE_CHECK",
+        outcome: "OTHER",
+        routeId: ROUTE,
+        protocol: "Stealth",
+        sessionId: SESSION,
+        reason: "timed out",
+        detailsJson: { via: "tunnel", targetsVersion: 1, services: [google, { key: "x", host: "x.com", ok: false, stage: "tls" }] },
+        createdAt: new Date(NOW - 5 * MIN),
+      }),
+      row({
+        sessionId: SESSION,
+        detailsJson: { device: { model: "Pixel 7", os: "android" }, net: { type: "cellular", dns: ["192.0.2.53"] } },
+        createdAt: new Date(NOW - 10 * MIN),
+      }),
+      row({ platform: "windows", createdAt: new Date(NOW - 20 * MIN) }),
+    ];
+    const { service, prisma } = build(rows);
+    prisma.customerSession.findMany.mockResolvedValue([{ id: SESSION, label: "Android phone (Pixel 7)" }]);
+    const insight = await service.insight(ME, {}, NOW);
+
+    // Only the customer's own sessions are looked up for a label.
+    expect(prisma.customerSession.findMany.mock.calls[0][0].where).toEqual({ customerId: ME, id: { in: [SESSION] } });
+    expect(insight.reports.check).toBe(1);
+    expect(insight.connect.tried).toBe(2);
+    expect(insight.failures).toEqual([]);
+    expect(insight.deviceFacts).toEqual([
+      expect.objectContaining({
+        sessionId: SESSION,
+        label: "Android phone (Pixel 7)",
+        lastSeenAt: new Date(NOW - 5 * MIN).toISOString(),
+        device: { model: "Pixel 7", os: "android" },
+        net: { type: "cellular", dns: ["192.0.2.53"] },
+        tunnel: null,
+      }),
+    ]);
+    expect(insight.serviceChecks).toMatchObject({
+      runs: 1,
+      lastRunAt: new Date(NOW - 5 * MIN).toISOString(),
+      latest: [
+        expect.objectContaining({ key: "google", ok: true, tlsMs: 110, server: "alpha", protocol: "Stealth", via: "tunnel" }),
+        expect.objectContaining({ key: "x", ok: false, stage: "tls" }),
+      ],
+      byServer: [{ server: "alpha", protocol: "Stealth", runs: 1, perService: [{ key: "google", ok: 1, failed: 0 }, { key: "x", ok: 0, failed: 1 }] }],
+    });
+  });
+
+  it("returns details, session and rung times on each attempt, null for an old row", async () => {
+    const { service } = build([
+      row({ sessionId: SESSION, detailsJson: { errorKind: "handshake_timeout" }, attemptsJson: [{ protocol: "Fast", result: "timed out", ms: 8000 }] }),
+      row({ attemptsJson: [{ protocol: "Fast", result: "connected" }] }),
+    ]);
+    const page = await service.attempts(ME, {}, NOW);
+    expect(page.items[0]).toMatchObject({ sessionId: SESSION, details: { errorKind: "handshake_timeout" }, rungs: [{ ms: 8000 }] });
+    expect(page.items[1]).toMatchObject({ sessionId: null, details: null, rungs: [{ ms: null }] });
+  });
+
+  it("pages the customer's diagnostics bundles with their references", async () => {
+    const { service, prisma } = build();
+    prisma.customerDiagnostics.count.mockResolvedValue(1);
+    prisma.customerDiagnostics.findMany.mockResolvedValue([
+      {
+        id: "0f1e2d3c-4b5a-4968-8776-655443322110",
+        createdAt: new Date(NOW),
+        platform: "windows",
+        appVersion: "0.9.57",
+        sessionId: null,
+        note: "slow",
+        bundleJson: { details: { device: { os: "windows" } }, platformDiagnostics: "text" },
+      },
+    ]);
+    const page = await service.diagnostics(ME, { take: "500" });
+    expect(prisma.customerDiagnostics.findMany.mock.calls[0][0]).toMatchObject({ where: { customerId: ME }, take: 100, skip: 0 });
+    expect(page).toEqual({
+      total: 1,
+      items: [
+        {
+          id: "0f1e2d3c-4b5a-4968-8776-655443322110",
+          reference: "0f1e2d3c",
+          createdAt: new Date(NOW).toISOString(),
+          platform: "windows",
+          appVersion: "0.9.57",
+          sessionId: null,
+          note: "slow",
+          bundle: { details: { device: { os: "windows" } }, platformDiagnostics: "text" },
+        },
+      ],
+    });
+  });
+
+  it("404s diagnostics for a customer that does not exist", async () => {
+    const { service, prisma } = build();
+    prisma.customer.findUnique.mockResolvedValue(null);
+    await expect(service.diagnostics(ME, {})).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it("puts each bundle in the history with its reference and a link to it", async () => {
+    const { service, prisma } = build();
+    prisma.customerDiagnostics.findMany.mockResolvedValue([
+      { id: "0f1e2d3c-4b5a-4968-8776-655443322110", createdAt: new Date(NOW - MIN), platform: "android", appVersion: "0.2.41" },
+    ]);
+    const page = await service.history(ME, {}, { role: "SUPPORT" } as never, NOW);
+    expect(page.items[0]).toEqual({
+      at: new Date(NOW - MIN).toISOString(),
+      type: "DIAGNOSTICS_SENT",
+      title: "Diagnostics sent, reference 0f1e2d3c",
+      detail: "android, 0.2.41",
+      actor: null,
+      link: `/customers/${ME}?view=diagnostics&ref=0f1e2d3c`,
+    });
+  });
+
+  it("reads the fleet summary from service checks in the window, hours bounded", async () => {
+    const { service, prisma } = build([
+      row({ kind: "SERVICE_CHECK", customerId: "c1", routeId: ROUTE, protocol: "Stealth", detailsJson: { via: "tunnel", services: [google] } }),
+    ] as never);
+    const summary = await service.serviceChecksSummary({ hours: "9999" }, NOW);
+    const query = prisma.clientAttempt.findMany.mock.calls[0][0];
+    expect(query.where).toEqual({ kind: "SERVICE_CHECK", createdAt: { gte: new Date(NOW - 336 * 3_600_000) } });
+    expect(query.select).toEqual({ customerId: true, routeId: true, protocol: true, asn: true, detailsJson: true });
+    expect(summary).toMatchObject({ hours: 336, runs: 1, customers: 1 });
+    expect(summary.byServer[0]).toMatchObject({ server: "alpha", protocol: "Stealth", perService: [{ key: "google", ok: 1, medianTlsMs: 110 }] });
+    expect(summary.byNetwork[0]).toMatchObject({ asn: 64500, name: "Example Net", country: "ZZ" });
   });
 });

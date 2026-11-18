@@ -2,6 +2,7 @@ import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { CustomerActivityService } from "./customer-activity.service";
 import { CustomerInsightService } from "./customer-insight.service";
+import { ClientAttemptsService } from "../client-attempts/client-attempts.service";
 
 /** The customer activity reads against a real, migrated Postgres -- what
  * the other spec cannot check, since it stands in for Prisma: the raw
@@ -105,6 +106,8 @@ const MIN = 60_000;
   }, 60_000);
 
   afterAll(async () => {
+    // Reports outlive their customer (SET NULL), so they go first, by id.
+    await prisma.clientAttempt.deleteMany({ where: { customerId: { in: [ids.customer, ids.stranger].filter(Boolean) } } });
     if (ids.node) await prisma.usageRecord.deleteMany({ where: { nodeId: ids.node } });
     if (ids.protocolUser) await prisma.protocolUser.delete({ where: { id: ids.protocolUser } });
     const subscriptions = [ids.subscription, ids.strangerSubscription].filter(Boolean);
@@ -198,6 +201,68 @@ const MIN = 60_000;
         lastTrafficAt: new Date(now - 2 * MIN).toISOString(),
         bytesLast10Min: "300",
       },
+    ]);
+  });
+
+  /** docs/client-diagnostics.md: the new columns and table, written by
+   * the intake and read back by the staff views. Bundles and sessions go
+   * with the customer (CASCADE) in afterAll. */
+  it("stores a service check's details and session, and a bundle, and reads them back", async () => {
+    const session = await prisma.customerSession.create({ data: { customerId: ids.customer, label: `ca-${tag} phone` } });
+    const intake = new ClientAttemptsService(
+      prisma as never,
+      { verify: () => null, isOwnAddress: () => Promise.resolve(false), identify: () => Promise.resolve(null) } as never,
+      { expect: () => Promise.resolve() } as never,
+    );
+    await intake.record(
+      {
+        kind: "SERVICE_CHECK",
+        outcome: "OTHER",
+        platform: "android",
+        appVersion: "0.2.99",
+        routeId: ids.route,
+        protocol: "Stealth",
+        details: {
+          via: "tunnel",
+          device: { model: "Example" },
+          services: [
+            { key: "google", host: "www.google.com", ok: true, stage: "ok", tlsMs: 120 },
+            { key: "nope", host: "not-on-the-list.example.com", ok: true, stage: "ok" },
+          ],
+        },
+      } as never,
+      { customerId: ids.customer, sessionId: session.id },
+    );
+    const bundle = await intake.recordDiagnostics(
+      { platform: "android", appVersion: "0.2.99", note: "db spec", platformDiagnostics: "text" } as never,
+      { customerId: ids.customer, sessionId: session.id },
+    );
+
+    const insight = new CustomerInsightService(
+      prisma as never,
+      service,
+      { orgOf: () => null, countryOfAsn: () => null } as never,
+      { cachedVersion: () => null, primeVersions: () => Promise.resolve() } as never,
+    );
+    const page = await insight.attempts(ids.customer, { kind: "SERVICE_CHECK" }, Date.now());
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]).toMatchObject({
+      category: "check",
+      sessionId: session.id,
+      details: { via: "tunnel", device: { model: "Example" }, services: [{ key: "google", host: "www.google.com" }] },
+    });
+    expect((page.items[0].details as { services: unknown[] }).services).toHaveLength(1);
+
+    const read = await insight.insight(ids.customer, {}, Date.now());
+    expect(read.serviceChecks.runs).toBe(1);
+    expect(read.deviceFacts[0]).toMatchObject({ sessionId: session.id, label: `ca-${tag} phone`, device: { model: "Example" } });
+
+    const bundles = await insight.diagnostics(ids.customer, {});
+    expect(bundles.items[0]).toMatchObject({ id: bundle.id, reference: bundle.reference, sessionId: session.id, note: "db spec" });
+
+    const summary = await insight.serviceChecksSummary({ hours: 1 }, Date.now());
+    expect(summary.byServer.find((s) => s.server === `ca-${tag}`)?.perService).toEqual([
+      expect.objectContaining({ key: "google", ok: 1, medianTlsMs: 120 }),
     ]);
   });
 });

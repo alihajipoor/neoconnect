@@ -111,10 +111,10 @@ describe("CustomerActivityService.activity", () => {
       reason: "every server tried",
       sessionSeconds: null,
       rungs: [
-        { protocol: "Fast", server: "alpha", result: "up but unreachable", carried: false, downKbps: null, upKbps: null },
-        { protocol: "Stealth", server: "relay-1 -> beta", result: "connected", carried: true, downKbps: 12_400, upKbps: 1_750 },
-        { protocol: "Stealth HTTPS", server: null, result: "refused", carried: null, downKbps: null, upKbps: null },
-        { protocol: "IKEv2", server: null, result: "not available with selected apps", carried: null, downKbps: null, upKbps: null },
+        { protocol: "Fast", server: "alpha", result: "up but unreachable", carried: false, downKbps: null, upKbps: null, ms: null },
+        { protocol: "Stealth", server: "relay-1 -> beta", result: "connected", carried: true, downKbps: 12_400, upKbps: 1_750, ms: null },
+        { protocol: "Stealth HTTPS", server: null, result: "refused", carried: null, downKbps: null, upKbps: null, ms: null },
+        { protocol: "IKEv2", server: null, result: "not available with selected apps", carried: null, downKbps: null, upKbps: null, ms: null },
       ],
     });
     expect(attempts[1]).toMatchObject({ at: new Date(NOW - 5 * MIN).toISOString(), network: null, ip: null, rungs: [] });
@@ -420,10 +420,10 @@ describe("parseRungs", () => {
     expect(parseRungs(null)).toEqual([]);
     expect(parseRungs({ protocol: "Fast" } as any)).toEqual([]);
     expect(
-      parseRungs([1, "x", null, ["a"], { protocol: 7, result: "ok", routeId: "", carried: "yes", downKbps: "fast", upKbps: -3 }] as any),
-    ).toEqual([{ protocol: null, routeId: null, result: "ok", carried: null, downKbps: null, upKbps: null }]);
-    expect(parseRungs([{ protocol: "Stealth", result: "connected", downKbps: 12_400, upKbps: 1.5 }] as any)).toEqual([
-      { protocol: "Stealth", routeId: null, result: "connected", carried: null, downKbps: 12_400, upKbps: null },
+      parseRungs([1, "x", null, ["a"], { protocol: 7, result: "ok", routeId: "", carried: "yes", downKbps: "fast", upKbps: -3, ms: 1.5 }] as any),
+    ).toEqual([{ protocol: null, routeId: null, result: "ok", carried: null, downKbps: null, upKbps: null, ms: null }]);
+    expect(parseRungs([{ protocol: "Stealth", result: "connected", downKbps: 12_400, upKbps: 1.5, ms: 4200 }] as any)).toEqual([
+      { protocol: "Stealth", routeId: null, result: "connected", carried: null, downKbps: 12_400, upKbps: null, ms: 4200 },
     ]);
   });
 });

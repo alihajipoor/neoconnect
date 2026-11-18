@@ -3,7 +3,7 @@ import { GUARDS_METADATA } from "@nestjs/common/constants";
 import { ROLES_KEY } from "../../common/decorators/roles.decorator";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../../common/guards/roles.guard";
-import { CustomerActivityController, MonitorController } from "./customer-activity.controller";
+import { CustomerActivityController, MonitorController, ServiceChecksController } from "./customer-activity.controller";
 
 /** Who may see a customer's connections, and who may sign their devices
  * out. With no @Roles, JwtAuthGuard lets every staff role through and
@@ -20,8 +20,13 @@ describe("customer activity roles", () => {
     expect(Reflect.getMetadata(ROLES_KEY, handler(MonitorController.prototype, "live"))).toBeUndefined();
   });
 
-  it("GET insight, attempts, usage and history: on the same guarded controller, any staff role", () => {
-    for (const name of ["insight", "attempts", "usage", "history"]) {
+  it("GET /service-checks/summary: any staff role, as GET /customers/:id", () => {
+    expect(guardsOf(ServiceChecksController)).toContain(JwtAuthGuard);
+    expect(Reflect.getMetadata(ROLES_KEY, handler(ServiceChecksController.prototype, "summary"))).toBeUndefined();
+  });
+
+  it("GET insight, attempts, usage, history and diagnostics: on the same guarded controller, any staff role", () => {
+    for (const name of ["insight", "attempts", "usage", "history", "diagnostics"]) {
       const h = handler(CustomerActivityController.prototype, name);
       expect(typeof h).toBe("function");
       expect(Reflect.getMetadata(ROLES_KEY, h)).toBeUndefined();
