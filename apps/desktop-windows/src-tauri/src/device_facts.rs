@@ -152,15 +152,15 @@ impl NetFacts {
 }
 
 /// Resolver addresses as the server takes them: IP literals, each once,
-/// in the canonical spelling, at most four.
+/// in the canonical spelling, at most four. Never one that names the
+/// router's hardware (`names_hardware`).
 pub fn dns_list<S: AsRef<str>>(list: &[S]) -> Vec<String> {
     let mut kept: Vec<String> = Vec::new();
     for entry in list {
-        // An IPv6 resolver with a zone ("fe80::1%12") is the same address.
         let raw = entry.as_ref().trim();
         let raw = raw.split('%').next().unwrap_or(raw);
         let Ok(ip) = raw.parse::<std::net::IpAddr>() else { continue };
-        if ip.is_unspecified() {
+        if ip.is_unspecified() || names_hardware(&ip) {
             continue;
         }
         let spelled = ip.to_string();
@@ -172,6 +172,20 @@ pub fn dns_list<S: AsRef<str>>(list: &[S]) -> Vec<String> {
         }
     }
     kept
+}
+
+/// An IPv6 resolver that is link-local (fe80::/10, what home routers
+/// commonly advertise as themselves) or whose interface ID is EUI-64 (ff:fe
+/// in its middle, built from a MAC). Either can carry the router's
+/// hardware address, the gateway fingerprint that is never sent.
+fn names_hardware(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(_) => false,
+        std::net::IpAddr::V6(v6) => {
+            let octets = v6.octets();
+            (v6.segments()[0] & 0xffc0) == 0xfe80 || (octets[11] == 0xff && octets[12] == 0xfe)
+        }
+    }
 }
 
 /// Trimmed, cut to `max` characters (never inside one), and left out when
@@ -266,6 +280,22 @@ mod tests {
             "198.51.100.7",
             "198.51.100.8",
         ]);
-        assert_eq!(list, ["192.0.2.1", "fe80::1", "2001:db8::1", "198.51.100.7"]);
+        assert_eq!(list, ["192.0.2.1", "2001:db8::1", "198.51.100.7", "198.51.100.8"]);
+    }
+
+    /// A router's link-local resolver, and any IPv6 one built from a MAC,
+    /// would carry the gateway's hardware address: dropped.
+    #[test]
+    fn dns_never_carries_the_routers_hardware() {
+        let list = dns_list(&[
+            "fe80::1a2b:3cff:fe4d:5e6f%7",
+            "fe80::1",
+            "febf::1",
+            "2001:db8:0:1:1a2b:3cff:fe4d:5e6f",
+            "fd00::1a2b:3cff:fe4d:5e6f",
+            "2001:db8::53",
+            "192.0.2.1",
+        ]);
+        assert_eq!(list, ["2001:db8::53", "192.0.2.1"]);
     }
 }

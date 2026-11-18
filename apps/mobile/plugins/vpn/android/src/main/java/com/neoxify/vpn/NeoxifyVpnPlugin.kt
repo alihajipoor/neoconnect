@@ -1096,9 +1096,19 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         }
         quietly {
             val dns = JSArray()
-            for (server in link.dnsServers.take(4)) {
+            for (server in link.dnsServers) {
+                // A router's link-local resolver, or any IPv6 one whose
+                // interface ID is built from a MAC (EUI-64, ff:fe in the
+                // middle), names the router's hardware: never sent.
+                // device_facts.rs drops them again.
+                if (server is java.net.Inet6Address) {
+                    val bytes = server.address
+                    if (server.isLinkLocalAddress) continue
+                    if (bytes.size == 16 && bytes[11] == 0xff.toByte() && bytes[12] == 0xfe.toByte()) continue
+                }
                 val text = server.hostAddress ?: continue
                 dns.put(text.substringBefore('%'))
+                if (dns.length() == 4) break
             }
             if (dns.length() > 0) net.put("dns", dns)
         }
