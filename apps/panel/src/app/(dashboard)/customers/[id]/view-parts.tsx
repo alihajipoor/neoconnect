@@ -29,11 +29,12 @@ export function ViewTabs({
   keep: Record<string, string | number | undefined>;
 }) {
   return (
-    // One row that scrolls sideways if it ever runs out of width, so the
-    // views never wrap into two rows of tabs on a phone.
+    // One row that never wraps into two rows of tabs. On a phone the tabs
+    // are tighter so all five fit from 360px, with the active one in view
+    // and no script; past that the row scrolls sideways.
     <nav
       aria-label="Customer views"
-      className="-mx-1 flex gap-1 overflow-x-auto border-b border-white/10 px-1 whitespace-nowrap [scrollbar-width:none]"
+      className="-mx-1 flex gap-1 overflow-x-auto border-b border-white/10 px-1 whitespace-nowrap [scrollbar-width:none] max-sm:gap-0"
     >
       {VIEWS.map(({ view, label }) => {
         const active = view === current;
@@ -43,7 +44,7 @@ export function ViewTabs({
             href={customerHref(customerId, { ...keep, view })}
             aria-current={active ? "page" : undefined}
             className={cn(
-              "-mb-px shrink-0 border-b-2 px-3 py-2 text-sm transition-colors max-lg:flex max-lg:min-h-10 max-lg:items-center",
+              "-mb-px shrink-0 border-b-2 px-3 py-2 text-sm transition-colors max-lg:flex max-lg:min-h-10 max-lg:items-center max-sm:min-[380px]:px-1.5 max-sm:min-[380px]:text-[13px] max-[379px]:px-1 max-[379px]:text-xs",
               active
                 ? "border-primary font-medium text-foreground"
                 : "border-transparent text-muted-foreground hover:text-foreground",
