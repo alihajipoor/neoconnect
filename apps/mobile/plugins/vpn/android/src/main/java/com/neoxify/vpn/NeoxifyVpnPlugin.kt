@@ -16,6 +16,7 @@ import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Base64
 import android.util.Log
@@ -956,6 +957,202 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         // A missing icon costs a placeholder, not the list.
         Log.w(TAG, "icon unavailable", e)
         null
+    }
+
+    /** Its own thread, not `engine`'s: a connect can hold that one for
+     * twenty seconds, and the Rust side gives up on this after one. */
+    private val factsThread: ExecutorService = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "neoxify-facts").apply { isDaemon = true }
+    }
+
+    /**
+     * What the phone and the network under the tunnel are, for a connect
+     * report (docs/client-diagnostics.md, `details.device`/`details.net`).
+     *
+     * Never rejects. Each fact is read on its own and left out when it
+     * cannot be read -- a missing service, a SecurityException, an API
+     * this Android does not have -- so one failure costs only that fact.
+     * Nothing here names a place the customer went: the only addresses
+     * are the network's own DNS servers, and the only name is the Private
+     * DNS host typed into the phone's settings.
+     */
+    @Command
+    fun deviceFacts(invoke: Invoke) {
+        factsThread.execute {
+            val facts = JSObject()
+            try {
+                readDeviceFacts(facts)
+            } catch (e: Throwable) {
+                Log.w(TAG, "device facts incomplete", e)
+            }
+            invoke.resolve(facts)
+        }
+    }
+
+    private fun readDeviceFacts(facts: JSObject) {
+        facts.put("os", "Android")
+        quietly {
+            val maker = Build.MANUFACTURER?.trim().orEmpty()
+            val model = Build.MODEL?.trim().orEmpty()
+            val name = when {
+                model.isEmpty() -> maker
+                maker.isEmpty() || model.startsWith(maker, ignoreCase = true) -> model
+                else -> "$maker $model"
+            }
+            if (name.isNotEmpty()) facts.put("model", name)
+        }
+        quietly {
+            val release = Build.VERSION.RELEASE?.trim().orEmpty()
+            if (release.isNotEmpty()) facts.put("osVersion", release)
+        }
+        quietly {
+            val pm = activity.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (pm != null) facts.put("lowPower", pm.isPowerSaveMode)
+        }
+        quietly {
+            val am = activity.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            if (am != null) {
+                val info = ActivityManager.MemoryInfo()
+                am.getMemoryInfo(info)
+                if (info.availMem > 0) facts.put("memFreeMb", info.availMem / (1024L * 1024L))
+            }
+        }
+        val cm = runCatching {
+            activity.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        }.getOrNull() ?: return
+        // Data Saver is on whether or not this app is on its allow list.
+        quietly {
+            when (cm.restrictBackgroundStatus) {
+                ConnectivityManager.RESTRICT_BACKGROUND_STATUS_ENABLED,
+                ConnectivityManager.RESTRICT_BACKGROUND_STATUS_WHITELISTED -> facts.put("dataSaver", true)
+                ConnectivityManager.RESTRICT_BACKGROUND_STATUS_DISABLED -> facts.put("dataSaver", false)
+                else -> {}
+            }
+        }
+        val net = JSObject()
+        runCatching { readUnderlyingNetwork(cm, net) }
+            .onFailure { Log.w(TAG, "network facts unavailable", it) }
+        quietly { otherVpn(cm)?.let { net.put("otherVpn", it) } }
+        if (net.length() > 0) facts.put("net", net)
+    }
+
+    /**
+     * The network the tunnel rides on. While our tunnel is up the active
+     * network is the tunnel itself, so the networks are walked instead:
+     * anything with a VPN transport is skipped, and of the rest one that
+     * reaches the internet, validated first, Wi-Fi or Ethernet before
+     * cellular (the order Android itself prefers for its default).
+     */
+    private fun readUnderlyingNetwork(cm: ConnectivityManager, net: JSObject) {
+        @Suppress("DEPRECATION")
+        val all = cm.allNetworks
+        var best: android.net.Network? = null
+        var bestCaps: NetworkCapabilities? = null
+        var bestScore = -1
+        var readAny = all.isEmpty()
+        for (network in all) {
+            val caps = try { cm.getNetworkCapabilities(network) } catch (e: Exception) { null } ?: continue
+            readAny = true
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
+            var score = 0
+            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) score += 2
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) score += 1
+            if (score > bestScore) {
+                best = network
+                bestCaps = caps
+                bestScore = score
+            }
+        }
+        if (best == null || bestCaps == null) {
+            // Only when the networks could be read and none under us
+            // reaches the internet; an unreadable list is left out.
+            if (readAny) net.put("type", "none")
+            return
+        }
+        val caps: NetworkCapabilities = bestCaps
+        val type = when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+            else -> "other"
+        }
+        net.put("type", type)
+        net.put("metered", !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
+
+        val link = try { cm.getLinkProperties(best) } catch (e: Exception) { null } ?: return
+        quietly {
+            var v4 = false
+            var v6 = false
+            for (la in link.linkAddresses) {
+                val address = la.address
+                if (address is java.net.Inet4Address && !address.isLoopbackAddress) v4 = true
+                if (address is java.net.Inet6Address && !address.isLoopbackAddress &&
+                    !address.isLinkLocalAddress) v6 = true
+            }
+            net.put("ipv4", v4)
+            net.put("ipv6", v6)
+        }
+        quietly {
+            val dns = JSArray()
+            for (server in link.dnsServers.take(4)) {
+                val text = server.hostAddress ?: continue
+                dns.put(text.substringBefore('%'))
+            }
+            if (dns.length() > 0) net.put("dns", dns)
+        }
+        // Private DNS exists from Android 9. What is reported is what is
+        // in force on this network: "auto" that found no DNS-over-TLS
+        // server is not active, so it reads "off".
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            quietly {
+                val host = link.privateDnsServerName
+                when {
+                    !link.isPrivateDnsActive -> net.put("privateDns", "off")
+                    !host.isNullOrBlank() -> {
+                        net.put("privateDns", "host")
+                        net.put("privateDnsHost", host)
+                    }
+                    else -> net.put("privateDns", "auto")
+                }
+            }
+        }
+    }
+
+    /**
+     * Whether another app's VPN is up: false when there is no VPN network
+     * at all, true when there is one and it cannot be ours, null (left
+     * out) when it may be ours. Android 10 and later name a VPN's owner
+     * to the owner itself, so one owned by this app is recognised there;
+     * any sign of our own tunnel -- a running WireGuard, a published Xray
+     * state, our platform IKEv2 -- also leaves it out.
+     */
+    private fun otherVpn(cm: ConnectivityManager): Boolean? {
+        @Suppress("DEPRECATION")
+        val vpnCaps = cm.allNetworks.mapNotNull { network ->
+            try { cm.getNetworkCapabilities(network) } catch (e: Exception) { null }
+        }.filter { it.hasTransport(NetworkCapabilities.TRANSPORT_VPN) }
+        if (vpnCaps.isEmpty()) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val me = android.os.Process.myUid()
+            if (vpnCaps.any { it.ownerUid == me }) return null
+        }
+        if (wireguardSince != null || activeProtocol != null) return null
+        val xrayClaim = runCatching { NeoxifyTunService.readState(activity)?.first }.getOrNull()
+        if (xrayClaim == NeoxifyTunService.STATE_UP) return null
+        val ikev2 = runCatching { Ikev2Engine.isUp(activity) }.getOrNull() ?: return null
+        if (ikev2) return null
+        return true
+    }
+
+    /** One fact's read: a failure costs that fact and nothing else. */
+    private inline fun quietly(read: () -> Unit) {
+        try {
+            read()
+        } catch (e: Exception) {
+            Log.w(TAG, "a device fact was unavailable", e)
+        }
     }
 
     companion object {
