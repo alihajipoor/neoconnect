@@ -1,11 +1,11 @@
 # Client diagnostics: fuller reports, the service check, diagnostics bundles
 
-Status: **stage A, backend only**, on `claude/client-diagnostics`. The
-server can receive, store and show everything below. **No app sends any
-of it yet**; the apps are a later stage, built against this document.
-Unit tests only: the migration has not yet run against Postgres (CI is
-its first run), and nothing here has met a real client, phone or
-censored network -- see *What is not proven* at the end.
+Status: on `claude/client-diagnostics`, unreleased. The server can
+receive, store and show everything below (stage A); the native commands
+and the apps' shared TypeScript that sends it are written (stage B, see
+*Per platform*). Unit tests only: the migration has not yet run against
+Postgres (CI is its first run), and nothing here has met a real
+backend, phone or censored network -- see *What is not proven* at the end.
 
 This document is the contract. The apps are built against it, not
 against the backend code; change the two together.
@@ -328,6 +328,82 @@ up. The pinned-path reading on iOS rests on a monitor pinned to an
 interface type describing that interface even while a tunnel is up; that
 too is unproven.
 
+### What the apps send (the shared TypeScript)
+
+One implementation, `apps/desktop-windows/src/lib`, which the phone app
+imports: `report-details.ts` (the `details` object), `attempts.ts` (the
+report queue), `service-check.ts`, `diagnostics-bundle.ts`, and the
+Support screen (`screens/Support.tsx`).
+
+- **Details on every CONNECT, SIGN_IN, REGISTER and SESSION report**:
+  `device` (from `device_facts`, asked once a run, with the app's
+  interface language) and `net` (the same command, at most every 30 s).
+  On CONNECT and SESSION also `tunnel`: the mode (`full`, `custom`,
+  `gaming`) and the resolvers the app sets inside the tunnel, noted when a
+  rung lands, and on Windows `splitTunnel`, `ipv6Blocked` and
+  `dnsUnprotected` from the service's status. On CONNECT also the last
+  data check's two legs and the last exit check's state and time, each
+  within two minutes and each sent once; `errorKind` on a failed connect;
+  `reconnect` on an automatic reconnect's report. Every field is copied by
+  name and held to the validators above; the whole is capped at 6,000
+  bytes, giving up parts in the order reconnect, egress, dataCheck,
+  tunnel, device, net (service error words first, service results last)
+  rather than all at once. A native command that is missing or fails
+  leaves its part out; with `device_facts` missing there is no `device`
+  or `net` at all, the language included.
+- **`attempts[].ms`** on both ladders: the time from a rung's start to its
+  line (`timedRungs`), the landed rung's taken as it lands.
+- **The one resend.** A 400 to a report carrying `details` or a rung's
+  `ms` is answered by sending it once more without both, so a validator
+  mismatch never loses the basic report.
+- **The end of a session**: a second SESSION report, `outcome: OTHER` and
+  no `sessionSeconds` (so it is never read as ten minutes of health), with
+  `details.sessionEnd` -- `disconnected` (the customer's press), `lost`
+  (a drop, or the health checks giving up), `replaced` (another route took
+  over) -- for a session of at least 60 s from its first passing check,
+  once. From the live tracker (`session-report.ts`), never from the local
+  session log, which stays on the device. `app_closed` and `unknown` are
+  never sent: a killed app sends nothing.
+- **The service check**, after a proven connect's success report (and
+  its speed sample): only when the list says `enabled`, the app is in
+  front, the tunnel is still the one landed on, the route's last run is
+  older than `everyHours`, and the app's own traffic goes through the
+  tunnel -- on Windows and Linux not in Custom or gaming mode; on a phone
+  always (Android puts this app in the tunnel when apps are chosen; iOS
+  has no per-app routing). Three at a time, 8 s each, 25 s in all; a
+  target not answered by then is left out and the run is `OTHER`. A
+  disconnect stops it and nothing is reported. The list is kept 24 h and
+  the last run per route in the app's store (`service-checks.json`).
+- **Support screen, every platform**: "Connection test" runs the check
+  now and shows each service by its label as reachable or not, and the
+  way it went (through the VPN, without it, or -- for a tunnel this run of
+  the app did not bring up -- neither). It is reported as a SERVICE_CHECK
+  with that `via` (left out when unknown). "Send diagnostics to support"
+  (signed-in only) shows exactly the body it sends -- the facts, the
+  test's results if one was run, and on Windows and Linux the Copy text --
+  and answers with the reference.
+
+**Windows** sends all of the above. Its `device_facts` gives no
+`dataSaver`, `metered` or `otherVpn` (table above); `tunnel.dns` is
+`1.1.1.1` for the Xray family and IKEv2 (the service's `TUN_DNS` and
+`IKEV2_DNS`), a WireGuard credential's own `dns`, and left out for
+OpenVPN, whose resolvers the server pushes.
+
+**Linux** (`apps/desktop-linux`) runs the same TypeScript but has neither
+native command yet. So it sends: `tunnel.mode` and `splitTunnel`,
+`ipv6Blocked`, `dnsUnprotected` where its helper's status gives them;
+`errorKind`, `dataCheck`, `egress`, `reconnect`, `sessionEnd`, and
+rung `ms`. It sends no `device` and no `net` (no `device_facts`), no
+`tunnel.dns` (its engines' resolvers are not known to this layer), and no
+service results: without `probe_service` every probe gives no answer, so
+an automatic run reports nothing and the Support screen's test says it
+could not start. Its bundle still carries the Copy text.
+
+**Android and iOS** send what their `device_facts` gives (table above);
+`tunnel.dns` is `1.1.1.1` for Xray (`TUN_DNS`) and a WireGuard
+credential's `dns`, and left out for IKEv2; their bundles carry no Copy
+text, since neither phone has one.
+
 ## What is not proven
 
 - The migration has not run against Postgres. CI's migration step
@@ -335,8 +411,12 @@ too is unproven.
   `test/sql/rollback-check.sql`) and the database spec
   (`customer-activity.db.spec.ts`, under `NEOXIFY_DB_SPECS=1`) are its
   first runs.
-- No app sends any of this. Every shape here is checked only by unit
-  tests with a mocked database.
+- No app has sent any of this to a real backend. Every shape is checked
+  by unit tests on both sides, against mocks; that the apps' validators
+  match the server's is held by reading the DTOs, not by a round trip.
+- None of the app side has run on a real network: not the facts with a
+  tunnel up, not a probe through a tunnel, not a 400 resend, not the
+  Support screen against the live API.
 - Whether a fixed list of nine targets, tried once a day, says anything
   useful about a server under real filtering is unknown until real runs
   arrive. The views count what arrives; they do not interpret it.
