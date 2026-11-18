@@ -119,6 +119,13 @@ describe("lines beside the counts", () => {
     expect(credentialLine(creds({ total: 0 }))).toBe("No credentials");
   });
 
+  it("does not call the credentials of a subscription that is not active 'on the servers'", () => {
+    expect(credentialLine(creds({ status: "EXPIRED", active: 0 }))).toBe("64 credentials, switched off with the subscription");
+    expect(credentialLine(creds({ status: "SUSPENDED", active: 0, total: 1 }))).toBe("1 credential, switched off with the subscription");
+    expect(credentialLine(creds({ status: "EXPIRED", active: 2 }))).toBe("64 credentials, 2 still marked active");
+    expect(credentialLine(creds({ status: "EXPIRED", active: 0 }))).not.toContain("on the servers");
+  });
+
   it("compares with other customers only when there are enough", () => {
     expect(othersLine({ customers: 9, connected: 7, hours: 48 }, 2)).toBe("7 of 9 connected");
     expect(othersLine(null, 3)).toBe("too few to compare");

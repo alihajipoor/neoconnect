@@ -125,13 +125,21 @@ export function customerHref(customerId: string, params: Record<string, string |
 }
 
 /** One quiet line under a subscription: whether its credentials are on
- * the servers, and how many the device limit holds. */
+ * the servers, and how many the device limit holds. A subscription that
+ * is not ACTIVE (expired, suspended) has its credentials switched off
+ * (status DISABLED, usage.service disableProtocolUsers) while they keep
+ * their provisionedAt, so "on the servers" would read as working; the
+ * line says what the statuses show instead. */
 export function credentialLine(c: InsightCredentials): string {
   if (c.total === 0) return "No credentials";
+  const noun = `${c.total} ${c.total === 1 ? "credential" : "credentials"}`;
+  if (c.status !== "ACTIVE") {
+    return c.active === 0
+      ? `${noun}, switched off with the subscription`
+      : `${noun}, ${c.active} still marked active`;
+  }
   const parts = [
-    c.notProvisioned === 0
-      ? `${c.total} ${c.total === 1 ? "credential" : "credentials"}, all on the servers`
-      : `${c.notProvisioned} of ${c.total} not yet on the servers`,
+    c.notProvisioned === 0 ? `${noun}, all on the servers` : `${c.notProvisioned} of ${c.total} not yet on the servers`,
   ];
   if (c.held > 0) parts.push(`${c.held} held by the device limit`);
   return parts.join(", ");
