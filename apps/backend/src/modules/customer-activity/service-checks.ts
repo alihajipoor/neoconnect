@@ -212,7 +212,7 @@ export function fleetSummary(
     const services = parseServices(r.details);
 
     if (r.asn !== null) {
-      const n = networks.get(r.asn) ?? { runs: 0, customers: new Set<string>(), per: new Map() };
+      const n = networks.get(r.asn) ?? { runs: 0, customers: new Set<string>(), per: new Map<string, { ok: number; failed: number }>() };
       n.runs += 1;
       if (r.customerId) n.customers.add(r.customerId);
       for (const s of services) {
@@ -230,11 +230,11 @@ export function fleetSummary(
     if (str(r.details?.via) !== "tunnel") continue;
     const server = r.routeId ? (serverOf.get(r.routeId) ?? null) : null;
     const key = `${server ?? ""}\u0000${r.protocol ?? ""}`;
-    const g = servers.get(key) ?? { server, protocol: r.protocol, runs: 0, customers: new Set<string>(), per: new Map() };
+    const g = servers.get(key) ?? { server, protocol: r.protocol, runs: 0, customers: new Set<string>(), per: new Map<string, Tally>() };
     g.runs += 1;
     if (r.customerId) g.customers.add(r.customerId);
     for (const s of services) {
-      const t = g.per.get(s.key) ?? { ok: 0, failed: 0, tls: [], firstByte: [], failStages: new Map() };
+      const t: Tally = g.per.get(s.key) ?? { ok: 0, failed: 0, tls: [], firstByte: [], failStages: new Map<string, number>() };
       if (s.ok) t.ok += 1;
       else {
         t.failed += 1;
