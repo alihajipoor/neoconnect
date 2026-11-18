@@ -1,4 +1,12 @@
-import type { CustomerFailureCode, CustomerHistoryEventType, CustomerReportCategory } from "@/lib/types";
+import type {
+  CustomerFailureCode,
+  CustomerHistoryEventType,
+  CustomerReportCategory,
+  ReportDetails,
+  ReportNetDetails,
+  ReportTunnelDetails,
+  ServiceCheckStage,
+} from "@/lib/types";
 
 /** Plain-English names for the codes the customer insight endpoints send.
  *
@@ -72,6 +80,80 @@ export const HISTORY_LABELS: Record<CustomerHistoryEventType, string> = {
   DIAGNOSTICS_SENT: "Diagnostics",
   STAFF_ACTION: "Staff",
 };
+
+/** How far a service check got, in plain words: "failed at <stage>" for
+ * a failure; "ok" is the one stage that means it worked. */
+export const STAGE_LABELS: Record<ServiceCheckStage, string> = {
+  dns: "name lookup",
+  connect: "connecting",
+  tls: "secure handshake",
+  http: "the reply",
+  ok: "reachable",
+};
+
+export type NetType = NonNullable<ReportNetDetails["type"]>;
+export type PrivateDnsMode = NonNullable<ReportNetDetails["privateDns"]>;
+export type TunnelMode = NonNullable<ReportTunnelDetails["mode"]>;
+export type SessionEndCause = NonNullable<ReportDetails["sessionEnd"]>["cause"];
+export type CheckVia = NonNullable<ReportDetails["via"]>;
+
+/** What the device was on, as the app said. */
+export const NET_TYPE_LABELS: Record<NetType, string> = {
+  wifi: "Wi-Fi",
+  cellular: "Mobile data",
+  ethernet: "Ethernet",
+  other: "Other network",
+  none: "No network",
+  unknown: "Network type not known",
+};
+
+/** Android's Private DNS setting. */
+export const PRIVATE_DNS_LABELS: Record<PrivateDnsMode, string> = {
+  off: "Private DNS off",
+  auto: "Private DNS automatic",
+  host: "Private DNS set to a host",
+  unknown: "Private DNS not known",
+};
+
+/** The app's tunnel mode. */
+export const TUNNEL_MODE_LABELS: Record<TunnelMode, string> = {
+  full: "Whole device",
+  custom: "Custom (chosen apps)",
+  gaming: "Gaming",
+};
+
+/** Why a session ended, as the app reported it. */
+export const SESSION_END_LABELS: Record<SessionEndCause, string> = {
+  disconnected: "Disconnected by the customer",
+  lost: "Connection lost",
+  replaced: "Replaced by a new connection",
+  app_closed: "App closed",
+  unknown: "Ended, cause not known",
+};
+
+/** Where a service check ran. */
+export const VIA_LABELS: Record<CheckVia, string> = {
+  tunnel: "through the VPN",
+  direct: "outside the VPN",
+};
+
+export function stageLabel(stage: string): string {
+  return STAGE_LABELS[stage as ServiceCheckStage] ?? stage;
+}
+
+/** "reachable", or "failed at secure handshake". */
+export function serviceOutcome(ok: boolean, stage: string): string {
+  if (ok) return STAGE_LABELS.ok;
+  if (!stage || stage === "ok") return "failed";
+  return `failed at ${stageLabel(stage)}`;
+}
+
+/** A label from one of the maps above, or the value itself when the map
+ * does not know it (rows outlive client versions). */
+export function labelOf(map: Record<string, string>, value: string | null | undefined): string | null {
+  if (!value) return null;
+  return map[value] ?? value;
+}
 
 export function categoryLabel(category: string): string {
   return CATEGORY_LABELS[category as CustomerReportCategory] ?? category;

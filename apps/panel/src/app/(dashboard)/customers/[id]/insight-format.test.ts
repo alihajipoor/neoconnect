@@ -56,6 +56,7 @@ function attempt(over: Partial<CustomerAttemptDetail> = {}): CustomerAttemptDeta
 describe("query parsing", () => {
   it("falls back to the defaults for anything not on offer", () => {
     expect(parseView("usage")).toBe("usage");
+    expect(parseView("diagnostics")).toBe("diagnostics");
     expect(parseView("nope")).toBe("overview");
     expect(parseView(undefined)).toBe("overview");
     expect(parseDays("30")).toBe(30);
@@ -164,6 +165,26 @@ describe("copy for support", () => {
     expect(text).toContain("1. example-1 Xray VLESS+REALITY: not carrying traffic, carried nothing");
     expect(text).not.toContain("192.0.2.10");
     expect(text).not.toContain("@");
+  });
+
+  it("adds each try's time and a service check's results by key, never by host or address", () => {
+    const base = attempt();
+    const text = supportText(
+      attempt({
+        rungs: [{ ...base.rungs[0], ms: 4200 }],
+        details: {
+          services: [
+            { key: "google", host: "www.google.com", ok: true, stage: "ok", firstByteMs: 340, address: "198.51.100.5" },
+            { key: "x", host: "x.com", ok: false, stage: "dns", error: "lookup x.com: no such host" },
+          ],
+        },
+      }),
+    );
+    expect(text).toContain("carried nothing, took 4.2 s");
+    expect(text).toContain("  google: reachable, first byte 340 ms");
+    expect(text).toContain("  x: failed at name lookup (lookup <address>: no such host)");
+    expect(text).not.toContain("198.51.100.5");
+    expect(text).not.toContain("www.google.com");
   });
 
   it("adds the received time for a queued report and the API trace", () => {

@@ -8,19 +8,22 @@ import type {
 import { KINDS, OUTCOMES } from "@/lib/attempt-labels";
 import { protocolLabel } from "@/lib/protocol-labels";
 import { duration } from "@/lib/time";
-import { CATEGORY_LABELS, FAILURE_LABELS, categoryLabel, failureLabel } from "./insight-labels";
+import { CATEGORY_LABELS, FAILURE_LABELS, categoryLabel, failureLabel, serviceOutcome } from "./insight-labels";
 
 /** Pure helpers for the customer page's views: reading the query string,
  * building links and API queries, and the short sentences shown beside
  * the counts. No React, so each can be unit tested. */
 
-export type CustomerView = "overview" | "connections" | "usage" | "history";
+export type CustomerView = "overview" | "connections" | "usage" | "history" | "diagnostics";
 
 export const VIEWS: { view: CustomerView; label: string }[] = [
   { view: "overview", label: "Overview" },
   { view: "connections", label: "Connections" },
   { view: "usage", label: "Usage" },
   { view: "history", label: "History" },
+  // Bundles the customer sent with "Send diagnostics"; the history's
+  // DIAGNOSTICS_SENT events link here with &ref=<reference>.
+  { view: "diagnostics", label: "Diagnostics" },
 ];
 
 export function parseView(value: string | undefined): CustomerView {
@@ -216,10 +219,22 @@ export function supportText(attempt: CustomerAttemptDetail): string {
     attempt.rungs.forEach((rung, i) => {
       const carried = rung.carried === true ? ", carried traffic" : rung.carried === false ? ", carried nothing" : "";
       const speed = speedText(rung.downKbps, rung.upKbps);
+      const took = typeof rung.ms === "number" ? `, took ${(rung.ms / 1000).toFixed(1)} s` : "";
       lines.push(
-        `  ${i + 1}. ${rung.server ?? "unknown server"} ${rung.protocol ? protocolLabel(rung.protocol) : "unknown protocol"}: ${maskAddresses(rung.result)}${carried}${speed ? `, about ${speed}` : ""}`,
+        `  ${i + 1}. ${rung.server ?? "unknown server"} ${rung.protocol ? protocolLabel(rung.protocol) : "unknown protocol"}: ${maskAddresses(rung.result)}${carried}${speed ? `, about ${speed}` : ""}${took}`,
       );
     });
+  }
+  // Service-check results name their fixed-list target by key, never by
+  // host or resolved address: the copy travels to customers.
+  const services = attempt.details?.services ?? [];
+  if (services.length > 0) {
+    lines.push("Service check:");
+    for (const s of services) {
+      const stage = serviceOutcome(s.ok, s.stage);
+      const first = typeof s.firstByteMs === "number" ? `, first byte ${s.firstByteMs} ms` : "";
+      lines.push(`  ${s.key}: ${stage}${first}${s.error ? ` (${maskAddresses(s.error)})` : ""}`);
+    }
   }
   if (attempt.apiTrace) {
     const trace = attempt.apiTrace;
