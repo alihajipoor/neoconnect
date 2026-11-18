@@ -20,6 +20,10 @@ mod door_http;
 mod health_ip;
 #[path = "../../../desktop-windows/src-tauri/src/relay_http.rs"]
 mod relay_http;
+// The service check's one request, timed step by step; it shares
+// control_plane_probe's TLS configuration and error words.
+#[path = "../../../desktop-windows/src-tauri/src/service_probe.rs"]
+mod service_probe;
 #[path = "../../../desktop-windows/src-tauri/src/window_fit.rs"]
 mod window_fit;
 
@@ -176,6 +180,7 @@ pub fn run() {
             webview_version,
             control_plane_probe::probe_control_plane,
             control_plane_probe::cancel_control_plane_probe,
+            service_probe::probe_service,
             relay_http::relay_request,
             door_http::door_request,
             bundle_scope::grant_bundle_scope,
