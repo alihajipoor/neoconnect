@@ -1,0 +1,80 @@
+import type { CustomerFailureCode, CustomerHistoryEventType, CustomerReportCategory } from "@/lib/types";
+
+/** Plain-English names for the codes the customer insight endpoints send.
+ *
+ * Each map is a full Record over the backend's union, so a code added
+ * there without a label here fails the typecheck; insight-labels.test.ts
+ * checks the same at run time. The failure labels say what the app
+ * reported and never a cause it did not report -- the same rule as the
+ * backend's own wording (insight-classify.ts). */
+
+/** What a report was. */
+export const CATEGORY_LABELS: Record<CustomerReportCategory, string> = {
+  connect: "Connect",
+  reconnect: "Automatic reconnect",
+  api: "Could not reach our API",
+  config: "Server settings changed",
+  cancelled: "Stopped by the customer",
+  session: "Stayed up",
+  signin: "Sign-in",
+  register: "Sign-up",
+  other: "Other",
+};
+
+/** What a failure was, from the app's own words. */
+export const FAILURE_LABELS: Record<CustomerFailureCode, string> = {
+  API_UNREACHABLE: "Could not reach our API",
+  NOT_CARRYING: "Tunnel came up but carried no traffic",
+  TOO_SLOW: "Tunnel worked but was too slow to keep",
+  NO_RESPONSE_UDP_BLOCKED: "IKEv2 on Windows: no response from the server",
+  DID_NOT_COMPLETE: "IKEv2 on Android: did not complete in time",
+  SERVER_NOT_REACHED: "Timeout, refusal or failed handshake",
+  NO_NETWORK: "No network connection on the device",
+  SERVICE_NOT_ANSWERING: "Windows background service did not answer",
+  ADAPTER_MISSING: "Tunnel network adapter missing",
+  ENGINE_FAILED: "VPN engine did not start",
+  PERMISSION_DENIED: "VPN permission declined or removed",
+  OTHER_VPN_ACTIVE: "Another VPN held the device",
+  CANCELLED_BY_CUSTOMER: "Stopped by the customer",
+  SUBSCRIPTION_INACTIVE: "Subscription did not allow a connection",
+  DATA_CAP_REACHED: "Plan data used up",
+  DEVICE_LIMIT: "Refused by the device limit",
+  WRONG_PASSWORD: "Wrong email or password",
+  EMAIL_EXISTS: "Email already has an account",
+  BAD_REFERRAL_CODE: "Referral code not accepted",
+  CODE_NOT_ACCEPTED: "Verification, reset or recovery code not accepted",
+  SESSION_REFUSED: "Session refused (signed out, revoked or disabled)",
+  CUSTOM_MODE_FAILED: "Custom mode did not start or stopped",
+  IKEV2_REFUSED: "IKEv2: server refused the connection or login",
+  TUNNEL_DROPPED: "Phone saw its tunnel drop",
+  RECONNECT_GAVE_UP: "Automatic reconnect stopped without a tunnel",
+  UNKNOWN: "Not recognised (see the app's words)",
+};
+
+/** The small badge on each account history event. */
+export const HISTORY_LABELS: Record<CustomerHistoryEventType, string> = {
+  ACCOUNT_CREATED: "Account",
+  EMAIL_VERIFIED: "Email",
+  IDENTITY_LINKED: "Sign-in method",
+  DEVICE_SIGNED_IN: "Device",
+  DEVICE_SIGNED_OUT: "Device",
+  SUBSCRIPTION_STARTED: "Subscription",
+  SUBSCRIPTION_ENDED: "Subscription",
+  CODE_REDEEMED: "Code",
+  PAYMENT: "Payment",
+  SUPPORT_TICKET: "Support",
+  FIRST_CONNECT: "First connect",
+  STAFF_ACTION: "Staff",
+};
+
+export function categoryLabel(category: string): string {
+  return CATEGORY_LABELS[category as CustomerReportCategory] ?? category;
+}
+
+export function failureLabel(code: string): string {
+  return FAILURE_LABELS[code as CustomerFailureCode] ?? code;
+}
+
+export function historyLabel(type: string): string {
+  return HISTORY_LABELS[type as CustomerHistoryEventType] ?? type;
+}
