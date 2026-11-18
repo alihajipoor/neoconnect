@@ -310,6 +310,10 @@ export class ClientAttemptsService {
     if (filters.kind) where.kind = filters.kind;
     if (filters.platform) where.platform = filters.platform;
     if (filters.failuresOnly) where.outcome = { not: ClientAttemptOutcome.SUCCESS };
+    // A service check with one unreachable target reports OTHER, and on
+    // filtered networks most do: listed as failures, they would bury the
+    // connects this list is for. Shown only when asked for by kind.
+    if (filters.failuresOnly && !filters.kind) where.kind = { not: ClientAttemptKind.SERVICE_CHECK };
 
     return this.prisma.clientAttempt.findMany({
       where,
@@ -324,12 +328,16 @@ export class ClientAttemptsService {
    * The useful signal in a beta is proportion, not volume: "nine of
    * eleven connects never reached the control plane" is a diagnosis,
    * while "eleven attempts" is not.
+   *
+   * Service checks are not attempts (docs/client-diagnostics.md): one
+   * unreachable target makes a run OTHER, and counted here they would
+   * inflate the failure share with runs that connected fine.
    */
   async summary(sinceHours = 24) {
     const since = new Date(Date.now() - sinceHours * 3_600_000);
     const rows = await this.prisma.clientAttempt.groupBy({
       by: ["outcome"],
-      where: { createdAt: { gte: since } },
+      where: { createdAt: { gte: since }, kind: { not: ClientAttemptKind.SERVICE_CHECK } },
       _count: { _all: true },
     });
     return rows.map((r) => ({ outcome: r.outcome, count: r._count._all }));

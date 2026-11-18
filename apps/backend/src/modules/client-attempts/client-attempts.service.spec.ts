@@ -269,6 +269,23 @@ describe("ClientAttemptsService.list", () => {
     expect(findMany.mock.calls[0][0].take).toBe(100);
     expect(findMany.mock.calls[0][0].where).toEqual({});
   });
+
+  /** A run with one unreachable target is OTHER; it is not a failed connect. */
+  it("leaves service checks out of the failures, unless asked for by kind", async () => {
+    const { service, findMany } = build();
+    await service.list({ failuresOnly: true });
+    expect(findMany.mock.calls[0][0].where.kind).toEqual({ not: ClientAttemptKind.SERVICE_CHECK });
+    await service.list({ failuresOnly: true, kind: ClientAttemptKind.SERVICE_CHECK });
+    expect(findMany.mock.calls[1][0].where.kind).toBe(ClientAttemptKind.SERVICE_CHECK);
+  });
+});
+
+describe("ClientAttemptsService.summary", () => {
+  it("counts no service check among the attempts", async () => {
+    const { service, groupBy } = build();
+    await service.summary(24);
+    expect(groupBy.mock.calls[0][0].where.kind).toEqual({ not: ClientAttemptKind.SERVICE_CHECK });
+  });
 });
 
 describe("ClientAttemptsService.prune", () => {
