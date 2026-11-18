@@ -1112,19 +1112,45 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             }
             if (dns.length() > 0) net.put("dns", dns)
         }
-        // Private DNS exists from Android 9. What is reported is what is
-        // in force on this network: "auto" that found no DNS-over-TLS
-        // server is not active, so it reads "off".
+        // Private DNS exists from Android 9. What is reported is the
+        // setting, when it can be read: "Automatic" is the default and is
+        // not active on a network whose resolver offers no DNS-over-TLS,
+        // so whether it is active cannot tell "Automatic, unused" from
+        // "Off". When the setting cannot be read, only what is active is
+        // said, and otherwise "unknown" -- never "off" on a guess.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             quietly {
-                val host = link.privateDnsServerName
-                when {
-                    !link.isPrivateDnsActive -> net.put("privateDns", "off")
-                    !host.isNullOrBlank() -> {
+                val active: Boolean? = try { link.isPrivateDnsActive } catch (e: Exception) { null }
+                val activeHost: String? = try { link.privateDnsServerName } catch (e: Exception) { null }
+                val mode: String? = try {
+                    Settings.Global.getString(activity.contentResolver, "private_dns_mode")
+                } catch (e: Exception) {
+                    null
+                }
+                when (mode?.trim()) {
+                    "off" -> net.put("privateDns", "off")
+                    "opportunistic" -> net.put("privateDns", "auto")
+                    "hostname" -> {
                         net.put("privateDns", "host")
-                        net.put("privateDnsHost", host)
+                        val host: String? = if (active == true && !activeHost.isNullOrBlank()) {
+                            activeHost
+                        } else {
+                            try {
+                                Settings.Global.getString(activity.contentResolver, "private_dns_specifier")
+                            } catch (e: Exception) {
+                                null
+                            }
+                        }
+                        if (!host.isNullOrBlank()) net.put("privateDnsHost", host.trim())
                     }
-                    else -> net.put("privateDns", "auto")
+                    else -> when {
+                        active == true && !activeHost.isNullOrBlank() -> {
+                            net.put("privateDns", "host")
+                            net.put("privateDnsHost", activeHost)
+                        }
+                        active == true -> net.put("privateDns", "auto")
+                        else -> net.put("privateDns", "unknown")
+                    }
                 }
             }
         }
