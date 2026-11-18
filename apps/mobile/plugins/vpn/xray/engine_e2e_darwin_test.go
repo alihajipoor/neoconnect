@@ -125,7 +125,7 @@ func TestEngineChild(t *testing.T) {
 				f.Close()
 			}
 		}
-		fmt.Printf("SAMPLE %d %d %d %d %d\n", time.Now().UnixMilli(), hb.Footprint, hb.FootprintPeak, hb.Heap, hb.Goroutines)
+		fmt.Printf("SAMPLE %d %d %d %d %d %d %d %d\n", time.Now().UnixMilli(), hb.Footprint, hb.FootprintPeak, hb.Heap, hb.Goroutines, hb.GateClosings, hb.GateClosedMs, hb.GateRefused)
 	}
 }
 
@@ -565,6 +565,8 @@ type sample struct {
 	ms                    int64
 	footprint, peak, heap int64
 	goroutines            int64
+	// The memory-pressure gate this run (gate_darwin.go).
+	gateClosings, gateClosedMs, gateRefused int64
 }
 
 type engine struct {
@@ -617,7 +619,7 @@ func startEngine(t *testing.T, config string) *engine {
 				continue
 			}
 			var s sample
-			if n, _ := fmt.Sscanf(line, "SAMPLE %d %d %d %d %d", &s.ms, &s.footprint, &s.peak, &s.heap, &s.goroutines); n == 5 {
+			if n, _ := fmt.Sscanf(line, "SAMPLE %d %d %d %d %d %d %d %d", &s.ms, &s.footprint, &s.peak, &s.heap, &s.goroutines, &s.gateClosings, &s.gateClosedMs, &s.gateRefused); n == 8 {
 				e.mu.Lock()
 				e.samples = append(e.samples, s)
 				e.mu.Unlock()

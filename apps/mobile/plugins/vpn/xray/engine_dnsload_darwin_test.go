@@ -81,6 +81,13 @@ type loadSpec struct {
 	lookups, quic       bool
 	downloads, uploads  int
 	slowRead, slowWrite int // bytes a second; 0: as fast as they go
+	// Floods: new TCP connections as fast as 16 workers open them (each
+	// echoes 1 KiB and closes), and new UDP flows as fast as 4 workers
+	// send them, each from a fresh port to a fresh destination.
+	tcpFlood, udpFlood bool
+	// Whether the memory-pressure gate may close. Never for the normal
+	// loads: closing there would refuse a phone's ordinary traffic.
+	gateMayClose bool
 }
 
 var appOpen = loadSpec{lookups: true, quic: true, downloads: 8, uploads: 4}
@@ -145,6 +152,10 @@ func TestEngineMemoryBudget(t *testing.T) {
 		{"app-open", appOpen, 25 * time.Second},
 		{"upload8-stalled", loadSpec{uploads: 8, slowWrite: 256 << 10}, 10 * time.Second},
 		{"download8-slowread", loadSpec{downloads: 8, slowRead: 256 << 10}, 10 * time.Second},
+		// Unpaced floods, far past any app. Before the gate the TCP one
+		// reached 107 MiB on Stealth and 400 MiB on Shadowsocks.
+		{"tcp-flood", loadSpec{tcpFlood: true, gateMayClose: true}, 15 * time.Second},
+		{"udp-flood", loadSpec{udpFlood: true, gateMayClose: true}, 10 * time.Second},
 	}
 	for _, transport := range e2eTransports {
 		if _, ok := all[transport]; !ok {
@@ -169,6 +180,12 @@ func TestEngineMemoryBudget(t *testing.T) {
 					t.Errorf("footprint peak %.1f MiB is over the %.0f MiB budget (EngineFootprintBudget)",
 						float64(r.footprintPeak)/(1<<20), float64(EngineFootprintBudget)/(1<<20))
 				}
+				// The gate must stay open through ordinary traffic: closing
+				// refuses the customer's new connections.
+				if !c.spec.gateMayClose && (r.gateClosings > 0 || r.gateRefused > 0) {
+					t.Errorf("the memory gate closed %d times (%d refused) under an ordinary load; its high mark is %.0f MiB",
+						r.gateClosings, r.gateRefused, float64(gateHighWater)/(1<<20))
+				}
 			})
 		}
 	}
@@ -177,13 +194,15 @@ func TestEngineMemoryBudget(t *testing.T) {
 type loadResult struct {
 	footprintPeak, footprintEnd, heapPeak, heapEnd int64
 	goroutinesPeak, goroutinesEnd                  int64
+	gateClosings, gateClosedMs, gateRefused        int64
 	note                                           string
 }
 
 func (r loadResult) String() string {
 	mib := func(v int64) float64 { return float64(v) / (1 << 20) }
-	return fmt.Sprintf("footprint peak %5.1f MiB end %5.1f  heap peak %5.1f MiB end %5.1f  goroutines peak %5d end %5d  %s",
-		mib(r.footprintPeak), mib(r.footprintEnd), mib(r.heapPeak), mib(r.heapEnd), r.goroutinesPeak, r.goroutinesEnd, r.note)
+	return fmt.Sprintf("footprint peak %5.1f MiB end %5.1f  heap peak %5.1f MiB end %5.1f  goroutines peak %5d end %5d  gate closed %d times, %.1f s, %d refused  %s",
+		mib(r.footprintPeak), mib(r.footprintEnd), mib(r.heapPeak), mib(r.heapEnd), r.goroutinesPeak, r.goroutinesEnd,
+		r.gateClosings, float64(r.gateClosedMs)/1000, r.gateRefused, r.note)
 }
 
 func measureLoad(t *testing.T, env *e2eEnv, config string, spec loadSpec, window time.Duration) loadResult {
@@ -206,6 +225,9 @@ func measureLoad(t *testing.T, env *e2eEnv, config string, spec loadSpec, window
 		if s.ms <= endAt {
 			last = s
 		}
+		r.gateClosings = max(r.gateClosings, s.gateClosings)
+		r.gateClosedMs = max(r.gateClosedMs, s.gateClosedMs)
+		r.gateRefused = max(r.gateRefused, s.gateRefused)
 	}
 	r.footprintEnd, r.heapEnd, r.goroutinesEnd = last.footprint, last.heap, last.goroutines
 	return r
@@ -340,6 +362,37 @@ func runLoad(e *engine, spec loadSpec, window time.Duration) string {
 		}()
 	}
 
+	var floodNote string
+	if spec.tcpFlood {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			floodNote = "tcp flood: " + shortConns(nil, e, 0, window) + "; "
+		}()
+	}
+	if spec.udpFlood {
+		var flows atomic.Int64
+		for w := 0; w < 4; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				payload := make([]byte, 100)
+				for n := w; time.Now().Before(deadline); n += 4 {
+					dst := tcpip.AddrFrom4([4]byte{198, 19, byte(n >> 8), byte(n)})
+					uc, err := gonet.DialUDP(e.stack, nil, &tcpip.FullAddress{NIC: 1, Addr: dst, Port: 5000}, ipv4.ProtocolNumber)
+					if err != nil {
+						continue
+					}
+					_, _ = uc.Write(payload)
+					uc.Close()
+					flows.Add(1)
+				}
+			}()
+		}
+		wg.Wait()
+		floodNote += fmt.Sprintf("udp flood: %.0f new flows a second; ", float64(flows.Load())/window.Seconds())
+	}
+
 	wg.Wait()
 	secs := window.Seconds()
 	note := fmt.Sprintf("down %.0f Mbit/s up %.0f Mbit/s", float64(down.Load())*8/1e6/secs, float64(up.Load())*8/1e6/secs)
@@ -347,7 +400,7 @@ func runLoad(e *engine, spec loadSpec, window time.Duration) string {
 		note = fmt.Sprintf("lookups %d/%d answered (%d over 1 s; unanswered A %d AAAA %d HTTPS %d); ",
 			answered.Load(), asked.Load(), slow.Load(), lost[0].Load(), lost[1].Load(), lost[2].Load()) + note
 	}
-	return note
+	return floodNote + note
 }
 
 // lookup sends one question from a fresh source port and waits up to 5 s

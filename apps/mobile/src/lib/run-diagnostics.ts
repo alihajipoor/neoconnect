@@ -130,6 +130,10 @@ interface Heartbeat {
   engine: string;
   core: string;
   corePatched: boolean;
+  // The memory-pressure gate this run (plugins/vpn/xray/gate_darwin.go):
+  // how often it closed, for how long in all, what it turned away. Null
+  // from an engine without one.
+  gate: { closings: number; closedMs: number; refused: number } | null;
 }
 
 function parse(text: string | null | undefined): Record<string, unknown> | null {
@@ -160,6 +164,10 @@ function heartbeatOf(value: unknown): Heartbeat | null {
     // is not sent.
     core: typeof h.core === "string" && /^v?[0-9][0-9A-Za-z.+-]{0,30}$/.test(h.core) ? h.core : "?",
     corePatched: h.corePatched === true,
+    gate:
+      num(h.gateClosings) !== null
+        ? { closings: num(h.gateClosings) ?? 0, closedMs: num(h.gateClosedMs) ?? 0, refused: num(h.gateRefused) ?? 0 }
+        : null,
   };
 }
 
@@ -172,7 +180,12 @@ const HEARTBEAT_STALE_S = 12;
 function memoryAndEngine(h: Heartbeat | null): string {
   if (!h) return "no heartbeat";
   const left = h.available >= 0 ? `, left ${mib(h.available)}` : "";
-  return `mem peak ${mib(h.footprintPeak)}, last ${mib(h.footprint)}${left}; engine ${h.engine}, core ${h.core}${h.corePatched ? " patched" : ""}`;
+  // Whether the engine ever had to refuse new connections to stay alive,
+  // and for how long: next to the peak, so a phone says if customers hit it.
+  const gate = h.gate
+    ? `, gate closed ${h.gate.closings}x for ${(h.gate.closedMs / 1000).toFixed(1)} s, ${h.gate.refused} refused`
+    : "";
+  return `mem peak ${mib(h.footprintPeak)}, last ${mib(h.footprint)}${left}${gate}; engine ${h.engine}, core ${h.core}${h.corePatched ? " patched" : ""}`;
 }
 
 /** One run described: its key (its start, unix seconds) and the clause.

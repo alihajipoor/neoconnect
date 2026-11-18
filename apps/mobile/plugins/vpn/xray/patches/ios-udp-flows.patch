@@ -95,7 +95,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  		select {
  		case conn.egress <- &packet{
  			data: data,
-@@ -60,9 +97,26 @@
+@@ -60,9 +97,34 @@
  
  	conn, found = u.udpConns[src]
  	if !found {
@@ -108,6 +108,14 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
 +		}
 +		if count >= most {
 +			errors.LogDebug(context.Background(), "drop udp with size ", len(data), " to ", dst.NetAddr(), " > ", most, " flows")
++			return
++		}
++		// And no new flow while memory is short (ios-memory-gate,
++		// neoxify_gate.go) -- lookups excepted: they have their own cap,
++		// are gone 2 s after their answer, and refusing them would turn
++		// every refused connection into a failed lookup as well.
++		if !lookup && !admitting() {
++			turnedAway()
 +			return
 +		}
 +		egress := make(chan *packet, udpFlowQueue)
@@ -124,7 +132,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  
  		go u.handleConnection(conn, dst)
  	}
-@@ -78,13 +132,39 @@
+@@ -78,13 +140,39 @@
  	}
  }
  
@@ -168,7 +176,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  	u.Unlock()
  }
  
-@@ -92,9 +172,29 @@
+@@ -92,9 +180,29 @@
  type udpConn struct {
  	handler *udpConnectionHandler
  
@@ -201,7 +209,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  }
  
  func (c *udpConn) ReadMultiBuffer() (buf.MultiBuffer, error) {
-@@ -130,6 +230,8 @@
+@@ -130,6 +238,8 @@
  }
  
  func (c *udpConn) WriteMultiBuffer(mb buf.MultiBuffer) error {
@@ -210,7 +218,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  	for i, b := range mb {
  		dst := c.dst
  		if b.UDP != nil {
-@@ -151,6 +253,8 @@
+@@ -151,6 +261,8 @@
  
  // Write returning packets back
  func (c *udpConn) Write(p []byte) (int, error) {
@@ -219,7 +227,7 @@ with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
  	// sending packets back mean sending payload with source/destination reversed
  	err := c.handler.writePacket(p, c.dst, c.src)
  	if err != nil {
-@@ -161,7 +265,7 @@
+@@ -161,7 +273,7 @@
  }
  
  func (c *udpConn) Close() error {

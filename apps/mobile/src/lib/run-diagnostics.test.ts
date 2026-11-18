@@ -56,6 +56,22 @@ function assertClean(text: string) {
 beforeEach(() => resetDescribed());
 
 describe("how the tunnel's last run ended, for a drop's report", () => {
+  // The memory-pressure gate (plugins/vpn/xray/gate_darwin.go): beside the
+  // peak, so a phone tells us whether customers ever hit it.
+  it("says how often and how long the memory gate closed, where the engine has one", () => {
+    const files: RunFiles = {
+      lastEnd: null,
+      run: JSON.stringify({ startedAt: NOW - 45 }),
+      heartbeat: heartbeat({ gateClosings: 2, gateClosedMs: 4250, gateRefused: 312 }),
+      fatalTail: null,
+    };
+    expect(describeLastRun(files, NOW).text).toContain(
+      "mem peak 48.2 MiB, last 47.9 MiB, left 1.1 MiB, gate closed 2x for 4.3 s, 312 refused; engine xray",
+    );
+    const quiet = { ...files, heartbeat: heartbeat({ gateClosings: 0, gateClosedMs: 0, gateRefused: 0 }) };
+    expect(describeLastRun(quiet, NOW).text).toContain("gate closed 0x for 0.0 s, 0 refused");
+  });
+
   it("says a run that died ended without a stop reason, with its memory, engine and panic line", () => {
     const files: RunFiles = {
       lastEnd: null,

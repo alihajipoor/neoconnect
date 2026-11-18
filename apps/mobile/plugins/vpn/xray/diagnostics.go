@@ -70,6 +70,14 @@ const (
 // Set by the darwin build, where the WireGuard engine exists.
 var wireGuardRunningHook = func() bool { return false }
 
+// Set by the darwin build, where the memory-pressure gate exists
+// (gate_darwin.go). Elsewhere there is no gate and nothing to count.
+var (
+	startGateHook = func() {}
+	stopGateHook  = func() {}
+	gateStatsHook = func() (closings, closedMs, refused int64) { return 0, 0, 0 }
+)
+
 // Heartbeat is engine-heartbeat.json, and lastHeartbeat in the app's file.
 type Heartbeat struct {
 	// Unix seconds when written.
@@ -92,6 +100,12 @@ type Heartbeat struct {
 	// buffer patch (scripts/xray-core-patch.sh).
 	Core        string `json:"core"`
 	CorePatched bool   `json:"corePatched"`
+	// The memory-pressure gate (gate_darwin.go), this run: how often it
+	// closed, for how long in all, and how many new connections and UDP
+	// flows it turned away. Zero where there is no gate.
+	GateClosings int64 `json:"gateClosings"`
+	GateClosedMs int64 `json:"gateClosedMs"`
+	GateRefused  int64 `json:"gateRefused"`
 }
 
 // runRecord is tunnel-run.json.
@@ -451,7 +465,11 @@ func sampleHeartbeat(started time.Time) Heartbeat {
 	} else if wireGuardRunningHook() {
 		engine = "wireguard"
 	}
+	closings, closedMs, refused := gateStatsHook()
 	return Heartbeat{
+		GateClosings:  closings,
+		GateClosedMs:  closedMs,
+		GateRefused:   refused,
 		Time:          now.Unix(),
 		Uptime:        int64(now.Sub(started) / time.Second),
 		Footprint:     fp,

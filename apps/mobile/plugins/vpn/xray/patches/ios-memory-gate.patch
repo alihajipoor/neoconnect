@@ -1,0 +1,100 @@
+neoxify-patch header: ios-memory-gate
+
+The TUN inbound side of the memory-pressure gate in the iOS engine
+(plugins/vpn/xray/gate_darwin.go): while the extension's footprint is high,
+new TCP connections are refused with a reset (here) and packets that would
+open a new UDP flow are dropped (ios-udp-flows.patch, which calls the same
+admitting()); new TCP connections are also admitted at no more than 100 a
+second. Unbounded before: a flood of new connections reached 107 MiB on
+Stealth and 400 MiB on Shadowsocks; iOS kills the extension at about 50 MiB.
+Written against xray-core v26.6.27 (45cf2898ab12): proxy/tun/stack_gvisor.go
+and a new proxy/tun/neoxify_gate.go. Applied by
+apps/mobile/scripts/xray-core-patch.sh, for the iOS build only. Guarded by
+TestEngineMemoryBudget (plugins/vpn/xray), 2026-11-18.
+
+--- a/proxy/tun/stack_gvisor.go
++++ b/proxy/tun/stack_gvisor.go
+@@ -67,6 +67,14 @@
+ 	}
+ 
+ 	tcpForwarder := tcp.NewForwarder(ipStack, 0, 65535, func(r *tcp.ForwarderRequest) {
++		// neoxify-patch: ios-memory-gate. Refused with a reset while memory
++		// is short, or past the rate for new connections (neoxify_gate.go),
++		// before a handshake or anything else is spent on it.
++		if !admittingTCP() {
++			turnedAway()
++			r.Complete(true)
++			return
++		}
+ 		go func(r *tcp.ForwarderRequest) {
+ 			var wq waiter.Queue
+ 			id := r.ID()
+--- /dev/null
++++ b/proxy/tun/neoxify_gate.go
+@@ -0,0 +1,66 @@
++package tun
++
++import (
++	"expvar"
++	"sync"
++	"time"
++)
++
++// neoxify-patch: ios-memory-gate. The engine package closes this gate when
++// the extension's footprint nears what iOS kills it at, and opens it once
++// memory has come back down (plugins/vpn/xray/gate_darwin.go). While it is
++// closed, new TCP connections are refused with a reset and packets that
++// would open a new UDP flow are dropped; what is running carries on.
++// Read through expvar because the engine package imports this one, not the
++// other way round. Where nothing publishes the gate, it is open.
++//
++// New TCP connections are also admitted at no more than tcpAdmitRate a
++// second (tcpAdmitBurst at once). The gate reads memory a few times a
++// second, and a flood opens thousands of connections between two readings:
++// measured, the gate alone let a flood reach 165 MiB on Shadowsocks before
++// it closed, and 200 a second still let it reach 46.5 MiB there. A phone
++// opens 10 to 50 a second while browsing (TestEngineMemory,
++// and a customer's phone), so the rate is far above anything an app does
++// and only a flood meets it.
++const (
++	tcpAdmitRate  = 100.0
++	tcpAdmitBurst = 100.0
++)
++
++func admitting() bool {
++	v, ok := expvar.Get("neoxify.tun.gateClosed").(*expvar.Int)
++	return !ok || v.Value() == 0
++}
++
++var tcpAdmit struct {
++	sync.Mutex
++	tokens float64
++	last   time.Time
++}
++
++// admittingTCP is admitting, and within the rate for new connections.
++func admittingTCP() bool {
++	if !admitting() {
++		return false
++	}
++	tcpAdmit.Lock()
++	defer tcpAdmit.Unlock()
++	now := time.Now()
++	if tcpAdmit.last.IsZero() {
++		tcpAdmit.tokens = tcpAdmitBurst
++	} else {
++		tcpAdmit.tokens = min(tcpAdmitBurst, tcpAdmit.tokens+now.Sub(tcpAdmit.last).Seconds()*tcpAdmitRate)
++	}
++	tcpAdmit.last = now
++	if tcpAdmit.tokens < 1 {
++		return false
++	}
++	tcpAdmit.tokens--
++	return true
++}
++
++func turnedAway() {
++	if v, ok := expvar.Get("neoxify.tun.refused").(*expvar.Int); ok {
++		v.Add(1)
++	}
++}

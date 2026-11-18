@@ -168,6 +168,7 @@ func Start(configJSON string, tunFd int, p Protector) error {
 	}
 
 	instance = inst
+	startGateHook()
 	return nil
 }
 
@@ -184,6 +185,7 @@ func Stop() error {
 	if instance == nil {
 		return nil
 	}
+	stopGateHook()
 	err := instance.Close()
 	instance = nil
 	return err
