@@ -946,3 +946,321 @@ export interface LiveMonitor {
     bytesLast10Min: string;
   }[];
 }
+
+// ---------------------------------------------------------------------------
+// One customer in depth: GET /customers/:id/insight, /attempts, /usage and
+// /history. Mirrors apps/backend/src/modules/customer-activity/
+// customer-insight.types.ts -- this is the contract; change both together.
+// Bytes are decimal strings, times ISO strings.
+// ---------------------------------------------------------------------------
+
+/** What a report was, worked out from its kind, outcome and words. */
+export type CustomerReportCategory =
+  | "connect"
+  | "reconnect"
+  | "api"
+  | "config"
+  | "cancelled"
+  | "session"
+  | "signin"
+  | "register"
+  | "other";
+
+/** What a failure was, from the apps' exact words; UNKNOWN keeps its text. */
+export type CustomerFailureCode =
+  | "API_UNREACHABLE"
+  | "NOT_CARRYING"
+  | "TOO_SLOW"
+  | "NO_RESPONSE_UDP_BLOCKED"
+  | "DID_NOT_COMPLETE"
+  | "SERVER_NOT_REACHED"
+  | "NO_NETWORK"
+  | "SERVICE_NOT_ANSWERING"
+  | "ADAPTER_MISSING"
+  | "ENGINE_FAILED"
+  | "PERMISSION_DENIED"
+  | "OTHER_VPN_ACTIVE"
+  | "CANCELLED_BY_CUSTOMER"
+  | "SUBSCRIPTION_INACTIVE"
+  | "DATA_CAP_REACHED"
+  | "DEVICE_LIMIT"
+  | "WRONG_PASSWORD"
+  | "EMAIL_EXISTS"
+  | "BAD_REFERRAL_CODE"
+  | "CODE_NOT_ACCEPTED"
+  | "SESSION_REFUSED"
+  | "CUSTOM_MODE_FAILED"
+  | "IKEV2_REFUSED"
+  | "TUNNEL_DROPPED"
+  | "RECONNECT_GAVE_UP"
+  | "UNKNOWN";
+
+export interface InsightNetworkRef {
+  asn: number;
+  name: string | null;
+}
+
+export interface InsightAccount {
+  createdAt: string;
+  emailVerifiedAt: string | null;
+  status: string;
+  locale: string;
+  signupChannel: string | null;
+  identities: { provider: string; createdAt: string; lastUsedAt: string }[];
+  referredBy: { customerId: string; email: string } | null;
+  referralsMade: number;
+}
+
+export interface InsightApp {
+  platform: string;
+  appVersion: string;
+  lastSeenAt: string;
+  /** The newest release the server already knows; null when it has no
+   * cached answer, and always for iOS. */
+  latestVersion: string | null;
+  behind: boolean | null;
+}
+
+export interface InsightConnect {
+  /** Connects and automatic-reconnect passes; never background API reports. */
+  tried: number;
+  succeeded: number;
+  lastSuccess: {
+    at: string;
+    server: string | null;
+    protocol: string | null;
+    network: InsightNetworkRef | null;
+    platform: string;
+    appVersion: string;
+  } | null;
+  lastFailure: {
+    at: string;
+    outcome: string;
+    reason: string | null;
+    network: InsightNetworkRef | null;
+    platform: string;
+    appVersion: string;
+  } | null;
+  byOutcome: { outcome: string; count: number }[];
+}
+
+export interface InsightNetworkOthers {
+  /** Other signed-in customers with a connection attempt here in `hours`. */
+  customers: number;
+  /** Of them, how many connected at least once. */
+  connected: number;
+  hours: number;
+}
+
+export interface InsightNetwork {
+  /** Null: reports that carried no network. */
+  asn: number | null;
+  name: string | null;
+  country: string | null;
+  tried: number;
+  succeeded: number;
+  apiUnreachable: number;
+  lastAt: string | null;
+  lastSuccessAt: string | null;
+  /** Null when fewer than 3 other customers tried here. */
+  others: InsightNetworkOthers | null;
+}
+
+export interface InsightRoute {
+  server: string | null;
+  protocol: string | null;
+  dialled: number;
+  connected: number;
+  carried: number;
+  notDialled: number;
+  medianDownKbps: number | null;
+  medianUpKbps: number | null;
+  lastResult: string;
+  lastAt: string;
+}
+
+export interface InsightFailure {
+  code: CustomerFailureCode;
+  label: string;
+  count: number;
+  lastAt: string;
+  /** One real text, addresses replaced by "<address>". */
+  example: string;
+}
+
+export interface InsightSessions {
+  count: number;
+  totalSeconds: number;
+  longestSeconds: number;
+  lastAt: string | null;
+}
+
+export interface InsightCredentials {
+  subscriptionId: string;
+  planName: string;
+  status: string;
+  startAt: string;
+  expireAt: string;
+  /** Null: unlimited. */
+  dataCapBytes: string | null;
+  dataUsedBytes: string;
+  total: number;
+  active: number;
+  notProvisioned: number;
+  held: number;
+  perDevice: number;
+  byProtocol: { protocol: string; count: number }[];
+}
+
+export interface InsightVoucherRedemption {
+  redeemedAt: string;
+  customerId: string;
+  sameAccount: boolean;
+  subscriptionId: string | null;
+}
+
+export interface InsightVoucher {
+  voucherId: string;
+  planName: string;
+  issuedAt: string;
+  issuedByEmail: string | null;
+  /** Issued for this customer's email address (else only redeemed by them). */
+  issuedToThisEmail: boolean;
+  maxRedemptions: number | null;
+  redeemedCount: number;
+  redemptions: InsightVoucherRedemption[];
+}
+
+export type InsightFindingSeverity = "problem" | "warning" | "info";
+
+export interface InsightFinding {
+  severity: InsightFindingSeverity;
+  code: string;
+  title: string;
+  /** The counts the finding rests on. */
+  detail: string;
+}
+
+/** GET /customers/:id/insight?days=7 */
+export interface CustomerInsight {
+  windowDays: number;
+  generatedAt: string;
+  account: InsightAccount;
+  apps: InsightApp[];
+  reports: Record<CustomerReportCategory, number>;
+  connect: InsightConnect;
+  networks: InsightNetwork[];
+  routes: InsightRoute[];
+  failures: InsightFailure[];
+  sessions: InsightSessions;
+  credentials: InsightCredentials[];
+  vouchers: InsightVoucher[];
+  /** Problems first, then warnings, then info. */
+  findings: InsightFinding[];
+}
+
+export interface ApiTraceEntry {
+  /** req, refresh, retry, challenge, health, door; null for an old list. */
+  leg: string | null;
+  /** host[:port], or the unparsed text. */
+  target: string;
+  /** h<status>, timeout, net, local, scope, cancel, budget...; null for an old list. */
+  outcome: string | null;
+  ms: number | null;
+}
+
+export interface ApiTrace {
+  entries: ApiTraceEntry[];
+  /** The socket-level probe's section, as text. */
+  probe: string | null;
+  /** "none dialled": nothing was tried. */
+  noneDialled: boolean;
+  /** Entries cut to fit the field. */
+  cut: number;
+}
+
+/** One row of GET /customers/:id/attempts (X-Total-Count = total). The
+ * activity page's attempt, plus the fields after `rungs`. */
+export interface CustomerAttemptDetail {
+  id: string;
+  at: string;
+  kind: string;
+  outcome: string;
+  platform: string;
+  appVersion: string;
+  network: { asn: number; name: string | null } | null;
+  ip: string | null;
+  throughServer: string | null;
+  noAddress: "erased" | "relay" | null;
+  server: string | null;
+  protocol: string | null;
+  reason: string | null;
+  sessionSeconds: number | null;
+  rungs: CustomerAttemptRung[];
+  /** When the server received it. */
+  receivedAt: string;
+  /** When the app said it happened, as stored; may be null. */
+  occurredAt: string | null;
+  category: CustomerReportCategory;
+  failureCode: CustomerFailureCode | null;
+  apiEndpoint: string | null;
+  apiTrace: ApiTrace | null;
+}
+
+export interface CustomerUsageHour {
+  /** Start of the UTC hour. Ascending. */
+  hour: string;
+  nodeName: string;
+  protocol: string;
+  bytesUp: string;
+  bytesDown: string;
+}
+
+/** Consecutive upload periods on one server+protocol, gaps <= 15 min. */
+export interface CustomerUsageSession {
+  start: string;
+  end: string;
+  seconds: number;
+  nodeName: string;
+  protocol: string;
+  bytesUp: string;
+  bytesDown: string;
+}
+
+/** GET /customers/:id/usage?hours=72 */
+export interface CustomerUsage {
+  hours: CustomerUsageHour[];
+  /** Newest first, at most 200. */
+  sessions: CustomerUsageSession[];
+  /** True when the window held more upload periods than are read, so its
+   * oldest sessions are missing. */
+  sessionsCapped: boolean;
+  /** 30 UTC days, newest first. */
+  days: CustomerTrafficRow[];
+}
+
+export type CustomerHistoryEventType =
+  | "ACCOUNT_CREATED"
+  | "EMAIL_VERIFIED"
+  | "IDENTITY_LINKED"
+  | "DEVICE_SIGNED_IN"
+  | "DEVICE_SIGNED_OUT"
+  | "SUBSCRIPTION_STARTED"
+  | "SUBSCRIPTION_ENDED"
+  | "CODE_REDEEMED"
+  | "PAYMENT"
+  | "SUPPORT_TICKET"
+  | "FIRST_CONNECT"
+  | "STAFF_ACTION";
+
+/** One row of GET /customers/:id/history (X-Total-Count = total), newest
+ * first. STAFF_ACTION rows only for a SUPERADMIN. */
+export interface CustomerHistoryEvent {
+  at: string;
+  type: CustomerHistoryEventType;
+  title: string;
+  detail: string | null;
+  actor: string | null;
+  /** A panel path, where there is one. */
+  link: string | null;
+}
