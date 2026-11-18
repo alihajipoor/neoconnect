@@ -149,7 +149,14 @@ describe("classifyFailure", () => {
     ["no network connection with a gateway to reach the server over", undefined, "NO_NETWORK"],
     ["auto-reconnect drop seen; state disconnected; run: ended by the system", undefined, "TUNNEL_DROPPED"],
     ["auto-reconnect stopped after 6 attempt(s): every attempt was used (6)", undefined, "RECONNECT_GAVE_UP"],
-    ["", "NOT_CARRYING_TRAFFIC", "NOT_CARRYING"],
+    ["", "NOT_CARRYING_TRAFFIC", "NO_HANDSHAKE_OR_TRAFFIC"],
+    ["something nobody wrote yet", "NOT_CARRYING_TRAFFIC", "NO_HANDSHAKE_OR_TRAFFIC"],
+    // The Linux client's IKEv2 text (desktop-linux tunnel/src/ikev2.rs).
+    [
+      "timed out waiting for the IKEv2 server to answer on UDP 500 and 4500 (UDP is likely blocked on this network; try a Stealth protocol instead)",
+      undefined,
+      "NO_RESPONSE_UDP_BLOCKED",
+    ],
     ["something nobody wrote yet", "OTHER", "UNKNOWN"],
   ];
   it.each(cases)("%s -> %s", (text, outcome, expected) => {
@@ -163,6 +170,12 @@ describe("classifyFailure", () => {
         rungResults: ["up but unreachable"],
       }),
     ).toBe("NOT_CARRYING");
+    expect(
+      reportFailureCode({
+        ...report("CONNECT", "OTHER", "auto-reconnect attempt 1 of at most 6 after the tunnel dropped: did not connect (NOT_CARRYING_TRAFFIC)", true),
+        rungResults: [],
+      }),
+    ).toBe("NO_HANDSHAKE_OR_TRAFFIC");
     expect(
       reportFailureCode({
         ...report("CONNECT", "OTHER", "auto-reconnect attempt 1 of at most 6 after the tunnel dropped: did not connect (ENGINE_FAILED); The VPN engine failed to start.", true),

@@ -122,6 +122,7 @@ export function rungFailed(result: string): boolean {
 export type FailureCode =
   | "API_UNREACHABLE"
   | "NOT_CARRYING"
+  | "NO_HANDSHAKE_OR_TRAFFIC"
   | "TOO_SLOW"
   | "NO_RESPONSE_UDP_BLOCKED"
   | "DID_NOT_COMPLETE"
@@ -152,8 +153,9 @@ export type FailureCode =
 export const FAILURE_LABELS: Record<FailureCode, string> = {
   API_UNREACHABLE: "The app could not reach the Neoxify API",
   NOT_CARRYING: "Tunnel came up but the app's check got no traffic through it",
+  NO_HANDSHAKE_OR_TRAFFIC: "The handshake did not complete or the tunnel carried nothing; the app did not say which",
   TOO_SLOW: "Tunnel carried traffic but the app measured it too slow to keep",
-  NO_RESPONSE_UDP_BLOCKED: "IKEv2 on Windows: no response from the server (Windows error 809)",
+  NO_RESPONSE_UDP_BLOCKED: "IKEv2 on Windows or Linux: no response from the server",
   DID_NOT_COMPLETE: "IKEv2 on Android: the connection did not complete in time",
   SERVER_NOT_REACHED: "The engine reported a timeout, refusal or failed handshake",
   NO_NETWORK: "The app found no network connection to dial over",
@@ -222,10 +224,13 @@ const FAILURE_PATTERNS: [FailureCode, RegExp][] = [
   ["RECONNECT_GAVE_UP", /^auto-reconnect (stopped after|not attempted)/],
 ];
 
-/** What the app's outcome alone says, where the text says nothing known. */
+/** What the app's outcome alone says, where the text says nothing known.
+ * NOT_CARRYING_TRAFFIC also covers a handshake that never completed
+ * (outcomeFromError in the desktop app's attempts.ts), so on its own it
+ * cannot say the tunnel came up. */
 const OUTCOME_FALLBACK: Record<string, FailureCode> = {
   CONTROL_PLANE_UNREACHABLE: "API_UNREACHABLE",
-  NOT_CARRYING_TRAFFIC: "NOT_CARRYING",
+  NOT_CARRYING_TRAFFIC: "NO_HANDSHAKE_OR_TRAFFIC",
   ENGINE_FAILED: "ENGINE_FAILED",
   PERMISSION_DENIED: "PERMISSION_DENIED",
 };

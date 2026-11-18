@@ -25,8 +25,9 @@ export const CATEGORY_LABELS: Record<CustomerReportCategory, string> = {
 export const FAILURE_LABELS: Record<CustomerFailureCode, string> = {
   API_UNREACHABLE: "Could not reach our API",
   NOT_CARRYING: "Tunnel came up but carried no traffic",
+  NO_HANDSHAKE_OR_TRAFFIC: "Handshake did not complete or the tunnel carried nothing",
   TOO_SLOW: "Tunnel worked but was too slow to keep",
-  NO_RESPONSE_UDP_BLOCKED: "IKEv2 on Windows: no response from the server",
+  NO_RESPONSE_UDP_BLOCKED: "IKEv2 on Windows or Linux: no response from the server",
   DID_NOT_COMPLETE: "IKEv2 on Android: did not complete in time",
   SERVER_NOT_REACHED: "Timeout, refusal or failed handshake",
   NO_NETWORK: "No network connection on the device",

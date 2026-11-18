@@ -120,14 +120,28 @@ export function findingsFor(input: FindingsInput): InsightFinding[] {
 
   // Failure kinds.
   const count = (code: string) => input.failures.find((f) => f.code === code)?.count ?? 0;
-  const notCarrying = count("NOT_CARRYING");
+  // NO_HANDSHAKE_OR_TRAFFIC is the outcome alone, which also covers a
+  // handshake that never completed; with any of those counted the
+  // finding cannot claim every tunnel came up.
+  const carriedNothing = count("NOT_CARRYING");
+  const unsaid = count("NO_HANDSHAKE_OR_TRAFFIC");
+  const notCarrying = carriedNothing + unsaid;
   if (notCarrying >= NOT_CARRYING_OFTEN) {
-    out.push({
-      severity: "warning",
-      code: "NOT_CARRYING_OFTEN",
-      title: "Tunnels came up but carried nothing",
-      detail: `${notCarrying} times in ${days} a tunnel came up and the app's check got no traffic through it.`,
-    });
+    out.push(
+      unsaid === 0
+        ? {
+            severity: "warning",
+            code: "NOT_CARRYING_OFTEN",
+            title: "Tunnels came up but carried nothing",
+            detail: `${notCarrying} times in ${days} a tunnel came up and the app's check got no traffic through it.`,
+          }
+        : {
+            severity: "warning",
+            code: "NOT_CARRYING_OFTEN",
+            title: "Tunnels did not complete a handshake or carried nothing",
+            detail: `${notCarrying} times in ${days} a tunnel either did not complete its handshake or carried no traffic (${carriedNothing} known to have come up and carried nothing; for ${unsaid} the app did not say which).`,
+          },
+    );
   }
   const service = count("SERVICE_NOT_ANSWERING");
   if (service > 0) {

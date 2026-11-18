@@ -113,6 +113,13 @@ describe("findingsFor", () => {
   it("NOT_CARRYING_OFTEN at three", () => {
     expect(codes(healthy({ failures: [failure("NOT_CARRYING", 3)] }))).toContain("NOT_CARRYING_OFTEN");
     expect(codes(healthy({ failures: [failure("NOT_CARRYING", 2)] }))).not.toContain("NOT_CARRYING_OFTEN");
+    expect(find(healthy({ failures: [failure("NOT_CARRYING", 3)] }), "NOT_CARRYING_OFTEN")?.title).toBe("Tunnels came up but carried nothing");
+  });
+
+  it("NOT_CARRYING_OFTEN counting the outcome-only cause does not claim the tunnels came up", () => {
+    const f = find(healthy({ failures: [failure("NOT_CARRYING", 1), failure("NO_HANDSHAKE_OR_TRAFFIC", 2)] }), "NOT_CARRYING_OFTEN");
+    expect(f?.title).toBe("Tunnels did not complete a handshake or carried nothing");
+    expect(f?.detail).toContain("1 known to have come up and carried nothing; for 2 the app did not say which");
   });
 
   it("SERVICE_NOT_ANSWERING is a problem, so HEALTHY is not said", () => {

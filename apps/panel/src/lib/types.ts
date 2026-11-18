@@ -970,6 +970,7 @@ export type CustomerReportCategory =
 export type CustomerFailureCode =
   | "API_UNREACHABLE"
   | "NOT_CARRYING"
+  | "NO_HANDSHAKE_OR_TRAFFIC"
   | "TOO_SLOW"
   | "NO_RESPONSE_UDP_BLOCKED"
   | "DID_NOT_COMPLETE"
