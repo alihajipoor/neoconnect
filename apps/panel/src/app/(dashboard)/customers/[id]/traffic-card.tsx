@@ -3,6 +3,8 @@ import { protocolLabel } from "@/lib/protocol-labels";
 import { megabytes } from "@/lib/time";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { dayColumns } from "./insight-layout";
+import { ColumnChart, More } from "./view-parts";
 
 /** Where this customer's traffic actually went, per day, server and
  * protocol, for the last 14 days.
@@ -17,11 +19,14 @@ export function TrafficCard({
   traffic,
   days = 14,
   title = "Traffic by server",
+  chart = false,
 }: {
   traffic: CustomerTrafficRow[] | null;
   /** How many UTC days the rows cover, for the title and the empty line. */
   days?: number;
   title?: string;
+  /** A column chart of the days leads and the table folds under it. */
+  chart?: boolean;
 }) {
   const rows = [...(traffic ?? [])].sort(
     (a, b) =>
@@ -47,7 +52,42 @@ export function TrafficCard({
           <p className="text-sm text-muted-foreground">Could not load this customer&apos;s traffic.</p>
         ) : rows.length === 0 ? (
           <p className="text-sm text-muted-foreground">No traffic through any server in the last {days} days.</p>
+        ) : chart ? (
+          <div className="flex flex-col gap-3">
+            <DayChart rows={rows} days={days} />
+            <More summary={`Show the table (${rows.length} ${rows.length === 1 ? "row" : "rows"})`}>
+              <DayTable rows={rows} />
+            </More>
+          </div>
         ) : (
+          <DayTable rows={rows} />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DayChart({ rows, days }: { rows: CustomerTrafficRow[]; days: number }) {
+  // Empty days included, up to the UTC day the rows were read on.
+  const columns = dayColumns(rows, days);
+  const peak = Math.max(0, ...columns.map((c) => c.up + c.down));
+  return (
+    <ColumnChart
+      caption={`Traffic per UTC day, last ${days} days`}
+      peak={megabytes(peak)}
+      start={columns[0].start.slice(0, 10)}
+      end="today (UTC)"
+      columns={columns.map((c) => ({
+        key: c.start,
+        value: c.up + c.down,
+        label: `${c.start.slice(0, 10)}: ${megabytes(c.down)} down, ${megabytes(c.up)} up`,
+      }))}
+    />
+  );
+}
+
+function DayTable({ rows }: { rows: CustomerTrafficRow[] }) {
+  return (
           <div className="rounded-lg border border-white/8 bg-card/40">
             <Table stack>
               <TableHeader>
@@ -80,8 +120,5 @@ export function TrafficCard({
               </TableBody>
             </Table>
           </div>
-        )}
-      </CardContent>
-    </Card>
   );
 }
