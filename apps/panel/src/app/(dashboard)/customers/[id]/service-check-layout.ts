@@ -60,6 +60,11 @@ export function failStageText(failed: number, stage: string): string {
   return failed === 1 ? `failed at ${stage}` : `most failed at ${stage}`;
 }
 
+/** The same, short enough for a matrix cell: "fails: name lookup". */
+export function failStageShort(stage: string): string {
+  return `fails: ${stage}`;
+}
+
 /** "86%", or "" with nothing to divide. A share that rounds to 100 or 0
  * while not all or none is said as ">99%" / "<1%". */
 export function percentText(part: number, whole: number): string {

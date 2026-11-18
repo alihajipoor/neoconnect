@@ -10,6 +10,7 @@ import {
   CHECK_WINDOWS,
   cellTone,
   parseCheckHours,
+  failStageShort,
   failStageText,
   percentText,
   reachableTotals,
@@ -154,21 +155,28 @@ interface MatrixRow {
   cells: MatrixCell[];
 }
 
-/** Rows by services: a table from 640px (first column kept in view while
- * the services scroll), and one card per row on a phone with the
- * services listed in it. */
+/** The first column stays in view when the services scroll sideways (only
+ * if the list ever outgrows the card); opaque, so cells pass under it. */
+const PINNED = "sticky left-0 z-[1] bg-card shadow-[inset_-1px_0_0_var(--border)]";
+
+/** Rows by services: a compact table from 640px that fits the content
+ * column at 1024px with nine services, and one card per row on a phone
+ * with the services listed in it. */
 function Matrix({ columns, rows, firstHead }: { columns: ServiceColumn[]; rows: MatrixRow[]; firstHead: string }) {
   return (
     <>
       <div className="max-sm:hidden">
         <TableBox>
-          <Table stickyFirst>
+          <Table stickyFirst className="[&_td]:px-1.5 [&_td]:py-2 [&_th]:px-1.5">
             <TableHeader>
               <TableRow>
-                <TableHead>{firstHead}</TableHead>
-                <TableHead className="text-right">Runs</TableHead>
+                <TableHead className={cn(PINNED, "pl-3!")}>{firstHead}</TableHead>
+                <TableHead className="text-right text-xs">Runs</TableHead>
                 {columns.map((c) => (
-                  <TableHead key={c.key} className="min-w-20 text-right leading-tight whitespace-normal">
+                  <TableHead
+                    key={c.key}
+                    className="h-auto py-2 text-right align-bottom text-xs leading-tight whitespace-normal [overflow-wrap:anywhere]"
+                  >
                     {c.label}
                   </TableHead>
                 ))}
@@ -177,7 +185,7 @@ function Matrix({ columns, rows, firstHead }: { columns: ServiceColumn[]; rows: 
             <TableBody>
               {rows.map((row) => (
                 <TableRow key={row.key}>
-                  <TableCell className="text-sm">
+                  <TableCell className={cn(PINNED, "min-w-32 max-w-40 pl-3! text-sm whitespace-normal break-words")}>
                     <span className="block">{row.title}</span>
                     {row.sub && <span className="block text-xs text-muted-foreground">{row.sub}</span>}
                   </TableCell>
@@ -245,23 +253,32 @@ function PhoneCells({ columns, cells }: { columns: ServiceColumn[]; cells: Matri
   );
 }
 
-/** "12 of 14" with a bar, the median first byte under it, and where most
- * failures stopped. Quiet red under half reachable over 3+ results. */
+/** "12 of 14" with a bar, the median time to the first byte under it
+ * (the caption says what the time is), and where most failures stopped:
+ * short in the table, in full on a phone card. Quiet red under half
+ * reachable over 3+ results. */
 function Cell({ cell, wide }: { cell: MatrixCell | undefined; wide?: boolean }) {
   if (!cell || cell.ok + cell.failed === 0) return <span className="text-sm text-muted-foreground">—</span>;
   const total = cell.ok + cell.failed;
   const tone = cellTone(cell.ok, cell.failed);
   const firstByte = msText(cell.medianFirstByteMs);
   return (
-    <span className={cn("inline-flex flex-col items-end gap-1 align-top", wide ? "w-40" : "w-20")}>
-      <span className={cn("text-sm tabular-nums", tone === "problem" && "text-red-300")}>
+    <span className={cn("inline-flex flex-col items-end gap-1 align-top", wide ? "w-40" : "w-16")}>
+      <span className={cn("tabular-nums", wide ? "text-sm" : "text-xs", tone === "problem" && "text-red-300")}>
         {cell.ok} of {total}
       </span>
       <ShareBar part={cell.ok} whole={total} />
-      {firstByte && <span className="text-[11px] text-muted-foreground tabular-nums">{firstByte} first byte</span>}
+      {firstByte && (
+        <span className="text-[11px] text-muted-foreground tabular-nums">
+          {firstByte}
+          {wide && " first byte"}
+        </span>
+      )}
       {cell.failed > 0 && cell.topFailStage && (
         <span className={cn("text-[11px] leading-tight whitespace-normal", tone === "problem" ? "text-red-300" : "text-muted-foreground")}>
-          {failStageText(cell.failed, stageLabel(cell.topFailStage))}
+          {wide
+            ? failStageText(cell.failed, stageLabel(cell.topFailStage))
+            : failStageShort(stageLabel(cell.topFailStage))}
         </span>
       )}
     </span>
@@ -271,8 +288,9 @@ function Cell({ cell, wide }: { cell: MatrixCell | undefined; wide?: boolean }) 
 function Legend() {
   return (
     <p className="text-xs text-muted-foreground">
-      Each cell: results that were reachable, of all results for that service. The time is the median until the first
-      byte of the reply. Red when under half were reachable over at least three results.
+      Each cell: results that were reachable, of all results for that service; under it, the median time until the
+      first byte of the reply, and where most failures stopped. Red when under half were reachable over at least three
+      results.
     </p>
   );
 }

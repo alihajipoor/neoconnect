@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   cellTone,
+  failStageShort,
   failStageText,
   parseCheckHours,
   percentText,
@@ -53,6 +54,7 @@ describe("service-check layout", () => {
   it("says one failure apart from several", () => {
     expect(failStageText(1, "name lookup")).toBe("failed at name lookup");
     expect(failStageText(4, "the reply")).toBe("most failed at the reply");
+    expect(failStageShort("name lookup")).toBe("fails: name lookup");
   });
 
   it("reads and builds the window", () => {
