@@ -10,6 +10,7 @@ import { buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AttemptTable } from "./connection-log";
+import { ServiceChecksCard } from "./service-checks-card";
 import { CATEGORY_LABELS, FAILURE_LABELS, categoryLabel, failureLabel } from "./insight-labels";
 import {
   DAY_WINDOWS,
@@ -78,6 +79,7 @@ export async function ConnectionsView({
           <ConnectionTiles insight={insight} customerId={customerId} days={days} />
           <NetworksCard insight={insight} customerId={customerId} days={days} />
           <RoutesCard insight={insight} days={days} />
+          <ServiceChecksCard checks={insight.serviceChecks} window={windowText(days)} />
           <FailuresCard insight={insight} customerId={customerId} days={days} />
         </>
       )}

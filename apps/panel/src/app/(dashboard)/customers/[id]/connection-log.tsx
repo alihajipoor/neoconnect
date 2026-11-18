@@ -19,6 +19,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { KINDS, OUTCOMES } from "@/lib/attempt-labels";
 import { categoryLabel, failureLabel } from "./insight-labels";
 import { speedText, supportText, timesDiffer } from "./insight-format";
+import { msText } from "./diagnostics-format";
+import { ReportDetailsBlock } from "./report-details";
 
 /** This customer's reports, newest first, as the apps sent them: the
  * rows of the Connections view's full log.
@@ -62,6 +64,8 @@ function AttemptRow({ attempt }: { attempt: CustomerAttemptDetail }) {
   // ladder held a slow or dead rung even when the attempt as a whole
   // worked, because "connected on the fourth try" is a problem in waiting.
   const troubled = attempt.rungs.some((rung) => rungTone(rung.result) !== null);
+  const services = attempt.kind === "SERVICE_CHECK" ? (attempt.details?.services ?? []) : [];
+  const checked = services.length > 0 ? { ok: services.filter((s) => s.ok).length, total: services.length } : null;
 
   return (
     <>
@@ -87,9 +91,17 @@ function AttemptRow({ attempt }: { attempt: CustomerAttemptDetail }) {
         </TableCell>
         <TableCell cell="status">
           <div className="flex items-center gap-1.5 max-sm:flex-wrap max-sm:justify-end">
-            <Badge variant={outcome.variant} title={outcome.hint}>
-              {outcome.label}
-            </Badge>
+            {/* A service check is not a connection: its outcome is how many
+                of the list's services were reachable, said as a count. */}
+            {checked ? (
+              <Badge variant={checked.ok === checked.total ? "success" : "outline"} className={cn(checked.ok < checked.total && "border-destructive/40 text-red-300")}>
+                {checked.ok} of {checked.total} reachable
+              </Badge>
+            ) : (
+              <Badge variant={outcome.variant} title={outcome.hint}>
+                {outcome.label}
+              </Badge>
+            )}
             <span className="text-xs text-muted-foreground">{kind}</span>
             {troubled && (
               <span className="size-1.5 rounded-full bg-amber-400" title="A rung was too slow or carried nothing" />
@@ -133,7 +145,11 @@ function AttemptRow({ attempt }: { attempt: CustomerAttemptDetail }) {
           <TableCell colSpan={7} className="bg-black/20 whitespace-normal">
             <div className="flex flex-col gap-3 py-1 pl-8 max-sm:pl-0">
               <div className="flex flex-wrap items-start justify-between gap-3">
-                <p className="text-xs text-muted-foreground">{outcome.hint}</p>
+                <p className="text-xs text-muted-foreground">
+                  {attempt.kind === "SERVICE_CHECK"
+                    ? "A run of the service check: whether each service on the server's fixed list loaded, and how far it got."
+                    : outcome.hint}
+                </p>
                 <CopyForSupport attempt={attempt} />
               </div>
 
@@ -170,8 +186,22 @@ function AttemptRow({ attempt }: { attempt: CustomerAttemptDetail }) {
                     ))}
                   </ol>
                 </div>
-              ) : (
+              ) : attempt.kind === "SERVICE_CHECK" ? null : (
                 <p className="text-xs text-muted-foreground">No ladder in this report.</p>
+              )}
+
+              {/* What the report's details carried; the service check's
+                  results first, then the checks, then the device. */}
+              <ReportDetailsBlock
+                details={attempt.details}
+                serviceTitle={
+                  attempt.kind === "SERVICE_CHECK"
+                    ? serviceRunTitle(attempt)
+                    : undefined
+                }
+              />
+              {attempt.kind === "SERVICE_CHECK" && !attempt.details?.services?.length && (
+                <p className="text-xs text-muted-foreground">This report carried no results for the services on the list.</p>
               )}
 
               {attempt.apiTrace && <TraceTable trace={attempt.apiTrace} />}
@@ -303,8 +333,20 @@ function RungLine({ rung, index }: { rung: CustomerAttemptRung; index: number })
       {/* What the tunnel actually moved once it landed -- the figure that
           tells a server that passed the check from one that is any use. */}
       {speedLine(rung) && <span className="text-muted-foreground">{speedLine(rung)}</span>}
+      {typeof rung.ms === "number" && (
+        <span className="text-muted-foreground tabular-nums">took {msText(rung.ms)}</span>
+      )}
     </li>
   );
+}
+
+/** "Services checked through germany-3, Stealth" or "... outside the VPN". */
+function serviceRunTitle(attempt: CustomerAttemptDetail): string {
+  if (attempt.details?.via === "direct") return "Services checked outside the VPN";
+  if (attempt.server) {
+    return `Services checked through ${attempt.server}${attempt.protocol ? `, ${protocolLabel(attempt.protocol)}` : ""}`;
+  }
+  return attempt.details?.via === "tunnel" ? "Services checked through the VPN" : "Services checked";
 }
 
 function speedLine(rung: Pick<CustomerAttemptRung, "downKbps" | "upKbps">): string | null {
