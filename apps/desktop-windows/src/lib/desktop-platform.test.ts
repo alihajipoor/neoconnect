@@ -261,7 +261,8 @@ describe("the guarded call sites", () => {
     // The phone app renders this screen without setting a desktop
     // platform, so the default ("windows") alone would show it the card.
     expect(support).toContain("{hasPlatformDiagnostics() ? <DiagnosticsCard /> : null}");
-    expect(support).toMatch(/function hasPlatformDiagnostics(): boolean {s+return supportsRepair() && !isMobile();/);
+    expect(support).toContain("function hasPlatformDiagnostics(): boolean {");
+    expect(support).toContain("return supportsRepair() && !isMobile();");
   });
 
   it("Support's engine line is WebView2's on Windows as before, and WebKitGTK's on Linux", () => {
