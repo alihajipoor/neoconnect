@@ -13,12 +13,14 @@ import {
   collectLinuxDiagnostics,
   diagnosticsToText,
   linuxDiagnosticsToText,
+  withoutVpnNames,
   type Diagnostics,
   type LinuxDiagnostics,
 } from "../lib/repair";
 import { loadFlagSet } from "../lib/flag-art";
 import { reportedPlatform } from "../lib/attempts";
 import { getTokens } from "../lib/session";
+import { diagnosticsAllowed } from "../lib/diagnostics-consent";
 import { bundleDetails, runServiceCheckNow, type ServiceCheckAnswer } from "../lib/service-check";
 import { bundleBody, NOTE_MAX, sendDiagnostics, type BundleParts } from "../lib/diagnostics-bundle";
 import { chromiumFromUserAgent, engineLine, webkitGtkVersion, webkitLine, webviewVersion } from "../lib/webview-engine";
@@ -259,7 +261,7 @@ function DiagnosticsCard() {
 /** The text the Copy button gives, on Windows and Linux: the service's
  * (or the Linux helper's) snapshot, with the app's own version, the flag
  * count and the web engine. Rejects when the service does not answer. */
-async function collectPlatformText(): Promise<string> {
+async function collectPlatformText(forBundle = false): Promise<string> {
   // The app's version comes from here rather than from the service:
   // the two are replaced by different mechanisms -- the installer
   // and the updater -- so they can genuinely differ, and a mismatch
@@ -287,9 +289,10 @@ async function collectPlatformText(): Promise<string> {
     ),
   ]);
   const flagCount = flags ? Object.keys(flags).length : null;
+  const read = forBundle ? withoutVpnNames(snapshot) : snapshot;
   return linux
-    ? linuxDiagnosticsToText(snapshot as LinuxDiagnostics, appVersion, flagCount, engine)
-    : diagnosticsToText(snapshot as Diagnostics, appVersion, flagCount, engine);
+    ? linuxDiagnosticsToText(read as LinuxDiagnostics, appVersion, flagCount, engine)
+    : diagnosticsToText(read as Diagnostics, appVersion, flagCount, engine);
 }
 
 /** The connection test and "Send diagnostics to support", on every
@@ -306,6 +309,9 @@ export function CheckAndSendCard() {
   const [check, setCheck] = useState<ServiceCheckAnswer | null>(null);
   const [checking, setChecking] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
+  // Whether a test's result is reported (diagnostics-consent.ts): said on
+  // the card only when it is.
+  const [shared, setShared] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -315,6 +321,9 @@ export function CheckAndSendCard() {
       },
       () => undefined,
     );
+    void diagnosticsAllowed().then((allowed) => {
+      if (live) setShared(allowed);
+    });
     return () => {
       live = false;
     };
@@ -332,6 +341,7 @@ export function CheckAndSendCard() {
   return (
     <Card className="flex flex-col gap-3" data-check-send>
       <CardHead icon={<Activity />} title={t("check.title")} hint={t("check.subtitle")} />
+      {shared ? <p className="nx-csub">{t("check.shared")}</p> : null}
       <CheckResults answer={check} />
       <PillButton
         variant="ghost"
@@ -505,7 +515,7 @@ export async function gatherBundle(check: ServiceCheckAnswer | null): Promise<Bu
     reportedPlatform(),
     getVersion().catch(() => "unknown"),
     bundleDetails(check),
-    supportsRepair() ? collectPlatformText().catch(() => undefined) : Promise.resolve(undefined),
+    supportsRepair() ? collectPlatformText(true).catch(() => undefined) : Promise.resolve(undefined),
   ]);
   return {
     platform,

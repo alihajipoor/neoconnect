@@ -34,6 +34,7 @@ import { appPrefs } from "@shared/lib/app-prefs";
 import { PHONE_DEVICE, noticesFor, setNotices } from "./lib/phone-notices";
 import { AndroidUpdateRow } from "./components/AndroidUpdateRow";
 import { autoConnectLatch } from "@shared/lib/auto-connect";
+import { setDiagnosticsConsentSource } from "@shared/lib/diagnostics-consent";
 import { sessionLog } from "@shared/lib/session-log";
 import { PHONE_MAIN_PAGE_EXTRAS } from "./lib/phone-main-extras";
 
@@ -61,6 +62,12 @@ autoReconnect.setRequiresForeground(true);
 // tunnel (docs/relay-last-resort.md, R1.5), asked at send time. An error
 // or no answer keeps it closed (last-resort.ts).
 setRelayTunnelReader(async () => (await vpnStatus()).connected);
+
+// The fuller diagnostics (device, network settings, rung times, the
+// service check) wait for the disclosure that names them: version 2 of
+// the prominent disclosure, not the desktop's notice
+// (@shared/lib/diagnostics-consent.ts).
+setDiagnosticsConsentSource(hasAcceptedDisclosure);
 
 /** The Android client.
  *

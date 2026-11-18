@@ -40,8 +40,13 @@ const KEY = "acceptedVersion";
 /** Bumped only when the disclosure's substance changes -- a new data
  * type, a new purpose. A wording fix is not a reason to show it again to
  * people who already accepted, and a typo correction that re-prompts
- * every user is its own kind of broken. */
-export const DISCLOSURE_VERSION = 1;
+ * every user is its own kind of broken.
+ *
+ * 2: `disclosure.dataDiagnostics` gained the device model and system
+ * version, Wi-Fi or mobile data, the device's DNS settings, connect times
+ * and the service check (docs/client-diagnostics.md). Until it is accepted
+ * none of that is sent (@shared/lib/diagnostics-consent.ts). */
+export const DISCLOSURE_VERSION = 2;
 
 let storePromise: Promise<Store> | null = null;
 function getStore(): Promise<Store> {

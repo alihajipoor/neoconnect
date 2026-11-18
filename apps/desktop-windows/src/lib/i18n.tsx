@@ -948,6 +948,12 @@ const en = {
   "check.viaDirect": "Tested without the VPN.",
   "check.off": "The connection test isn't available right now.",
   "check.unavailable": "The test couldn't start. Try again in a moment.",
+  "check.shared": "The result is also sent to us, to help find connection problems.",
+  // The desktop's notice about the fuller diagnostics (lib/diagnostics-consent.ts).
+  "notice.diagTitle": "Connection diagnostics",
+  "notice.diagBody":
+    "To help us find and fix connection problems, the app can send a few more details with its connection reports: your device model and system version, free memory and battery saver, whether you're on Wi-Fi or cable, your device's DNS settings, and how long connecting took. After connecting, it also tests whether a short list of well-known services can be reached, at most once a day for each server, and it sends the result of the connection test when you run it. It never records the sites you visit. None of this is sent until you choose OK.",
+  "notice.diagOk": "OK",
   "send.title": "Send diagnostics to support",
   "send.subtitle": "Sends this device's connection details to our support team, so they can look into a problem with you.",
   "send.note": "Anything you'd like to add (optional)",
@@ -1182,7 +1188,7 @@ const en = {
   "disclosure.dataSupport":
     "Support messages you send from the app, so we can answer them.",
   "disclosure.dataDiagnostics":
-    "Connection diagnostics, so we can find and fix problems. This includes whether a connection worked, which server and connection type it used and how long it took, the app version, your device model and system version, whether you were on Wi-Fi or mobile data, your device's DNS settings and any error message. About once a day the app also tests whether a short list of well-known services can be reached through the VPN. It never records the sites you visit.",
+    "Connection diagnostics, so we can find and fix problems. This includes whether a connection worked, which server and connection type it used and how long it took, the app version, your device model and system version, whether you were on Wi-Fi or mobile data, your device's DNS settings and any error message. After connecting, the app also tests whether a short list of well-known services can be reached through the VPN, at most once a day for each server, and it sends the result of the connection test when you run it yourself. It never records the sites you visit.",
   "disclosure.dataServerLogs":
     "Our VPN servers keep operating logs, which can include connection records, so we can run the service and find problems.",
   "disclosure.dataNotSold":
@@ -2173,6 +2179,11 @@ const fa: Record<TranslationKey, string> = {
   "check.viaDirect": "بدون وی‌پی‌ان آزمایش شد.",
   "check.off": "آزمایش اتصال الان در دسترس نیست.",
   "check.unavailable": "آزمایش شروع نشد. کمی بعد دوباره امتحان کنید.",
+  "check.shared": "نتیجه برای ما هم فرستاده می‌شود تا مشکل‌های اتصال را بهتر پیدا کنیم.",
+  "notice.diagTitle": "اطلاعات عیب‌یابی اتصال",
+  "notice.diagBody":
+    "برای اینکه بتوانیم مشکل‌های اتصال را پیدا و رفع کنیم، برنامه می‌تواند همراه گزارش‌های اتصال چند مورد دیگر هم بفرستد: مدل دستگاه و نسخهٔ سیستم‌عامل، حافظهٔ آزاد و حالت صرفه‌جویی باتری، وصل بودن به وای‌فای یا کابل، تنظیمات DNS دستگاه و مدت زمانی که وصل شدن طول کشید. بعد از وصل شدن هم بررسی می‌کند که چند سرویس شناخته‌شده در دسترس‌اند یا نه، برای هر سرور حداکثر روزی یک بار، و وقتی خودتان آزمایش اتصال را اجرا کنید نتیجه‌اش را هم می‌فرستد. سایت‌هایی که باز می‌کنید هرگز ثبت نمی‌شود. تا «باشه» را نزنید، هیچ‌کدام از این‌ها فرستاده نمی‌شود.",
+  "notice.diagOk": "باشه",
   "send.title": "فرستادن اطلاعات عیب‌یابی برای پشتیبانی",
   "send.subtitle": "مشخصات اتصال این دستگاه را برای تیم پشتیبانی می‌فرستد تا بتوانند مشکل را همراه شما بررسی کنند.",
   "send.note": "اگر چیزی می‌خواهید اضافه کنید (اختیاری)",
@@ -2305,7 +2316,7 @@ const fa: Record<TranslationKey, string> = {
   "disclosure.dataSupport":
     "پیام‌هایی که از داخل برنامه به پشتیبانی می‌فرستید، تا بتوانیم جواب بدهیم.",
   "disclosure.dataDiagnostics":
-    "اطلاعات عیب‌یابی اتصال، تا بتوانیم مشکل‌ها را پیدا و رفع کنیم. این شامل موفق بودن یا نبودن اتصال، سرور و نوع اتصالی که استفاده شد و مدت زمانی که طول کشید، نسخهٔ برنامه، مدل دستگاه و نسخهٔ سیستم‌عامل، وصل بودن به وای‌فای یا اینترنت همراه، تنظیمات DNS دستگاه و پیام خطاست. برنامه تقریباً روزی یک بار هم بررسی می‌کند که آیا چند سرویس شناخته‌شده از طریق وی‌پی‌ان در دسترس‌اند یا نه. سایت‌هایی که باز می‌کنید هرگز ثبت نمی‌شود.",
+    "اطلاعات عیب‌یابی اتصال، تا بتوانیم مشکل‌ها را پیدا و رفع کنیم. این شامل موفق بودن یا نبودن اتصال، سرور و نوع اتصالی که استفاده شد و مدت زمانی که طول کشید، نسخهٔ برنامه، مدل دستگاه و نسخهٔ سیستم‌عامل، وصل بودن به وای‌فای یا اینترنت همراه، تنظیمات DNS دستگاه و پیام خطاست. برنامه بعد از وصل شدن هم بررسی می‌کند که چند سرویس شناخته‌شده از طریق وی‌پی‌ان در دسترس‌اند یا نه، برای هر سرور حداکثر روزی یک بار، و وقتی خودتان آزمایش اتصال را اجرا کنید نتیجه‌اش را هم می‌فرستد. سایت‌هایی که باز می‌کنید هرگز ثبت نمی‌شود.",
   "disclosure.dataServerLogs":
     "سرورهای وی‌پی‌ان ما برای اداره کردن سرویس و پیدا کردن مشکل‌ها گزارش کار نگه می‌دارند که ممکن است سابقهٔ اتصال‌ها هم در آن باشد.",
   "disclosure.dataNotSold":

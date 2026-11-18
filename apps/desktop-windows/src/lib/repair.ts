@@ -280,6 +280,17 @@ export async function collectLinuxDiagnostics(): Promise<LinuxDiagnostics> {
   return withTimeout(invoke<LinuxDiagnostics>("vpn_linux_diagnostics"), "diagnostics", SERVICE_CALL_TIMEOUT_MS * 5);
 }
 
+/** A snapshot as a diagnostics bundle sends it (docs/client-diagnostics.md):
+ * the other VPNs that are up as a count, not by name. Those are the
+ * adapters' (or links') own names, which a customer or an employer may
+ * have named after a person; the Copy text the customer pastes themselves
+ * keeps them. */
+export function withoutVpnNames<T extends { otherVpnsUp?: unknown }>(snapshot: T): T {
+  const names = snapshot.otherVpnsUp;
+  if (!Array.isArray(names)) return snapshot;
+  return { ...snapshot, otherVpnsUp: names.length > 0 ? [`${names.length} (names not sent)`] : [] };
+}
+
 /** The Linux snapshot as text, on the same terms as `diagnosticsToText`:
  * plain lines a customer can check at a glance before pasting them. Read
  * defensively, because a helper older or newer than this app may leave a

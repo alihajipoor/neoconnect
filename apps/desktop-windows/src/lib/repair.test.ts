@@ -12,6 +12,7 @@ import {
   repairUnderWay,
   stopPassBeforeRepair,
   unresolvedSteps,
+  withoutVpnNames,
   type Diagnostics,
   type RepairReport,
   type RepairStep,
@@ -160,6 +161,17 @@ describe("what counts as a repaired machine", () => {
     // And the control: a real removal alongside it does count.
     report.steps.push(step("dns", "fixed", "removed 1 rule(s)"));
     expect(anythingFixed(report)).toBe(true);
+  });
+});
+
+describe("the diagnostics text a bundle sends", () => {
+  it("counts the other VPNs that are up rather than naming them", () => {
+    const text = diagnosticsToText(withoutVpnNames({ ...EMPTY, otherVpnsUp: ["Example Corp - J. Doe VPN", "Kerio Virtual Network"] }), "0.9.58");
+    expect(text).toContain("other VPNs up: 2 (names not sent)");
+    expect(text).not.toContain("J. Doe");
+    expect(diagnosticsToText(withoutVpnNames({ ...EMPTY, otherVpnsUp: [] }), "0.9.58")).toContain("other VPNs up: none");
+    // A Linux helper that left the field out still says so.
+    expect(withoutVpnNames({ helperVersion: "0.2.0" } as { otherVpnsUp?: unknown })).toEqual({ helperVersion: "0.2.0" });
   });
 });
 

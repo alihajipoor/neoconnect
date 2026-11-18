@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -212,6 +213,21 @@ describe("the first-run disclosure Google Play requires", () => {
     expect(disclosure.split("onAccept()").length - 1).toBe(1);
     expect(disclosure).toMatch(/setPending\(true\);\s*await recordAcceptance\(\);\s*onAccept\(\);/);
     expect(disclosure).toContain("onClick={() => void accept()}");
-    expect(disclosure).toContain("export const DISCLOSURE_VERSION = 1;");
+    expect(disclosure).toContain("export const DISCLOSURE_VERSION = 2;");
+  });
+
+  /** The words of "what we collect", in both languages, as of each
+   * version. A change to them fails here: if it adds a kind of data or a
+   * purpose, bump DISCLOSURE_VERSION (so everyone who accepted the old
+   * words is shown the new ones before anything new is collected) and add
+   * the new fingerprint under it; if it is only wording, replace the
+   * fingerprint of the current version. */
+  it("is shown again whenever what it says is collected changes", () => {
+    const FINGERPRINTS: Record<number, string> = { 2: "6c4d69c59b51cb24" };
+    const i18n = read("../../../desktop-windows/src/lib/i18n.tsx");
+    const words = [...i18n.matchAll(/"(disclosure\.data[A-Za-z]+)":\s*"((?:[^"\\]|\\.)*)"/g)].map((m) => `${m[1]}=${m[2]}`);
+    expect(words).toHaveLength(12);
+    const version = Number(/export const DISCLOSURE_VERSION = (\d+);/.exec(disclosure)?.[1]);
+    expect(createHash("sha256").update(words.join("\n")).digest("hex").slice(0, 16)).toBe(FINGERPRINTS[version]);
   });
 });

@@ -42,8 +42,14 @@ function sentBodies(): Record<string, unknown>[] {
 
 const refused: ApiResult<void> = { ok: false, error: "Request failed (400)", status: 400 };
 
+/** The desktop notice, accepted (diagnostics-consent.ts). */
+function acceptNotice() {
+  files.set("diagnostics-notice.json", new Map<string, unknown>([["acceptedVersion", 1]]));
+}
+
 beforeEach(async () => {
   for (const data of files.values()) data.clear();
+  acceptNotice();
   invoke.mockReset();
   invoke.mockImplementation(async (cmd) => {
     if (cmd === "build_platform") return "windows";
@@ -75,6 +81,45 @@ describe("a report's details", () => {
     invoke.mockImplementation(async (cmd) => (cmd === "build_platform" ? "linux" : Promise.reject(new Error("no command"))));
     await attempts.reportAttempt({ kind: "SIGN_IN", outcome: "SUCCESS" });
     expect(sentBodies()[0]).not.toHaveProperty("details");
+  });
+});
+
+describe("before the customer has been told in the app", () => {
+  beforeEach(() => {
+    files.get("diagnostics-notice.json")?.clear();
+  });
+
+  it("a report goes as it always did: no details, no rung times", async () => {
+    await attempts.reportAttempt({
+      kind: "SIGN_IN",
+      outcome: "REJECTED",
+      details: { errorKind: "badPassword" },
+      attempts: [{ protocol: "Stealth", result: "refused", ms: 900 }],
+    });
+    const [body] = sentBodies();
+    expect(body).not.toHaveProperty("details");
+    expect((body.attempts as object[])[0]).toEqual({ protocol: "Stealth", result: "refused" });
+  });
+
+  it("a service check is not sent at all", async () => {
+    await attempts.reportAttempt({ kind: "SERVICE_CHECK", outcome: "SUCCESS", details: { via: "direct" } });
+    expect(publicRequest).not.toHaveBeenCalled();
+  });
+
+  it("an earlier notice version is not this one", async () => {
+    files.set("diagnostics-notice.json", new Map<string, unknown>([["acceptedVersion", 0]]));
+    await attempts.reportAttempt({ kind: "CONNECT", outcome: "SUCCESS" });
+    expect(sentBodies()[0]).not.toHaveProperty("details");
+  });
+});
+
+describe("a service check that cannot be delivered", () => {
+  it("is not queued, so it never pushes a connect failure out of the queue", async () => {
+    publicRequest.mockResolvedValue({ ok: false, error: "Could not reach Neoxify", noResponse: true } as ApiResult<void>);
+    await attempts.reportAttempt({ kind: "CONNECT", outcome: "REJECTED" });
+    await attempts.reportAttempt({ kind: "SERVICE_CHECK", outcome: "OTHER", details: { via: "direct" } });
+    const queued = (files.get("attempt-reports.json")?.get("reports") ?? []) as { kind: string }[];
+    expect(queued.map((r) => r.kind)).toEqual(["CONNECT"]);
   });
 });
 

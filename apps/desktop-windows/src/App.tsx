@@ -26,6 +26,8 @@ import { swapView } from "./lib/view-transition";
 import { CustomModeCard } from "./components/CustomModeCard";
 import { GamingModeCard } from "./components/GamingModeCard";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { DiagnosticsNotice } from "./components/DiagnosticsNotice";
+import { acceptDesktopNotice, hasAcceptedDesktopNotice } from "./lib/diagnostics-consent";
 import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
 import { openDownloadPage, startUpdateNotices } from "./lib/update-notice";
 import { applyLinuxUpdate, startLinuxUpdates } from "./lib/linux-update";
@@ -117,6 +119,9 @@ export default function App() {
   const [downloadOpenFailed, setDownloadOpenFailed] = useState(false);
   // A sign-out pressed on one of the shell's pages, under way.
   const [pageSigningOut, setPageSigningOut] = useState(false);
+  // The notice about the fuller diagnostics, until it is accepted: shown
+  // once the store has said it was not (lib/diagnostics-consent.ts).
+  const [diagnosticsNotice, setDiagnosticsNotice] = useState(false);
   // Guards against processing the same deep-link URL twice -- the launch
   // URL can plausibly reach handleDeepLinkUrl via both the Rust-side
   // get_launch_deep_link command and the plugin's own onOpenUrl forwarding
@@ -153,6 +158,10 @@ export default function App() {
   // The session log keeps seven days while the app runs, not only at
   // each start (lib/session-log.ts).
   useEffect(() => sessionLog.keepPruned(), []);
+
+  useEffect(() => {
+    void hasAcceptedDesktopNotice().then((accepted) => setDiagnosticsNotice(!accepted));
+  }, []);
 
   // "Block the internet while reconnecting": the service's hold is let go
   // of when the reconnect it was for ends -- landed, given up, or ended by
@@ -591,16 +600,26 @@ export default function App() {
       page={shellPage()}
       onShowMain={() => setScreen("dashboard")}
       update={
-        <UpdateBanner
-          state={updateState}
-          onRestart={() => void restartForUpdate()}
-          busy={restarting}
-          blocked={updateBlocked}
-          onOpenDownload={() => void openDownload()}
-          openFailed={downloadOpenFailed}
-          // Linux's Restart runs the package manager before it relaunches.
-          installing={restarting && isLinux()}
-        />
+        <>
+          {diagnosticsNotice ? (
+            <DiagnosticsNotice
+              onAccept={() => {
+                setDiagnosticsNotice(false);
+                void acceptDesktopNotice();
+              }}
+            />
+          ) : null}
+          <UpdateBanner
+            state={updateState}
+            onRestart={() => void restartForUpdate()}
+            busy={restarting}
+            blocked={updateBlocked}
+            onOpenDownload={() => void openDownload()}
+            openFailed={downloadOpenFailed}
+            // Linux's Restart runs the package manager before it relaunches.
+            installing={restarting && isLinux()}
+          />
+        </>
       }
     />
   );

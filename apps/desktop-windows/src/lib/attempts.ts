@@ -8,6 +8,7 @@ import { currentAttestation, currentClientIp } from "./network-identity";
 import { takeEngineNote } from "./webview-engine";
 import { desktopPlatform } from "./desktop-platform";
 import { collectDetails, type ReportDetails } from "./report-details";
+import { diagnosticsAllowed } from "./diagnostics-consent";
 
 /** Telling the panel how an attempt went, so a beta can be watched from
  * somewhere other than screenshots.
@@ -583,6 +584,11 @@ function amended(report: QueuedReport, addendum: AttemptAddendum): QueuedReport 
 
 /** Queues a report to go out on the next contact. */
 async function enqueue(report: QueuedReport): Promise<void> {
+  // A service check that could not be delivered is not kept: the queue's
+  // few places are for the connect failures that cannot be reported while
+  // they are true, and a test pressed over and over on a line that cannot
+  // reach us must not push them out.
+  if (report.kind === "SERVICE_CHECK") return;
   const queue = await readQueue();
   queue.push(report);
   await writeQueue(queue.slice(-MAX_QUEUED));
@@ -681,8 +687,15 @@ export async function reportAttempt(
 
     // The device, the network under the tunnel and what the connect
     // measured, beside what the caller knows. Absent when none is known.
-    const details = await collectDetails(report.kind, report.details);
-    const { details: _own, ...plain } = shaped;
+    // Asked before anything is awaited, so the tunnel it names is the one
+    // this report is about (`collectDetails`). None of it, and no rung
+    // times, until the customer has been told in the app
+    // (diagnostics-consent.ts): the report then goes as it always did.
+    const collected = collectDetails(report.kind, report.details, report.outcome);
+    const allowed = await diagnosticsAllowed();
+    if (!allowed && report.kind === "SERVICE_CHECK") return;
+    const details = allowed ? await collected : undefined;
+    const { details: _own, ...plain } = allowed ? shaped : withoutDetails(shaped);
     const queued: QueuedReport = {
       ...plain,
       ...(details ? { details } : {}),
