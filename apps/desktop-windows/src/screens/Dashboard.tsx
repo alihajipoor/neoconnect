@@ -105,7 +105,9 @@ import { swapView } from "../lib/view-transition";
 import { rearmCheckPop } from "../lib/check-pop";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
-import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
+import { failedDial, outcomeFromError, reportAttempt, rungsFrom, timedRungs, type Dial } from "../lib/attempts";
+import { noteTunnel, tunnelResolvers } from "../lib/report-details";
+import { runScheduledServiceCheck } from "../lib/service-check";
 import {
   checkDataMoves,
   rememberedKbps,
@@ -1264,7 +1266,7 @@ export function Dashboard({
     setTunnelDropped(true);
     setConnectedAt(null);
     strikesRef.current = 0;
-    sessionTrackerRef.current.broken();
+    sessionTrackerRef.current.ended("lost");
     // Nothing renews a slot without a tunnel, and nothing is going to
     // bring one back: given back, rather than left to turn the
     // customer's other device away as "in use" until it goes stale. Kept
@@ -2537,6 +2539,8 @@ export function Dashboard({
       setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
       setConfinedAround(status.ipv4Confined === true);
       setUnconfinedKey(unconfinedLine(status));
+      // The tunnel's settings, for the reports' details (report-details.ts).
+      noteTunnel({ splitTunnel: customMode, ipv6Blocked: Boolean(status.ipv6Blocked), dnsUnprotected: status.tunnelDnsUnprotected ?? false });
       const fromStatus = stateFromStatus(status);
 
       if (fromStatus === "disconnected") {
@@ -2672,6 +2676,8 @@ export function Dashboard({
       // moment to ask anything of them.
       strikesRef.current = 0;
       cooldownUntilRef.current = Date.now() + MID_SESSION_COOLDOWN_MS;
+      // The health checks gave up on this session.
+      sessionTrackerRef.current.ended("lost");
       return true;
     };
 
@@ -3327,6 +3333,7 @@ export function Dashboard({
         // The customer ends this session: their next verified connection
         // is a new one, and its check bounces again (lib/check-pop.ts).
         rearmCheckPop();
+        sessionTrackerRef.current.ended("disconnected");
         const generation = beginIntent("disconnect");
         // This device stops using one of the plan's devices. Released
         // fire and forget, within a second and a half, and never in
@@ -3923,7 +3930,9 @@ export function Dashboard({
       // Why each attempt failed, in order. Kept because diagnosing the
       // first version of this needed a firewall rule and the server's
       // own logs -- the app knew and said nothing.
-      const attempts: string[] = [];
+      // Each line pushed is timed from its rung's start (`timedRungs`).
+      const rungClock = timedRungs();
+      const attempts: string[] = rungClock.lines;
       // One per entry in `attempts`, by index: which route that rung
       // dialled and whether it carried, or null when the rung says
       // nothing about the network. Feeds the per-ISP tags; see
@@ -4020,6 +4029,7 @@ export function Dashboard({
       // of a network is dialled again, on the same server, once there is one.
       for (let index = 0; index < candidates.length || queueSlowFallback(); index += 1) {
         const candidate = candidates[index];
+        rungClock.start();
         const historyBeforeRung = passHistory;
         if (stopped() || sessionGeneration() !== sessionAtStart) break;
         // A pass whose guard expired and that a newer pass has replaced
@@ -4608,6 +4618,11 @@ export function Dashboard({
             // on the landed rung beside the check's upload. A report held a
             // few seconds is the same report; a row of its own for the
             // sample would be counted as a second attempt.
+            const rungMs = rungClock.landed();
+            noteTunnel({
+              mode: appModeRef.current === "gaming" ? "gaming" : customMode ? "custom" : "full",
+              dns: tunnelResolvers(candidate.protocol, candidate.credentials, desktopPlatform()),
+            });
             void sampleDownload(sampleBase).then((sample) => {
               const sampled = rememberedKbpsWith(measured, sample);
               if (sampled !== null) {
@@ -4632,11 +4647,24 @@ export function Dashboard({
                           ? { routeId: candidate.routeId, carried: true, ...rungSpeeds(measured, sample) }
                           : null,
                       ],
+                      rungMs,
                     ),
                   },
                   options.reconnect,
                 ),
-              );
+              ).then(() => {
+                // The fixed-list test, once that report is out: only through
+                // a proven full tunnel -- in Custom mode the app's own
+                // traffic bypasses it -- and only while it is still this one.
+                if (verdict !== "connected") return;
+                void runScheduledServiceCheck({
+                  routeId: candidate.routeId,
+                  protocol: label,
+                  fullTunnel: appModeRef.current !== "gaming" && !customMode,
+                  stillUp: () =>
+                    isTunnelUp(connectionStateRef.current) && protocolUserRef.current?.routeId === candidate.routeId,
+                });
+              });
             });
             // A tunnel to reconnect if it drops. A reconnect's own landing
             // is armed by the episode, which carries its count of quick
@@ -4867,7 +4895,8 @@ export function Dashboard({
               kind: "CONNECT",
               outcome: lastError ? outcomeFromError(lastError.kind) : "OTHER",
               reason: lastError?.detail,
-              attempts: rungsFrom(attempts, dials),
+              attempts: rungsFrom(attempts, dials, rungClock.ms),
+              ...(lastError ? { details: { errorKind: lastError.kind } } : {}),
             },
             options.reconnect,
           ),

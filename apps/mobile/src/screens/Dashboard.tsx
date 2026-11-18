@@ -140,8 +140,11 @@ import {
   outcomeFromError,
   reportAttempt,
   rungsFrom,
+  timedRungs,
   type Dial,
 } from "@shared/lib/attempts";
+import { noteTunnel, tunnelResolvers } from "@shared/lib/report-details";
+import { runScheduledServiceCheck } from "@shared/lib/service-check";
 import {
   checkDataMoves,
   rememberedKbps,
@@ -1544,7 +1547,7 @@ export function Dashboard({
    * back itself when that claim is not coming -- it waits for the app to
    * be opened, or ends before a pass of it claimed (`slotIdle`). */
   function reportDrop() {
-    sessionTrackerRef.current.broken();
+    sessionTrackerRef.current.ended("lost");
     setConnectionState("disconnected");
     setConnectedAt(null);
     setTunnelDropped(true);
@@ -2020,6 +2023,7 @@ export function Dashboard({
       // The customer ends this session: their next verified connection is
       // a new one, and its check bounces again (lib/check-pop.ts).
       rearmCheckPop();
+      sessionTrackerRef.current.ended("disconnected");
       // This phone stops using one of the plan's devices. Released fire
       // and forget, within a second and a half, and never in front of
       // the teardown: started while the tunnel is still up, the request
@@ -2620,7 +2624,9 @@ export function Dashboard({
      * gone. Nothing more is dialled. */
     let heldBack: "permission" | "otherVpn" | null = null;
     let lastError: ClassifiedError | null = null;
-    const attempts: string[] = [];
+    // Each line pushed is timed from its rung's start (`timedRungs`).
+    const rungClock = timedRungs();
+    const attempts: string[] = rungClock.lines;
     // Parallel to `attempts`: which route each rung dialled and whether
     // it carried, or null for a rung that says nothing about the network.
     const dials: Dial[] = [];
@@ -2658,7 +2664,7 @@ export function Dashboard({
             // With the dials, as every other report: without them each
             // rung lost its server, and the log showed what was given up
             // on as "unknown server".
-            attempts: attempts.length > 0 ? rungsFrom(attempts, dials) : undefined,
+            attempts: attempts.length > 0 ? rungsFrom(attempts, dials, rungClock.ms) : undefined,
           },
           options.reconnect,
         ),
@@ -2714,6 +2720,7 @@ export function Dashboard({
 
     for (let index = 0; index < candidates.length || queueSlowFallback(); index += 1) {
       const candidate = candidates[index];
+      rungClock.start();
       // The customer pressed stop. Whatever this attempt left behind is
       // torn down by the toggle that set the flag, so this only has to
       // stop walking the list. The last rung's engine, told to stop at the
@@ -3052,6 +3059,13 @@ export function Dashboard({
           // seconds is the same report; a row of its own for the sample
           // would be counted as a second attempt. The Windows ladder's rule.
           const sampleBase = measured !== null && verdict.state === "throughTunnel" ? verdict.from : undefined;
+          const rungMs = rungClock.landed();
+          // The phone puts this app in the tunnel even with apps chosen.
+          noteTunnel({
+            mode: allowedApps.length > 0 ? "custom" : "full",
+            splitTunnel: allowedApps.length > 0,
+            dns: tunnelResolvers(candidate.protocol, candidate.credentials, "mobile"),
+          });
           void sampleDownload(sampleBase).then((sample) => {
             const sampled = rememberedKbpsWith(measured, sample);
             if (sampled !== null) rememberSpeed(candidate.routeId, candidate.protocol, sampled);
@@ -3065,11 +3079,24 @@ export function Dashboard({
                   attempts: rungsFrom(
                     [...attempts, `${label}: connected`],
                     [...dials, proven ? { routeId: candidate.routeId, carried: true, ...rungSpeeds(measured, sample) } : null],
+                    rungMs,
                   ),
                 },
                 options.reconnect,
               ),
-            );
+            ).then(() => {
+              // The fixed-list test, once that report is out: only through
+              // a proven tunnel, and only while it is still this one. With
+              // apps chosen the phone still carries this app in it.
+              if (!proven) return;
+              void runScheduledServiceCheck({
+                routeId: candidate.routeId,
+                protocol: label,
+                fullTunnel: true,
+                stillUp: () =>
+                  tunnelUp(connectionStateRef.current) && protocolUserRef.current?.routeId === candidate.routeId,
+              });
+            });
             // After the landing's own report: the run a drop could not
             // yet sum up, now that this start has.
             void reportRunEndOwed();
@@ -3225,7 +3252,8 @@ export function Dashboard({
                     : "the VPN configuration is no longer this app's"
                 }${lastError ? `; ${lastError.detail}` : ""}`
               : lastError?.detail,
-          attempts: rungsFrom(attempts, dials),
+          attempts: rungsFrom(attempts, dials, rungClock.ms),
+          ...(heldBack === null && lastError ? { details: { errorKind: lastError.kind } } : {}),
         },
         options.reconnect,
       ),
