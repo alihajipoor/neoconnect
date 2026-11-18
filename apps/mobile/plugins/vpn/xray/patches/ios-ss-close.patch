@@ -1,0 +1,37 @@
+neoxify-patch header: ios-ss-close
+
+Passes a Shadowsocks server's close back to the app in the iOS engine.
+xray-core bridges Shadowsocks 2022 through sing's CopyConn, which half-closes
+the app's side only if it offers CloseWrite; the wrapper did not, and its
+Close does nothing, so a site's close never reached the app and the
+connection -- with its Shadowsocks buffers -- stayed until the app closed or
+300 s passed. Written against xray-core v26.6.27 (45cf2898ab12),
+common/singbridge/pipe.go. Applied by apps/mobile/scripts/xray-core-patch.sh,
+for the iOS build only. Guarded by TestEngineMemoryBudget (plugins/vpn/xray),
+2026-11-17.
+
+--- a/common/singbridge/pipe.go
++++ b/common/singbridge/pipe.go
+@@ -44,6 +44,22 @@
+ 	return nil
+ }
+ 
++// neoxify-patch: ios-ss-close. The far end is done sending: pass that on,
++// and give the other direction what every other outbound gives it once
++// the download is over -- seconds, not the 300 s idle timeout -- as Read
++// above does for the upload (uplinkonly). Without this, sing's CopyConn
++// saw no half-close here, its "close" was the no-op above, and a site's
++// close never reached the app: the connection, and its Shadowsocks
++// buffers, stayed until the app closed its side or 300 s passed. Measured
++// on the phone (body in 2 s, still open past 30 s) and in the engine's
++// memory (TestEngineMemoryBudget: a DoH dial whose handshake failed is
++// never closed by app/dns, and was held here for 300 s each).
++func (w *PipeConnWrapper) CloseWrite() error {
++	// downlinkonly
++	w.T.SetTimeout(2 * time.Second)
++	return common.Close(w.W)
++}
++
+ func (w *PipeConnWrapper) Read(b []byte) (n int, err error) {
+ 	w.T.Update()
+ 	n, err = w.R.Read(b)

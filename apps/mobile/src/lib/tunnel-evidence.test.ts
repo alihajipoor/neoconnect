@@ -201,7 +201,7 @@ describe("pollEgress", () => {
   it("asks the baseline's own endpoint first", async () => {
     answers = [THROUGH];
     await expect(pollEgress(BASELINE)).resolves.toEqual(THROUGH);
-    expect(calls).toEqual([{ baseline: BASELINE, options: { sameEndpointOnly: true } }]);
+    expect(calls).toEqual([{ baseline: BASELINE, options: { sameEndpointOnly: true, attemptMs: 6000 } }]);
   });
 
   it("falls back to the whole list only when that endpoint does not answer", async () => {
@@ -213,7 +213,8 @@ describe("pollEgress", () => {
   it("asks the whole list when there is no baseline", async () => {
     answers = [INDETERMINATE];
     await pollEgress(null);
-    expect(calls).toEqual([{ baseline: null, options: {} }]);
+    // Bounded and hedged: see poll-bound.test.ts.
+    expect(calls).toEqual([{ baseline: null, options: { totalMs: 8000, hedgeMs: 1000 } }]);
   });
 
   it("passes the connected server to every walk it makes", async () => {

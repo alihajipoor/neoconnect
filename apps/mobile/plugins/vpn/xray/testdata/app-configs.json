@@ -8,6 +8,11 @@
       "system": {
         "statsOutboundUplink": true,
         "statsOutboundDownlink": true
+      },
+      "levels": {
+        "1": {
+          "connIdle": 10
+        }
       }
     },
     "dns": {
@@ -67,6 +72,7 @@
         "protocol": "dns",
         "settings": {
           "rewriteNetwork": "tcp",
+          "userLevel": 1,
           "rules": [
             {
               "action": "hijack",
@@ -129,6 +135,11 @@
       "system": {
         "statsOutboundUplink": true,
         "statsOutboundDownlink": true
+      },
+      "levels": {
+        "1": {
+          "connIdle": 10
+        }
       }
     },
     "dns": {
@@ -190,6 +201,7 @@
         "protocol": "dns",
         "settings": {
           "rewriteNetwork": "tcp",
+          "userLevel": 1,
           "rules": [
             {
               "action": "hijack",
@@ -252,6 +264,11 @@
       "system": {
         "statsOutboundUplink": true,
         "statsOutboundDownlink": true
+      },
+      "levels": {
+        "1": {
+          "connIdle": 10
+        }
       }
     },
     "dns": {
@@ -317,6 +334,7 @@
         "protocol": "dns",
         "settings": {
           "rewriteNetwork": "tcp",
+          "userLevel": 1,
           "rules": [
             {
               "action": "hijack",
@@ -370,6 +388,11 @@
       "system": {
         "statsOutboundUplink": true,
         "statsOutboundDownlink": true
+      },
+      "levels": {
+        "1": {
+          "connIdle": 10
+        }
       }
     },
     "dns": {
@@ -425,6 +448,7 @@
         "protocol": "dns",
         "settings": {
           "rewriteNetwork": "tcp",
+          "userLevel": 1,
           "rules": [
             {
               "action": "hijack",
@@ -478,6 +502,11 @@
       "system": {
         "statsOutboundUplink": true,
         "statsOutboundDownlink": true
+      },
+      "levels": {
+        "1": {
+          "connIdle": 10
+        }
       }
     },
     "dns": {
@@ -528,6 +557,7 @@
         "protocol": "dns",
         "settings": {
           "rewriteNetwork": "tcp",
+          "userLevel": 1,
           "rules": [
             {
               "action": "hijack",

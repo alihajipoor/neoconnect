@@ -1,0 +1,230 @@
+neoxify-patch header: ios-udp-flows
+
+Bounds the UDP flows of the iOS engine's TUN inbound, and the time a refused one
+is held. A 64-packet queue per flow (upstream 1024); a flow ended after
+30 s with no packet either way once replied, 15 s while unreplied, 10 s for
+one to port 53; at most 64 flows at once, and 512 lookups beside them.
+Upstream keeps a flow until its outbound gives up on it (300 s idle), and the
+blackhole held a refused UDP flow 30-90 s. Written against xray-core v26.6.27
+(45cf2898ab12): proxy/tun/udp_fullcone.go, proxy/blackhole/blackhole.go. Applied by
+apps/mobile/scripts/xray-core-patch.sh, for the iOS build only. Measured
+with TestEngineAppOpenLoad and guarded by TestEngineMemoryBudget
+(plugins/vpn/xray), 2026-11-17.
+
+--- a/proxy/blackhole/blackhole.go
++++ b/proxy/blackhole/blackhole.go
+@@ -50,7 +50,13 @@
+ 		timer := signal.CancelAfterInactivity(ctx, func() {
+ 			cancel()
+ 		}, time.Duration(30+dice.Roll(61))*time.Second)
+-		go buf.Copy(link.Reader, buf.Discard, buf.UpdateActivity(timer))
++		// neoxify-patch: ios-udp-flows. Done when the flow is, too: the
++		// TUN inbound ends an idle flow (proxy/tun/udp_fullcone.go), and
++		// without this each refused one was still held 30-90 s here.
++		go func() {
++			buf.Copy(link.Reader, buf.Discard, buf.UpdateActivity(timer))
++			cancel()
++		}()
+ 		<-ctx.Done()
+ 	}
+ 	return nil
+--- a/proxy/tun/udp_fullcone.go
++++ b/proxy/tun/udp_fullcone.go
+@@ -4,6 +4,7 @@
+ 	"context"
+ 	"io"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/xtls/xray-core/common/buf"
+@@ -11,6 +12,39 @@
+ 	"github.com/xtls/xray-core/common/net"
+ )
+ 
++// neoxify-patch: ios-udp-flows. Every UDP source port the phone uses is a
++// flow here, and upstream keeps one until its outbound gives up on it --
++// 300 s idle for a proxied flow, 30-90 s for a refused one -- each with a
++// 1024-packet queue and its goroutines. A phone sends every lookup from a
++// new port, three per name, and QUIC attempts from new ports too, so
++// opening apps held thousands of flows inside an iOS packet tunnel that is
++// killed at about 50 MB (measured 2026-11-17: 49.2 MiB 30 s into a
++// session). Bounded here by design:
++//   - a short queue per flow (udpFlowQueue);
++//   - a flow ended when idle -- no packet either way -- for udpFlowIdle
++//     once it has had a reply, udpUnrepliedIdle while it has had none (a
++//     QUIC attempt nothing answers); for one to port 53, which is over in
++//     one reply, udpLookupIdle until it is answered (the slowest lookup
++//     takes 6 s) and udpAnsweredIdle after;
++//   - at most udpFlowMax flows at once and udpLookupMax lookups beside
++//     them, so a flood of one kind cannot starve the other; a packet that
++//     would open one more is dropped, as a full queue drops one. A phone
++//     has a handful of live UDP flows (calls, games, QUIC to a few hosts);
++//     on a protocol that carries each one in a connection of its own
++//     (Trojan, VLESS over WebSocket) a flow costs about 60 KiB, so 64 of
++//     them is about 4 MiB, and a QUIC attempt turned away falls back to
++//     TCP as it does wherever QUIC is blocked.
++const (
++	udpFlowQueue     = 64
++	udpFlowIdle      = 30 * time.Second
++	udpUnrepliedIdle = 15 * time.Second
++	udpLookupIdle    = 10 * time.Second
++	udpAnsweredIdle  = 2 * time.Second
++	udpFlowSweep     = time.Second
++	udpFlowMax       = 64
++	udpLookupMax     = 512
++)
++
+ type packet struct {
+ 	data []byte
+ 	dest *net.Destination
+@@ -21,6 +55,8 @@
+ 	sync.RWMutex
+ 
+ 	udpConns map[net.Destination]*udpConn
++	sweeping bool
++	lookups  int // of udpConns, those to port 53
+ 
+ 	handleConnection func(conn net.Conn, dest net.Destination)
+ 	writePacket      func(data []byte, src net.Destination, dst net.Destination) error
+@@ -42,6 +78,7 @@
+ 	u.RLock()
+ 	conn, found := u.udpConns[src]
+ 	if found {
++		conn.touch()
+ 		select {
+ 		case conn.egress <- &packet{
+ 			data: data,
+@@ -60,9 +97,26 @@
+ 
+ 	conn, found = u.udpConns[src]
+ 	if !found {
+-		egress := make(chan *packet, 1024)
+-		conn = &udpConn{handler: u, egress: egress, src: src, dst: dst}
++		lookup := dst.Port == 53
++		count, most := len(u.udpConns)-u.lookups, udpFlowMax
++		if lookup {
++			count, most = u.lookups, udpLookupMax
++		}
++		if count >= most {
++			errors.LogDebug(context.Background(), "drop udp with size ", len(data), " to ", dst.NetAddr(), " > ", most, " flows")
++			return
++		}
++		egress := make(chan *packet, udpFlowQueue)
++		conn = &udpConn{handler: u, egress: egress, src: src, dst: dst, lookup: lookup}
++		conn.touch()
+ 		u.udpConns[src] = conn
++		if lookup {
++			u.lookups++
++		}
++		if !u.sweeping {
++			u.sweeping = true
++			time.AfterFunc(udpFlowSweep, u.sweep)
++		}
+ 
+ 		go u.handleConnection(conn, dst)
+ 	}
+@@ -78,13 +132,39 @@
+ 	}
+ }
+ 
+-func (u *udpConnectionHandler) connectionFinished(src net.Destination) {
++// sweep ends the flows idle past their limit: their queue is closed, so
++// the outbound reads EOF and lets go of the session. Runs while any flow
++// exists, and not otherwise, so a stopped engine leaves nothing behind.
++func (u *udpConnectionHandler) sweep() {
++	now := time.Now().UnixNano()
+ 	u.Lock()
+-	conn, found := u.udpConns[src]
+-	if found {
+-		delete(u.udpConns, src)
++	defer u.Unlock()
++	for _, conn := range u.udpConns {
++		if now-conn.last.Load() > int64(conn.idleLimit()) {
++			u.forget(conn)
++		}
++	}
++	if len(u.udpConns) == 0 {
++		u.sweeping = false
++		return
++	}
++	time.AfterFunc(udpFlowSweep, u.sweep)
++}
++
++// forget removes a flow and closes its queue. Called with the lock held.
++func (u *udpConnectionHandler) forget(conn *udpConn) {
++	if found, ok := u.udpConns[conn.src]; ok && found == conn {
++		delete(u.udpConns, conn.src)
++		if conn.lookup {
++			u.lookups--
++		}
+ 		close(conn.egress)
+ 	}
++}
++
++func (u *udpConnectionHandler) connectionFinished(conn *udpConn) {
++	u.Lock()
++	u.forget(conn)
+ 	u.Unlock()
+ }
+ 
+@@ -92,9 +172,29 @@
+ type udpConn struct {
+ 	handler *udpConnectionHandler
+ 
+-	egress chan *packet
+-	src    net.Destination
+-	dst    net.Destination
++	egress  chan *packet
++	src     net.Destination
++	dst     net.Destination
++	lookup  bool
++	last    atomic.Int64
++	replied atomic.Bool
++}
++
++func (c *udpConn) touch() {
++	c.last.Store(time.Now().UnixNano())
++}
++
++func (c *udpConn) idleLimit() time.Duration {
++	switch {
++	case c.lookup && c.replied.Load():
++		return udpAnsweredIdle
++	case c.lookup:
++		return udpLookupIdle
++	case c.replied.Load():
++		return udpFlowIdle
++	default:
++		return udpUnrepliedIdle
++	}
+ }
+ 
+ func (c *udpConn) ReadMultiBuffer() (buf.MultiBuffer, error) {
+@@ -130,6 +230,8 @@
+ }
+ 
+ func (c *udpConn) WriteMultiBuffer(mb buf.MultiBuffer) error {
++	c.touch()
++	c.replied.Store(true)
+ 	for i, b := range mb {
+ 		dst := c.dst
+ 		if b.UDP != nil {
+@@ -151,6 +253,8 @@
+ 
+ // Write returning packets back
+ func (c *udpConn) Write(p []byte) (int, error) {
++	c.touch()
++	c.replied.Store(true)
+ 	// sending packets back mean sending payload with source/destination reversed
+ 	err := c.handler.writePacket(p, c.dst, c.src)
+ 	if err != nil {
+@@ -161,7 +265,7 @@
+ }
+ 
+ func (c *udpConn) Close() error {
+-	c.handler.connectionFinished(c.src)
++	c.handler.connectionFinished(c)
+ 
+ 	return nil
+ }

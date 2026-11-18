@@ -603,7 +603,8 @@ async function readFrom(bases: string[], timeoutMs: number, options: WalkOptions
  * wins, whichever endpoint it came from; the requests still in flight
  * are left to finish and ignored.
  *
- * Only for baselines (`BaselineOptions.hedgeMs`). A strict walk on a
+ * For baselines (`BaselineOptions.hedgeMs`), and the phones' health poll
+ * through the tunnel (`VerifyOptions.hedgeMs`). A strict walk on a
  * network that blocks the head of the list -- the panel hosts, in Iran
  * -- spends a whole endpoint timeout on each before it reaches one that
  * answers, and the settle's ceiling ran out on the second. Hedged, the
@@ -753,6 +754,13 @@ export type VerifyOptions = {
    * every poll of a tunnel that works. See `verifyEgress` for why the
    * list order used to be kept anyway, and why that no longer holds. */
   baselineFirst?: boolean;
+  /** Walk the list hedged (`readHedged`) rather than strictly in turn: an
+   * endpoint that has not answered within this many ms gets the next one
+   * asked beside it, and one that fails gets the next asked at once. With
+   * `totalMs`, so a dead endpoint or two at the head of the list cannot
+   * use up the whole ceiling before one that works is asked -- the phones'
+   * health poll. Unset, the walk is strict, as it always was. */
+  hedgeMs?: number;
 };
 
 /** Compares the address the world sees now against the one it saw before
@@ -817,6 +825,7 @@ export async function verifyEgress(
     totalMs,
     tunnelServer,
     baselineFirst = false,
+    hedgeMs,
   } = options;
   const deadline = totalMs === undefined ? undefined : Date.now() + totalMs;
   const around = aroundSet(tunnelServer);
@@ -830,7 +839,10 @@ export async function verifyEgress(
     bases = baselineFirst && own !== null ? [own, ...listed.filter((base) => base !== own)] : listed;
   }
   const relayed = relayedByServer(baseline, tunnelServer);
-  const { reading, answered } = await readFrom(bases, attemptMs, { deadline, around, relayed });
+  const walk: WalkOptions = { deadline, around, relayed };
+  const { reading, answered } = await (hedgeMs === undefined
+    ? readFrom(bases, attemptMs, walk)
+    : readHedged(bases, attemptMs, hedgeMs, walk));
 
   // No address from any of ours. Two very different things look like
   // that from here: a tunnel black-holing everything, which is what this

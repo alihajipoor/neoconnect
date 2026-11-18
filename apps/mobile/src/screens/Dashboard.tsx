@@ -253,6 +253,7 @@ import {
   pollState,
   rejectionIsEvidence,
   rungOutcome,
+  singleFlight,
   stateFromStatus,
   takeBaseline,
   tunnelUp,
@@ -1588,9 +1589,6 @@ export function Dashboard({
      * must not then write "connected" over it -- a tunnel state read
      * before the teardown, reported after it. */
     let live = true;
-    /** One check at a time: the interval and the app coming to the front
-     * can both start one. */
-    let checking = false;
 
     const checkOnce = async () => {
       // A tunnel the device limit is taking down is not checked for
@@ -1639,15 +1637,9 @@ export function Dashboard({
       setConnectionState(next);
     };
 
-    const check = async () => {
-      if (checking) return;
-      checking = true;
-      try {
-        await checkOnce();
-      } finally {
-        checking = false;
-      }
-    };
+    // One check at a time: the interval and the app coming to the front
+    // can both start one, and a slow poll can outlast the interval.
+    const check = singleFlight(checkOnce);
 
     // On the interval, and as the app comes back to the front -- which
     // used to renew the slot only. A phone taken out of a pocket is when

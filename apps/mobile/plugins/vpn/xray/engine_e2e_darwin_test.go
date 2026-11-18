@@ -58,6 +58,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/pprof"
 	"sort"
 	"strings"
 	"sync"
@@ -107,8 +108,23 @@ func TestEngineChild(t *testing.T) {
 	}
 	started := time.Now()
 	fmt.Println("READY")
+	profile := os.Getenv("NEOXIFY_ENGINE_PPROF")
+	var profiledHeap int64
 	for range time.Tick(250 * time.Millisecond) {
 		hb := sampleHeartbeat(started)
+		// A heap profile at the highest heap seen so far, rewritten each
+		// time it grows by a MiB: where the memory is at the peak.
+		if profile != "" && hb.Heap > profiledHeap+(1<<20) {
+			profiledHeap = hb.Heap
+			if f, err := os.Create(profile); err == nil {
+				_ = pprof.WriteHeapProfile(f)
+				f.Close()
+			}
+			if f, err := os.Create(profile + ".goroutines"); err == nil {
+				_ = pprof.Lookup("goroutine").WriteTo(f, 1)
+				f.Close()
+			}
+		}
 		fmt.Printf("SAMPLE %d %d %d %d %d\n", time.Now().UnixMilli(), hb.Footprint, hb.FootprintPeak, hb.Heap, hb.Goroutines)
 	}
 }
@@ -127,6 +143,7 @@ type e2eKeys struct {
 	certFile, keyFile, certPEM    string
 	ports                         map[string]int
 	servicePort, destPort         int
+	dnsPort                       int // the local resolver, with hermeticDNS
 }
 
 func freePort(t *testing.T) int {
@@ -267,7 +284,26 @@ func serverConfig(k *e2eKeys) string {
 		},
 		"outbounds": []map[string]any{
 			{"protocol": "freedom", "settings": map[string]any{"redirect": fmt.Sprintf("127.0.0.1:%d", k.servicePort)}},
+			// The public resolvers the app's config names, reached for real,
+			// so lookups through the tunnel are real lookups (the DNS load
+			// test). Nothing else is sent anywhere but the local service.
+			{"tag": "resolvers", "protocol": "freedom"},
+			// With hermeticDNS: their port 53 answered by a local resolver,
+			// their DoH port refused.
+			{"tag": "fake-resolver", "protocol": "freedom", "settings": map[string]any{"redirect": fmt.Sprintf("127.0.0.1:%d", k.dnsPort)}},
+			{"tag": "refused", "protocol": "blackhole"},
 		},
+	}
+	resolvers := []string{"1.1.1.1", "8.8.8.8"}
+	if k.dnsPort != 0 {
+		cfg["routing"] = map[string]any{"rules": []map[string]any{
+			{"type": "field", "ip": resolvers, "port": "53", "outboundTag": "fake-resolver"},
+			{"type": "field", "ip": resolvers, "outboundTag": "refused"},
+		}}
+	} else {
+		cfg["routing"] = map[string]any{"rules": []map[string]any{
+			{"type": "field", "ip": resolvers, "outboundTag": "resolvers"},
+		}}
 	}
 	data, _ := json.Marshal(cfg)
 	return string(data)
@@ -430,6 +466,9 @@ func startServerEnv(t *testing.T) *e2eEnv {
 	k := newKeys(t)
 	k.servicePort = startService(t)
 	k.destPort = startDest(t, k)
+	if hermeticDNS {
+		k.dnsPort = startFakeResolver(t)
+	}
 	cfgPath := filepath.Join(t.TempDir(), "server.json")
 	_ = os.WriteFile(cfgPath, []byte(serverConfig(k)), 0o600)
 	cmd := exec.Command(bin, "run", "-c", cfgPath)
@@ -465,7 +504,14 @@ func startServerEnv(t *testing.T) *e2eEnv {
 // outbound's own tlsSettings, since the Mac's trust store is the system's.
 func appConfig(t *testing.T, k *e2eKeys, transport string) string {
 	t.Helper()
-	data, err := os.ReadFile("testdata/app-configs.json")
+	return appConfigFrom(t, k, transport, "testdata/app-configs.json")
+}
+
+// appConfigFrom is appConfig from another fixture -- the 0.2.41 shapes,
+// for a before-and-after (engine_dnsload_darwin_test.go).
+func appConfigFrom(t *testing.T, k *e2eKeys, transport, fixture string) string {
+	t.Helper()
+	data, err := os.ReadFile(fixture)
 	if err != nil {
 		t.Fatal(err)
 	}

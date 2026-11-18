@@ -1,5 +1,6 @@
 import type { ConnectionState } from "@shared/components/ConnectOrb";
 import {
+  askedAroundTunnel,
   BASELINE_HEDGE_MS,
   captureBaselineIp,
   EGRESS_TIMEOUT_MS,
@@ -274,10 +275,54 @@ export function takeBaseline(
  * its own Xray tunnel the node does not answer at all. See
  * `phoneTunnelServerOf`, and `TunnelServer` in the shared egress.ts. */
 export async function pollEgress(baseline: BaselineIp | null, tunnelServer?: TunnelServer): Promise<EgressVerdict> {
-  if (baseline === null) return verifyEgress(null, { tunnelServer });
-  const own = await verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer });
+  const walk = { tunnelServer, totalMs: POLL_WALK_MS, hedgeMs: POLL_HEDGE_MS };
+  // No endpoint of its own to ask first: straight to the walk. A baseline
+  // from the tunnel's own server is one (`askedAroundTunnel`): asked
+  // "alone", the shared check walks the whole list strictly instead.
+  if (baseline === null || askedAroundTunnel(baseline, tunnelServer)) return verifyEgress(baseline, walk);
+  const own = await verifyEgress(baseline, { sameEndpointOnly: true, tunnelServer, attemptMs: POLL_OWN_MS });
   if (own.state !== "unreachable") return own;
-  return verifyEgress(baseline, { tunnelServer });
+  return verifyEgress(baseline, walk);
+}
+
+/** How long a health poll gives the baseline's own endpoint, then the
+ * rest of the list -- so a dead tunnel is said within about half a
+ * minute of dying.
+ *
+ * The walk after the baseline's endpoint had no ceiling at all: through a
+ * dead tunnel each of about twenty endpoints waited its own six seconds,
+ * one after another, and the phone said "You're protected" for about
+ * 185 s over a tunnel that carried nothing (measured on the emulator,
+ * 0.2.41 and this branch, 2026-11-17). Now the baseline's endpoint gets
+ * its usual 6 s, and the rest of the list 8 s between them, walked hedged
+ * (`POLL_HEDGE_MS`): an endpoint that has not answered within a second
+ * gets the next one asked beside it, and one that fails at once -- a name
+ * that does not resolve -- the next straight away. So a dead endpoint or
+ * two at the head cannot use the budget up, and "unreachable" still means
+ * that nothing at all answered: an HTTP status of any kind from any of
+ * them is an answer, and the verdict is then no verdict. One poll is at
+ * most about 15 s; with the poll every 15 s (HEALTH_POLL_MS), a tunnel
+ * that dies just after one poll is reported at most about 30 s later. */
+export const POLL_OWN_MS = EGRESS_TIMEOUT_MS;
+export const POLL_WALK_MS = 8_000;
+export const POLL_HEDGE_MS = BASELINE_HEDGE_MS;
+
+/** `run`, but never twice at once: a call while one is still going is
+ * dropped, not queued. The health poll, whose interval can fire again
+ * while a slow poll through a struggling tunnel is still waiting -- two
+ * polls at once would only double the requests into that tunnel and race
+ * each other to the screen. */
+export function singleFlight(run: () => Promise<void>): () => Promise<void> {
+  let running = false;
+  return async () => {
+    if (running) return;
+    running = true;
+    try {
+      await run();
+    } finally {
+      running = false;
+    }
+  };
 }
 
 /** The state a health poll shows for a tunnel that is still up.

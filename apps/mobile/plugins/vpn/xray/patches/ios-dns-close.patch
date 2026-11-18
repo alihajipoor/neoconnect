@@ -1,0 +1,26 @@
+neoxify-patch header: ios-dns-close
+
+Closes a DoH connection whose TLS handshake failed, in the iOS engine. app/dns
+returned the error and dropped the connection, which is a link dispatched
+through the proxy, so each one stayed until the outbound gave up on it --
+one per lookup while the DoH server cannot be reached (after a network
+switch, or where it is blocked), which is exactly when lookups fall back to
+TCP and open more. Written against xray-core v26.6.27 (45cf2898ab12),
+app/dns/nameserver_doh.go. Applied by apps/mobile/scripts/xray-core-patch.sh,
+for the iOS build only. Guarded by TestEngineMemoryBudget (plugins/vpn/xray),
+2026-11-17.
+
+--- a/app/dns/nameserver_doh.go
++++ b/app/dns/nameserver_doh.go
+@@ -101,6 +101,11 @@
+ 				if !h2c {
+ 					conn = utls.UClient(conn, &utls.Config{ServerName: url.Hostname()}, utls.HelloChrome_Auto)
+ 					if err := conn.(*utls.UConn).HandshakeContext(ctx); err != nil {
++						// neoxify-patch: ios-dns-close. Closed, not dropped: the
++						// connection under it is a dispatched link through the
++						// proxy, which otherwise stays until its idle timeout --
++						// one per lookup while DoH cannot be reached.
++						conn.Close()
+ 						return nil, err
+ 					}
+ 				}

@@ -72,6 +72,23 @@ export const ENGINE_RESOLVERS: (string | { address: string; timeoutMs: number })
  * The same tag as the desktop's. */
 const DNS_OUT_TAG = "dns-out";
 
+/** How long a lookup's session in the DNS outbound outlives its last
+ * question, and the policy level that carries it (the DNS outbound's
+ * `userLevel`; nothing else uses level 1).
+ *
+ * The default is the 300 s every connection gets, and the phone asks
+ * every question from a new source port -- three per name on iOS -- so a
+ * session per question was kept for five minutes. Opening apps after a
+ * connect held thousands of them, and an iPhone's packet tunnel was killed
+ * at its 50 MB ceiling 30 s into a session (2026-11-17). A lookup is over
+ * in one answer, at most the 2 s DoH try plus the TCP server's 4 s
+ * (ENGINE_RESOLVERS); 10 s covers that with room, and the timer counts
+ * from the question, so no answer is cut off. On iOS the TUN inbound also
+ * ends such a flow 2 s after its answer, or 10 s after an unanswered
+ * question (plugins/vpn/xray/patches/ios-udp-flows.patch). */
+export const LOOKUP_LEVEL = 1;
+export const LOOKUP_IDLE_SECS = 10;
+
 /** The local refusal: anything routed here is closed on the phone without
  * dialling anything. */
 const BLOCK_TAG = "block";
@@ -400,7 +417,11 @@ export function buildXrayConfig(user: ProtocolUser, quic: VisionQuic = VISION_QU
     // xray-core app the engine package registers, or core.New refuses the
     // config (counters_test.go there builds these two).
     stats: {},
-    policy: { system: { statsOutboundUplink: true, statsOutboundDownlink: true } },
+    policy: {
+      system: { statsOutboundUplink: true, statsOutboundDownlink: true },
+      // The DNS outbound's own level: see LOOKUP_IDLE_SECS.
+      levels: { [LOOKUP_LEVEL]: { connIdle: LOOKUP_IDLE_SECS } },
+    },
     // The engine's resolver: app/dns, registered in plugins/vpn/xray.
     // IPv4 only, so an AAAA question gets an empty answer and apps stop
     // trying IPv6 the nodes would refuse anyway. The cache is xray-core's
@@ -430,6 +451,9 @@ export function buildXrayConfig(user: ProtocolUser, quic: VisionQuic = VISION_QU
         settings: {
           // Whatever is passed on goes over TCP, wherever it was sent.
           rewriteNetwork: "tcp",
+          // A lookup's session lets go LOOKUP_IDLE_SECS after its last
+          // question, not after the default 300 s.
+          userLevel: LOOKUP_LEVEL,
           rules: [
             // A and AAAA from the engine's resolver and its cache.
             { action: "hijack", qType: "1,28" },

@@ -145,7 +145,7 @@ describe("traffic counters", () => {
   it("asks the engine to count the server outbound in both directions", () => {
     const config = JSON.parse(buildXrayConfig(user("XRAY_VLESS_REALITY", REALITY_PARAMS, { uuid: "u-1", flow: "xtls-rprx-vision" })));
     expect(config.stats).toEqual({});
-    expect(config.policy).toEqual({ system: { statsOutboundUplink: true, statsOutboundDownlink: true } });
+    expect(config.policy.system).toEqual({ statsOutboundUplink: true, statsOutboundDownlink: true });
     expect(config.outbounds.map((o: { tag: string }) => o.tag)).toEqual(["proxy", "dns-out", "block"]);
   });
 });
@@ -208,6 +208,25 @@ describe("lookups inside the engine", () => {
     ]);
     // Passed-on queries leave through the proxy, never from the phone.
     expect(dnsOut.proxySettings).toEqual({ tag: "proxy" });
+  });
+});
+
+describe("a lookup's session", () => {
+  // Every question comes from a new source port, and each kept a session
+  // in the DNS outbound for the default 300 s: thousands of them after
+  // opening apps, and an iPhone's tunnel killed at its memory ceiling.
+  it("lets go 10 s after its question, on a level of its own, on every protocol", () => {
+    for (const [protocol, params, credentials] of ALL_PROTOCOLS) {
+      const config = JSON.parse(buildXrayConfig(user(protocol, params, credentials)));
+      const dnsOut = config.outbounds.find((o: { tag: string }) => o.tag === "dns-out");
+      expect(dnsOut.settings.userLevel, protocol).toBe(1);
+      expect(config.policy.levels, protocol).toEqual({ "1": { connIdle: 10 } });
+      // Level 0 -- every other connection -- keeps xray-core's defaults.
+      expect(config.policy.levels["0"], protocol).toBeUndefined();
+      // Longer than the slowest lookup: 2 s DoH, then the TCP server's 4 s default.
+      const doh = config.dns.servers[0] as { timeoutMs: number };
+      expect(10 * 1000, protocol).toBeGreaterThan(doh.timeoutMs + 4000);
+    }
   });
 });
 

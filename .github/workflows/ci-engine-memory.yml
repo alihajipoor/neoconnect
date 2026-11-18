@@ -1,0 +1,56 @@
+name: CI (phone engine memory)
+
+# Holds the phones' Xray engine to its memory budget before anything that
+# touches it can merge: TestEngineMemoryBudget (apps/mobile/plugins/vpn/xray,
+# engine_dnsload_darwin_test.go), with the iOS patches applied, for every
+# config the app builds (testdata/app-configs.json, written by the app's own
+# builder), under a phone's app-open load, a stalled uplink and slow readers.
+#
+# Why: the iOS packet-tunnel extension is killed at about 50 MB, silently,
+# and the app reconnects by itself, so a memory regression shows up only as
+# drops nobody can explain. One shipped on 2026-11-17 (an iPhone at 49.2 MiB
+# 30 s into a session) and was found only from the phone's own report.
+#
+# Its own workflow so that it runs only when the engine, its patches or the
+# config builder change -- macOS runners bill at ten times Linux, and
+# ci-ios.yml runs on every change under apps/mobile. The darwin tests need a
+# Mac (the engine's footprint is read from the Mac kernel, as iOS reads it);
+# no Xcode, no app build. About six minutes.
+#
+# What a pass does NOT prove: that an iPhone stays under its limit. It is a
+# Mac process with the same Go engine and the same accounting, not the same
+# kernel, allocator pressure or extension. See EngineFootprintBudget.
+on:
+  push:
+    branches: [main, "claude/**", "rig/**"]
+    paths:
+      - "apps/mobile/plugins/vpn/xray/**"
+      - "apps/mobile/src/lib/xray-config.ts"
+      - "apps/mobile/scripts/xray-core-patch.sh"
+      - ".github/workflows/ci-engine-memory.yml"
+  pull_request:
+    paths:
+      - "apps/mobile/plugins/vpn/xray/**"
+      - "apps/mobile/src/lib/xray-config.ts"
+      - "apps/mobile/scripts/xray-core-patch.sh"
+      - ".github/workflows/ci-engine-memory.yml"
+  workflow_dispatch:
+
+jobs:
+  budget:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # The pin and GOTOOLCHAIN=local that ci-ios.yml and the release use.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: apps/mobile/plugins/vpn/xray/go.sum
+      - name: Refuse a silent toolchain switch
+        run: echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+      - name: Hold the engine to its memory budget
+        working-directory: apps/mobile/plugins/vpn/xray
+        env:
+          NEOXIFY_ENGINE_BUDGET: "1"
+        run: bash ../../../scripts/xray-core-patch.sh go test -count=1 -run TestEngineMemoryBudget -v -timeout 15m
