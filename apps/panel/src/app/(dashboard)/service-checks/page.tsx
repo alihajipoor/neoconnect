@@ -97,7 +97,7 @@ function Summary({ summary, window }: { summary: ServiceChecksSummary; window: s
 
       <Section title="By server" note="runs through the VPN only">
         {summary.byServer.length === 0 ? (
-          <Muted>No run went through the VPN in the last {window}; the runs were all outside it.</Muted>
+          <Muted>No run in the last {window} said it went through the VPN.</Muted>
         ) : (
           <Matrix
             columns={columns}

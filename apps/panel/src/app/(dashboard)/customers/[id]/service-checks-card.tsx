@@ -3,7 +3,7 @@ import { protocolLabel } from "@/lib/protocol-labels";
 import { cn } from "@/lib/utils";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { serviceOutcome } from "./insight-labels";
-import { lastRunRoute, msText, utcStamp } from "./diagnostics-format";
+import { addressKindOdd, addressKindText, lastRunCounts, lastRunRoute, msText, routeGroupLabel, utcStamp } from "./diagnostics-format";
 import { serviceOrder } from "./service-check-layout";
 import { More, Muted, Ratio, Section, TableBox, When } from "./view-parts";
 
@@ -24,8 +24,8 @@ export function ServiceChecksCard({ checks, window }: { checks: InsightServiceCh
   }
 
   const latest = [...checks.latest].sort((a, b) => Number(a.ok) - Number(b.ok));
-  const failed = latest.filter((r) => !r.ok).length;
   const route = lastRunRoute(checks);
+  const lastRun = lastRunCounts(checks);
   const order = serviceOrder(
     checks.latest.map((r) => ({ key: r.key, label: r.label ?? r.key })),
     checks.byServer.flatMap((s) => s.perService.map((p) => p.key)),
@@ -46,9 +46,9 @@ export function ServiceChecksCard({ checks, window }: { checks: InsightServiceCh
           Last ran <When at={checks.lastRunAt} />
           <span className="text-muted-foreground"> ({utcStamp(checks.lastRunAt)})</span>
           {route && <span>, {route}</span>}
-          {latest.length > 0 && (
-            <span className={cn("ml-1", failed > 0 ? "text-red-300" : "text-muted-foreground")}>
-              · {latest.length - failed} of {latest.length} reachable
+          {lastRun && (
+            <span className={cn("ml-1", lastRun.reachable < lastRun.total ? "text-red-300" : "text-muted-foreground")}>
+              · {lastRun.reachable} of {lastRun.total} reachable in that run
             </span>
           )}
         </p>
@@ -79,7 +79,12 @@ export function ServiceChecksCard({ checks, window }: { checks: InsightServiceCh
                   .map(([name, ms]) => `${name} ${msText(ms as number)}`)
                   .join(" · ") || "no times"}
                 {r.status !== null && ` · HTTP ${r.status}`}
-                {r.address && <span className="font-mono"> · {r.address}</span>}
+                {r.addressKind && (
+                  <span className={addressKindOdd(r.addressKind) ? "text-amber-300" : undefined}>
+                    {" "}
+                    · resolved to {addressKindText(r.addressKind)}
+                  </span>
+                )}
                 {" · "}
                 <When at={r.at} />
               </p>
@@ -125,8 +130,12 @@ export function ServiceChecksCard({ checks, window }: { checks: InsightServiceCh
                   <TableCell label="First byte" phoneOrder={3} className="text-right text-sm tabular-nums">
                     <Ms ms={r.firstByteMs} />
                   </TableCell>
-                  <TableCell label="Resolved to" phoneOrder={4} className="font-mono text-xs text-muted-foreground">
-                    {r.address ?? "—"}
+                  <TableCell
+                    label="Resolved to"
+                    phoneOrder={4}
+                    className={cn("text-xs", addressKindOdd(r.addressKind) ? "text-amber-300" : "text-muted-foreground")}
+                  >
+                    {addressKindText(r.addressKind) ?? "—"}
                   </TableCell>
                   <TableCell label="When" phoneOrder={5} className="text-sm">
                     <When at={r.at} />
@@ -160,11 +169,7 @@ export function ServiceChecksCard({ checks, window }: { checks: InsightServiceCh
                 {checks.byServer.map((row, index) => (
                   <TableRow key={`${row.server}-${row.protocol}-${index}`}>
                     <TableCell cell="primary" className="text-sm">
-                      {row.server ?? (
-                        <span className="text-muted-foreground">
-                          {row.protocol ? "unknown server" : "Outside the VPN"}
-                        </span>
-                      )}
+                      {row.server ?? <span className="text-muted-foreground">{routeGroupLabel(row)}</span>}
                     </TableCell>
                     <TableCell label="Protocol" phoneOrder={1} className="text-sm text-muted-foreground">
                       {protocolLabel(row.protocol)}

@@ -174,7 +174,7 @@ describe("copy for support", () => {
         rungs: [{ ...base.rungs[0], ms: 4200 }],
         details: {
           services: [
-            { key: "google", host: "www.google.com", ok: true, stage: "ok", firstByteMs: 340, address: "198.51.100.5" },
+            { key: "google", host: "www.google.com", ok: true, stage: "ok", firstByteMs: 340, addressKind: "public" },
             { key: "x", host: "x.com", ok: false, stage: "dns", error: "lookup x.com: no such host" },
           ],
         },

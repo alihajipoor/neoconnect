@@ -1,4 +1,5 @@
 import type {
+  AddressKind,
   CustomerDevice,
   InsightDeviceFacts,
   InsightServiceChecks,
@@ -142,9 +143,9 @@ export function detailFactGroups(details: Pick<ReportDetails, "device" | "net" |
     push(device, "Model", d.model);
     push(device, "System", systemText(d));
     push(device, "Language", d.language);
-    if (d.lowPower !== undefined) push(device, "Battery saver", d.lowPower ? "on" : "off");
-    if (d.dataSaver !== undefined) push(device, "Data saver", d.dataSaver ? "on" : "off");
-    if (d.memFreeMb !== undefined) push(device, "Free memory", `${d.memFreeMb.toLocaleString("en-US")} MB`);
+    if (typeof d.lowPower === "boolean") push(device, "Battery saver", d.lowPower ? "on" : "off");
+    if (typeof d.dataSaver === "boolean") push(device, "Data saver", d.dataSaver ? "on" : "off");
+    if (typeof d.memFreeMb === "number") push(device, "Free memory", `${d.memFreeMb.toLocaleString("en-US")} MB`);
   }
   if (device.length > 0) groups.push({ title: "Device", facts: device });
 
@@ -152,10 +153,10 @@ export function detailFactGroups(details: Pick<ReportDetails, "device" | "net" |
   const n = details.net;
   if (n) {
     push(network, "Network", labelOf(NET_TYPE_LABELS, n.type));
-    if (n.metered !== undefined) push(network, "Metered", yesNo(n.metered));
-    if (n.ipv4 !== undefined) push(network, "IPv4", n.ipv4 ? "available" : "not available");
-    if (n.ipv6 !== undefined) push(network, "IPv6", n.ipv6 ? "available" : "not available");
-    if (n.otherVpn !== undefined) push(network, "Another VPN active", yesNo(n.otherVpn), n.otherVpn);
+    if (typeof n.metered === "boolean") push(network, "Metered", yesNo(n.metered));
+    if (typeof n.ipv4 === "boolean") push(network, "IPv4", n.ipv4 ? "available" : "not available");
+    if (typeof n.ipv6 === "boolean") push(network, "IPv6", n.ipv6 ? "available" : "not available");
+    if (typeof n.otherVpn === "boolean") push(network, "Another VPN active", yesNo(n.otherVpn), n.otherVpn);
     if (n.dns && n.dns.length > 0) push(network, "Device DNS", n.dns.join(", "));
     push(network, "Private DNS", n.privateDnsHost ? `set to ${n.privateDnsHost}` : labelOf(PRIVATE_DNS_LABELS, n.privateDns));
   }
@@ -166,9 +167,9 @@ export function detailFactGroups(details: Pick<ReportDetails, "device" | "net" |
   if (t) {
     push(tunnel, "Mode", labelOf(TUNNEL_MODE_LABELS, t.mode));
     if (t.dns && t.dns.length > 0) push(tunnel, "VPN DNS", t.dns.join(", "));
-    if (t.splitTunnel !== undefined) push(tunnel, "Split tunnel", yesNo(t.splitTunnel));
-    if (t.ipv6Blocked !== undefined) push(tunnel, "IPv6 blocked", yesNo(t.ipv6Blocked));
-    if (t.dnsUnprotected !== undefined) push(tunnel, "DNS outside the VPN", yesNo(t.dnsUnprotected), t.dnsUnprotected);
+    if (typeof t.splitTunnel === "boolean") push(tunnel, "Split tunnel", yesNo(t.splitTunnel));
+    if (typeof t.ipv6Blocked === "boolean") push(tunnel, "IPv6 blocked", yesNo(t.ipv6Blocked));
+    if (typeof t.dnsUnprotected === "boolean") push(tunnel, "DNS outside the VPN", yesNo(t.dnsUnprotected), t.dnsUnprotected);
   }
   if (tunnel.length > 0) groups.push({ title: "VPN settings", facts: tunnel });
 
@@ -185,10 +186,10 @@ export function dataCheckLegText(leg: ReportDataCheckLeg | null | undefined): st
 export function reconnectText(r: ReportDetails["reconnect"] | null | undefined): string | null {
   if (!r) return null;
   const parts: string[] = [];
-  if (r.attempt !== undefined) parts.push(`try ${r.attempt}`);
-  if (r.quickDeaths !== undefined) parts.push(`${r.quickDeaths} quick ${r.quickDeaths === 1 ? "drop" : "drops"}`);
-  if (r.spentMs !== undefined) parts.push(`${msText(r.spentMs)} spent`);
-  if (r.droppedSecondsAgo !== undefined) parts.push(`dropped ${duration(r.droppedSecondsAgo)} before`);
+  if (typeof r.attempt === "number") parts.push(`try ${r.attempt}`);
+  if (typeof r.quickDeaths === "number") parts.push(`${r.quickDeaths} quick ${r.quickDeaths === 1 ? "drop" : "drops"}`);
+  if (typeof r.spentMs === "number") parts.push(`${msText(r.spentMs)} spent`);
+  if (typeof r.droppedSecondsAgo === "number") parts.push(`dropped ${duration(r.droppedSecondsAgo)} before`);
   return parts.length > 0 ? parts.join(", ") : null;
 }
 
@@ -248,9 +249,61 @@ export function lastRunRoute(checks: InsightServiceChecks): string | null {
   return run.via === "tunnel" ? "through the VPN, server not named" : null;
 }
 
-/** A link to the customer's diagnostics view, opened on one bundle. */
-export function diagnosticsHref(customerId: string, reference?: string | null): string {
-  return customerHref(customerId, { view: "diagnostics", ref: reference ?? undefined });
+/** How many of the newest run's own results were reachable. `latest`
+ * holds the newest result per service across every run in the window, so
+ * a count over all of it would pin older runs' results (other servers,
+ * outside the VPN) on the newest run's route. Null when no result is from
+ * the newest run. */
+export function lastRunCounts(checks: InsightServiceChecks): { reachable: number; total: number } | null {
+  if (!checks.lastRunAt) return null;
+  const run = checks.latest.filter((r) => r.at === checks.lastRunAt);
+  if (run.length === 0) return null;
+  return { reachable: run.filter((r) => r.ok).length, total: run.length };
+}
+
+const ADDRESS_KIND_LABELS: Record<AddressKind, string> = {
+  public: "a public address",
+  private: "a private address",
+  loopback: "this device (loopback)",
+  "link-local": "a link-local address",
+  reserved: "a reserved address",
+};
+
+/** What kind of address a target resolved to; null when not reported. */
+export function addressKindText(kind: string | null | undefined): string | null {
+  if (!kind) return null;
+  return ADDRESS_KIND_LABELS[kind as AddressKind] ?? kind;
+}
+
+/** Whether an address kind is one a well-known name should not resolve
+ * to: what a poisoned lookup looks like. Said as the kind, not a cause. */
+export function addressKindOdd(kind: string | null | undefined): boolean {
+  return !!kind && kind !== "public";
+}
+
+/** The first cell of a by-server row: the server, or what the run said
+ * about its route. Only a run that said "direct" is outside the VPN. */
+export function routeGroupLabel(row: { server: string | null; via: string | null }): string {
+  if (row.server) return row.server;
+  if (row.via === "direct") return "Outside the VPN";
+  if (row.via === "tunnel") return "unknown server";
+  return "Route not stated";
+}
+
+/** A link to the customer's diagnostics view, opened on one bundle. From
+ * a row of the list, pass the list's page so the bundle is on the page
+ * the link opens. */
+export function diagnosticsHref(
+  customerId: string,
+  reference?: string | null,
+  page?: { take: number; skip: number },
+): string {
+  return customerHref(customerId, {
+    view: "diagnostics",
+    ref: reference ?? undefined,
+    take: page ? page.take : undefined,
+    skip: page && page.skip > 0 ? page.skip : undefined,
+  });
 }
 
 /** The bundle reference in a history link (`...&ref=ab12cd34`), or null. */

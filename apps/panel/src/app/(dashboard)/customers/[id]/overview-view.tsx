@@ -103,6 +103,7 @@ export async function OverviewView({
         devices={activity?.devices ?? null}
         canSignOut={canSupport}
         facts={insight ? (insight.deviceFacts ?? []) : null}
+        window={windowText(days)}
       />
 
       {customer.recoveryCodeSetAt && <MoveAddressCard customerId={id} />}

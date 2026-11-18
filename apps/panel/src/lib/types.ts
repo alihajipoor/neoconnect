@@ -1221,6 +1221,8 @@ export interface ReportDataCheckLeg {
 
 export type ServiceCheckStage = "dns" | "connect" | "tls" | "http" | "ok";
 
+export type AddressKind = "public" | "private" | "loopback" | "link-local" | "reserved";
+
 /** One fixed-list target's result. Only hosts on the server's list are kept. */
 export interface ReportServiceResult {
   key: string;
@@ -1232,7 +1234,9 @@ export interface ReportServiceResult {
   tlsMs?: number;
   firstByteMs?: number;
   status?: number;
-  address?: string;
+  /** The kind of address the target resolved to; the address itself is
+   * never stored (docs/client-diagnostics.md). */
+  addressKind?: AddressKind;
   error?: string;
 }
 
@@ -1277,12 +1281,14 @@ export interface InsightServiceResult {
   tlsMs: number | null;
   firstByteMs: number | null;
   status: number | null;
-  address: string | null;
+  addressKind: string | null;
   error: string | null;
   at: string;
-  /** Null outside the tunnel or when the run named no server. */
+  /** Null unless the run said it went through the tunnel, or when it
+   * named no server. */
   server: string | null;
   protocol: string | null;
+  /** "tunnel", "direct", or null when the run did not say. */
   via: string | null;
 }
 
@@ -1291,10 +1297,12 @@ export interface InsightServiceChecks {
   /** Service-check runs in the window. */
   runs: number;
   latest: InsightServiceResult[];
-  /** Per server and protocol; server and protocol null = outside the tunnel. */
+  /** Per route: through the tunnel by server and protocol; direct runs
+   * and runs that did not say (via null) each in a group of their own. */
   byServer: {
     server: string | null;
     protocol: string | null;
+    via: string | null;
     runs: number;
     perService: { key: string; ok: number; failed: number }[];
   }[];

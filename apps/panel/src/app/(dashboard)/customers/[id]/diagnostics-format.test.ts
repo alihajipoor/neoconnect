@@ -5,15 +5,18 @@ import {
   dataCheckLegText,
   detailFactGroups,
   deviceFactsLine,
+  addressKindText,
   diagnosticsHref,
   egressText,
   factsByDevice,
+  lastRunCounts,
   lastRunRoute,
   msText,
   parseReference,
   platformName,
   reconnectText,
   referenceFromLink,
+  routeGroupLabel,
   sessionEndText,
   utcStamp,
   viaText,
@@ -37,10 +40,10 @@ function result(over: Partial<InsightServiceResult> = {}): InsightServiceResult 
     tlsMs: 200,
     firstByteMs: 300,
     status: 204,
-    address: "198.51.100.1",
+    addressKind: "public",
     error: null,
     at: "2026-11-18T10:00:00.000Z",
-    server: "germany-3",
+    server: "exit-1",
     protocol: "XRAY_VLESS_REALITY",
     via: "tunnel",
     ...over,
@@ -160,12 +163,37 @@ describe("service checks", () => {
   });
 
   it("names the route of the newest run", () => {
-    expect(lastRunRoute(checks([result()]))).toBe("through germany-3, Xray VLESS+REALITY");
+    expect(lastRunRoute(checks([result()]))).toBe("through exit-1, Xray VLESS+REALITY");
     expect(lastRunRoute(checks([result({ via: "direct", server: null, protocol: null })]))).toBe("outside the VPN");
     expect(lastRunRoute(checks([result({ server: null, protocol: null })]))).toBe("through the VPN, server not named");
     // A result from an older run says nothing about the newest one.
     expect(lastRunRoute(checks([result({ at: "2026-11-17T10:00:00.000Z" })]))).toBeNull();
     expect(lastRunRoute(checks([], null))).toBeNull();
+  });
+
+  /** `latest` mixes runs; the headline count is the newest run's own. */
+  it("counts only the newest run's results for its headline", () => {
+    const older = "2026-11-08T10:00:00.000Z";
+    const latest = [
+      result({ key: "google" }),
+      result({ key: "x", ok: false, at: older, via: "direct", server: null }),
+      result({ key: "youtube", ok: false, at: older, via: "direct", server: null }),
+    ];
+    expect(lastRunCounts(checks(latest))).toEqual({ reachable: 1, total: 1 });
+    expect(lastRunCounts(checks([result({ at: older })]))).toBeNull();
+    expect(lastRunCounts(checks([], null))).toBeNull();
+  });
+
+  it("calls a group outside the VPN only when the runs said direct", () => {
+    expect(routeGroupLabel({ server: "exit-1", via: "tunnel" })).toBe("exit-1");
+    expect(routeGroupLabel({ server: null, via: "direct" })).toBe("Outside the VPN");
+    expect(routeGroupLabel({ server: null, via: "tunnel" })).toBe("unknown server");
+    expect(routeGroupLabel({ server: null, via: null })).toBe("Route not stated");
+  });
+
+  it("says the kind of address, never an address", () => {
+    expect(addressKindText("private")).toBe("a private address");
+    expect(addressKindText(null)).toBeNull();
   });
 });
 
@@ -173,6 +201,9 @@ describe("diagnostics links", () => {
   it("builds and reads the reference link", () => {
     expect(diagnosticsHref(ID, "4f2a9c1e")).toBe(`/customers/${ID}?view=diagnostics&ref=4f2a9c1e`);
     expect(diagnosticsHref(ID)).toBe(`/customers/${ID}?view=diagnostics`);
+    // From page 2 of the list, the link opens page 2, where the bundle is.
+    expect(diagnosticsHref(ID, "4f2a9c1e", { take: 20, skip: 20 })).toBe(`/customers/${ID}?view=diagnostics&ref=4f2a9c1e&take=20&skip=20`);
+    expect(diagnosticsHref(ID, "4f2a9c1e", { take: 20, skip: 0 })).toBe(`/customers/${ID}?view=diagnostics&ref=4f2a9c1e&take=20`);
     expect(referenceFromLink(`/customers/${ID}?view=diagnostics&ref=4f2a9c1e`)).toBe("4f2a9c1e");
     expect(referenceFromLink("/customers/x?view=diagnostics")).toBeNull();
     expect(referenceFromLink(null)).toBeNull();

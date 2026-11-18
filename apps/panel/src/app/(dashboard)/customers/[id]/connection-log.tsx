@@ -340,7 +340,7 @@ function RungLine({ rung, index }: { rung: CustomerAttemptRung; index: number })
   );
 }
 
-/** "Services checked through germany-3, Stealth" or "... outside the VPN". */
+/** "Services checked through exit-1, Stealth" or "... outside the VPN". */
 function serviceRunTitle(attempt: CustomerAttemptDetail): string {
   if (attempt.details?.via === "direct") return "Services checked outside the VPN";
   if (attempt.server) {

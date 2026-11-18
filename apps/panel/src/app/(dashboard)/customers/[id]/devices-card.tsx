@@ -22,6 +22,7 @@ export function DevicesCard({
   devices,
   canSignOut,
   facts,
+  window,
 }: {
   customerId: string;
   /** Null when the activity endpoint failed. */
@@ -29,6 +30,8 @@ export function DevicesCard({
   canSignOut: boolean;
   /** The insight's device facts; null when the insight failed to load. */
   facts: InsightDeviceFacts[] | null;
+  /** The insight's window in words ("7 days"): facts come only from it. */
+  window: string;
 }) {
   const sorted = [...(devices ?? [])].sort(
     (a, b) =>
@@ -124,7 +127,7 @@ export function DevicesCard({
                           under it (below). */}
                       {showFacts && (
                         <TableCell label="Device details" wide phoneOrder={8} className="sm:hidden">
-                          <FactsLine facts={deviceFacts} />
+                          <FactsLine facts={deviceFacts} window={window} />
                         </TableCell>
                       )}
                       {canSignOut && (
@@ -145,7 +148,7 @@ export function DevicesCard({
                         className={["hover:bg-transparent max-sm:hidden", device.revoked ? "opacity-60" : ""].join(" ")}
                       >
                         <TableCell colSpan={columns} className="pt-0 whitespace-normal">
-                          <FactsLine facts={deviceFacts} />
+                          <FactsLine facts={deviceFacts} window={window} />
                         </TableCell>
                       </TableRow>
                     ),
@@ -177,7 +180,7 @@ export function DevicesCard({
                   {group.facts.map((f, index) => (
                     <li key={`${f.sessionId ?? "none"}-${index}`} className="text-sm">
                       {f.label && <p>{f.label}</p>}
-                      <FactsLine facts={f} />
+                      <FactsLine facts={f} window={window} />
                     </li>
                   ))}
                 </ul>
@@ -192,10 +195,11 @@ export function DevicesCard({
 
 /** The facts as one quiet wrapped line, with when they were reported in
  * words and in UTC (a title never reaches a touch screen). */
-function FactsLine({ facts }: { facts: InsightDeviceFacts | null }) {
+function FactsLine({ facts, window }: { facts: InsightDeviceFacts | null; window: string }) {
   const parts = facts ? deviceFactsLine(facts) : [];
   if (!facts || parts.length === 0) {
-    return <p className="text-xs text-muted-foreground">This app version does not report device details yet.</p>;
+    // No facts in the window is not proof the app cannot send them.
+    return <p className="text-xs text-muted-foreground">No device details reported in the last {window}.</p>;
   }
   return (
     <p className="text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">

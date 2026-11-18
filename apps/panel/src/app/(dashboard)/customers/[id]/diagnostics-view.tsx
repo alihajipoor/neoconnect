@@ -92,7 +92,7 @@ export async function DiagnosticsView({
                   <TableRow key={bundle.id} className={cn(open && "bg-white/[0.04]")}>
                     <TableCell cell="primary" className="text-sm">
                       <Link
-                        href={diagnosticsHref(customerId, bundle.reference)}
+                        href={diagnosticsHref(customerId, bundle.reference, { take, skip })}
                         aria-current={open ? "true" : undefined}
                         className="inline-flex min-h-8 items-center font-mono underline-offset-2 hover:underline max-lg:min-h-10"
                       >

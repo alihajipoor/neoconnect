@@ -2,6 +2,8 @@ import type { ReportDetails, ReportServiceResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { serviceOutcome } from "./insight-labels";
 import {
+  addressKindOdd,
+  addressKindText,
   dataCheckLegText,
   detailFactGroups,
   egressText,
@@ -23,7 +25,7 @@ export function ReportDetailsBlock({
 }: {
   details: ReportDetails | null | undefined;
   factsTitle?: string;
-  /** Heading of the service results, e.g. "Services checked, through germany-3". */
+  /** Heading of the service results, e.g. "Services checked, through exit-1". */
   serviceTitle?: string;
 }) {
   if (!details) return null;
@@ -118,7 +120,7 @@ export function ServiceResults({ services, title }: { services: ReportServiceRes
             <span className="font-medium">{s.key}</span>
             <span className={cn("text-right sm:text-left", s.ok ? "text-success" : "text-red-300")}>
               {serviceOutcome(s.ok, s.stage)}
-              {s.status !== undefined && <span className="ml-1.5 text-muted-foreground tabular-nums">HTTP {s.status}</span>}
+              {typeof s.status === "number" && <span className="ml-1.5 text-muted-foreground tabular-nums">HTTP {s.status}</span>}
             </span>
             <span className="col-span-2 text-muted-foreground tabular-nums sm:col-span-1 sm:text-right">
               {[
@@ -130,7 +132,11 @@ export function ServiceResults({ services, title }: { services: ReportServiceRes
                 .filter(([, ms]) => typeof ms === "number")
                 .map(([name, ms]) => `${name} ${msText(ms as number)}`)
                 .join(" · ") || "no times"}
-              {s.address && <span className="ml-2 font-mono">{s.address}</span>}
+              {s.addressKind && (
+                <span className={cn("ml-2", addressKindOdd(s.addressKind) && "text-amber-300")}>
+                  resolved to {addressKindText(s.addressKind)}
+                </span>
+              )}
             </span>
             {s.error && (
               <span className="col-span-full font-mono text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
