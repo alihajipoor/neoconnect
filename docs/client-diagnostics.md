@@ -301,7 +301,7 @@ again in `dns_list` (`device_facts.rs`, which Windows and both phones go
 through), and once more in the shared TypeScript. A router's global IPv6
 resolver that is not EUI-64 is kept: it carries the household's prefix,
 which the server already sees as the report's source address.
-| `net.privateDns`, `privateDnsHost` | **never** (Android only) | Android 9+: the setting, `Settings.Global` `private_dns_mode` -- "off", "opportunistic" as "auto", "hostname" as "host" with the host from `privateDnsServerName` when active, else from `private_dns_specifier` when readable. When the setting cannot be read: "host" (with the host) or "auto" only when `isPrivateDnsActive` says so, otherwise "unknown" -- never "off" on a guess, since "Automatic" (the default) is not active on a network that offers no DNS-over-TLS; left out before Android 9 | **never**: iOS has no such setting | **never** (Android only) |
+| `net.privateDns`, `privateDnsHost` | **never** (Android only) | Android 9+: the setting, `Settings.Global` `private_dns_mode` -- "off", "opportunistic" as "auto", "hostname" as "host" with the host from `privateDnsServerName` when active, else from `private_dns_specifier` when readable. A phone whose owner never opened the setting has no value stored; Android then uses its default, read from `private_dns_default_mode` and "opportunistic" when that is empty too, so such a phone reports "auto" (the emulator, unset, first reported "unknown"). When the setting cannot be read at all: "host" (with the host) or "auto" only when `isPrivateDnsActive` says so, otherwise "unknown" -- never "off" on a guess, since "Automatic" (the default) is not active on a network that offers no DNS-over-TLS; left out before Android 9 | **never**: iOS has no such setting | **never** (Android only) |
 
 The Windows uplink is chosen among adapters that are up, can be physical
 (Wi-Fi, Ethernet, mobile broadband, PPP) and have a default gateway,
@@ -415,10 +415,18 @@ report queue), `service-check.ts`, `diagnostics-bundle.ts`,
   (a drop, or the health checks giving up), `replaced` (another route took
   over), `unknown` (the plan's device limit took it down) -- with the
   `routeId` and `protocol` (the label the connect's own report used) of
-  the session, and `seconds` counted from when the app showed "Connected"
-  for that tunnel (its first passing check when that time is not known;
-  the ten-minute report still counts from the first passing check), for a
-  session of at least 60 s by that count, once. A stopped pass ends
+  the session, and `seconds` counted from the moment the app's own
+  connected-for timer starts for that tunnel (its first passing check when
+  that time is not known; the ten-minute report still counts from the
+  first passing check), for a session of at least 60 s by that count,
+  once. On the phones that timer starts when the tunnel comes up, a few
+  seconds before the word "Connected" appears, because the checks run
+  first: the emulator showed 187 s for 181 s on screen and 92 s for 83 s.
+  This report goes even when the network could not be attested (every
+  other SESSION report is held back then: it is per-network evidence,
+  and this one is about one customer's session); before the in-app notice
+  is accepted it is not sent at all, since its reason line alone says how
+  long the session ran. A stopped pass ends
   it as `disconnected`. From the live tracker (`session-report.ts`), never
   from the local session log, which stays on the device. `app_closed` is
   never sent: a killed app sends nothing.

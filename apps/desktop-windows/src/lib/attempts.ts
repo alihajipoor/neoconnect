@@ -530,7 +530,12 @@ export function withNetwork(
   // and only then: the server keeps it only on the attested network, and
   // a server that issues attestations is new enough to accept the field.
   if (attestation) return clientIp ? { ...report, network: attestation, clientIp } : { ...report, network: attestation };
-  if (report.kind === "SESSION") return null;
+  // The ten-minute SESSION report is per-network evidence and says nothing
+  // without a network. The end-of-session report is about one customer's
+  // session (how long, why it ended), and is worth having either way: on
+  // the emulator a three-minute session whose network had not been
+  // attested ended with no report at all.
+  if (report.kind === "SESSION" && !report.details?.sessionEnd) return null;
   const { sessionSeconds: _unused, ...rest } = report;
   return {
     ...rest,
@@ -694,6 +699,10 @@ export async function reportAttempt(
     const collected = collectDetails(report.kind, report.details, report.outcome);
     const allowed = await diagnosticsAllowed();
     if (!allowed && report.kind === "SERVICE_CHECK") return;
+    // The end-of-session report is new with the fuller diagnostics, and
+    // its reason line says how long the session ran: without the notice
+    // accepted it is not sent at all, rather than sent with its details cut.
+    if (!allowed && report.kind === "SESSION" && report.details?.sessionEnd) return;
     const details = allowed ? await collected : undefined;
     const { details: _own, ...plain } = allowed ? shaped : withoutDetails(shaped);
     const queued: QueuedReport = {

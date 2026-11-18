@@ -111,6 +111,36 @@ describe("before the customer has been told in the app", () => {
     await attempts.reportAttempt({ kind: "CONNECT", outcome: "SUCCESS" });
     expect(sentBodies()[0]).not.toHaveProperty("details");
   });
+
+  it("an end-of-session report is not sent at all: its reason alone says how long the session ran", async () => {
+    await attempts.reportAttempt({
+      kind: "SESSION",
+      outcome: "OTHER",
+      reason: "session ended (disconnected) after 187 s; not an attempt",
+      details: { sessionEnd: { cause: "disconnected", seconds: 187 } },
+    });
+    expect(publicRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe("a session report on a network that could not be attested", () => {
+  // Seen on the emulator: a three-minute session ended with no report,
+  // because every SESSION report was held back without an attestation.
+  it("the end-of-session report still goes: it is about this customer's session, not a network", () => {
+    const end = {
+      kind: "SESSION" as const,
+      outcome: "OTHER" as const,
+      details: { sessionEnd: { cause: "disconnected" as const, seconds: 187 } },
+    };
+    const shaped = attempts.withNetwork(end, null, null);
+    expect(shaped).not.toBeNull();
+    expect(shaped).not.toHaveProperty("network");
+    expect(shaped?.details).toEqual(end.details);
+  });
+
+  it("the ten-minute report still does not: it is per-network evidence", () => {
+    expect(attempts.withNetwork({ kind: "SESSION", outcome: "SUCCESS", sessionSeconds: 700 }, null, null)).toBeNull();
+  });
 });
 
 describe("a service check that cannot be delivered", () => {

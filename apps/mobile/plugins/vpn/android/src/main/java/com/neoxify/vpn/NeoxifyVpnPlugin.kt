@@ -1122,9 +1122,34 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             quietly {
                 val active: Boolean? = try { link.isPrivateDnsActive } catch (e: Exception) { null }
                 val activeHost: String? = try { link.privateDnsServerName } catch (e: Exception) { null }
-                val mode: String? = try {
+                val setMode: String? = try {
                     Settings.Global.getString(activity.contentResolver, "private_dns_mode")
                 } catch (e: Exception) {
+                    null
+                }
+                // A phone whose owner never opened this setting has no value
+                // stored, and Android then uses its default, which is
+                // "Automatic" unless the device maker set another one
+                // (private_dns_default_mode). Seen on the emulator: unset,
+                // and reported "unknown" where the phone was on Automatic.
+                // The read succeeding with nothing stored is what "unset"
+                // looks like; a read that threw stays unknown below.
+                val readable: Boolean = try {
+                    Settings.Global.getString(activity.contentResolver, "private_dns_mode")
+                    true
+                } catch (e: Exception) {
+                    false
+                }
+                val mode: String? = if (!setMode.isNullOrBlank()) {
+                    setMode
+                } else if (readable) {
+                    val fallback: String? = try {
+                        Settings.Global.getString(activity.contentResolver, "private_dns_default_mode")
+                    } catch (e: Exception) {
+                        null
+                    }
+                    if (fallback.isNullOrBlank()) "opportunistic" else fallback
+                } else {
                     null
                 }
                 when (mode?.trim()) {
