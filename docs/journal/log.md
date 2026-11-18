@@ -10691,3 +10691,94 @@ hold.
 - Read a tester's own report rows before believing "it seems fine": the
   memory kill on the owner's phone was in his diagnostics, not in what he
   saw.
+
+## 2026-11-18 — The customer page answers "why can't this one connect" without a query
+
+**Why.** Three questions came in one day, and each took hand-written SQL
+to answer: a customer who "can't connect" on one mobile network, a
+reseller's customer who "still sees only the trial", and a friend whose
+sign-up "doesn't go through". The data to answer all three was already
+in `client_attempts`, `usage_records`, the vouchers and the sessions; the
+panel showed the newest 50 reports and a 14-day traffic table. The owner
+asked for the per-customer view to go in depth, and then for it to be
+laid out properly, phone included.
+
+**What it is.** Four read-only staff endpoints beside
+`/customers/:id/activity` (`insight`, `attempts`, `usage`, `history`) and
+four views on the customer page. No migration, no new data collected.
+
+- *Insight* counts real connection attempts apart from the background
+  "could not reach our API" reports, which are a third of all CONNECT
+  rows and are not failed connects. It breaks the attempts down by
+  network (with how other customers on the same network fared in 48 h,
+  hidden under three customers), by server and protocol from the rungs,
+  and by cause. The causes come from a classifier written from the exact
+  strings the clients produce (`insight-classify.ts`), and the findings
+  at the top are sentences with their counts, never a guessed cause.
+- *Attempts* is the whole 60-day log with filters, and each row now
+  shows the API trace the app sent (which of our addresses it tried,
+  with what result, in how many ms).
+- *Usage* buckets by hour in SQL and rebuilds sessions (one server, no
+  gap over 15 minutes, only periods with upload, because download-only
+  periods are ghost traffic from dead WireGuard peers).
+- *History* merges account, device, plan, code, payment and support
+  events; staff actions only for a superadmin.
+
+**What real data changed after it was written.** Checking against
+production, not the fixtures, moved four things:
+
+- Two weeks of real report texts (5,707 reports, masked, no customer
+  ids) run through the classifier left 113 failed rungs and 11 reports
+  without a cause: the ladder's `device-limit-reached`, OpenVPN not
+  finishing, the Android VPN service not starting, an Apple sign-in
+  sentence that arrives in the app's language, Persian included. After
+  the additions the same run leaves none.
+- The failures list counted 17 failed tries for one customer where the
+  by-server table showed 5: the other 12 sat in passes the customer had
+  stopped. Those were dialled, so the table counts them now. With them
+  in, one server shows 0 of 15 for that customer across five protocols
+  beside another at 19 of 20, which is the useful picture.
+- "App is behind" read a cache only the apps' own update checks fill,
+  and it was still empty half an hour after the restart. The insight
+  primes it first, waiting at most 1.5 s and only when nothing is held.
+- A finding printed an ISO timestamp where a date was meant.
+
+**Proven.**
+- CI on the merged commit, including the database spec for the hourly
+  SQL (`NEOXIFY_DB_SPECS=1`).
+- On the live backend, through the real endpoints: for the customer
+  with the mobile-network complaint the page says what the SQL had said
+  (the app never reached our API on that network, 2 reports; 11 of 11
+  other customers there connected; 20 of 20 on his other networks), and
+  the counts equal the raw rows. For the reseller's customer it states
+  that the code issued for that email was redeemed by another account.
+- A reseller token gets 403 on all four endpoints; no secret field name
+  appears in a response.
+- Timings on real accounts: insight 0.2 to 0.7 s, attempts and history
+  under 0.25 s, usage about 0.3 s, and about 2 s on the heaviest account
+  (the 30-day sum over about 60,000 usage rows; the two new queries are
+  5 ms and 1 ms and use the `(subscriptionId, reportedAt)` index).
+- The panel views in a browser at 390 and 1280 px, with sample data from
+  a local stub, including every "Could not load" state.
+
+**Not proven.**
+- Nobody has looked at the live panel pages with a real account in a
+  browser: the checks were the live endpoints plus the page on sample
+  data.
+- iOS never has a "newest release" to compare with; the App Store holds
+  that number.
+- The comparison with other customers covers the ten busiest networks
+  of a customer; beyond that the cell cannot tell "too few" from "not
+  compared" and says so.
+
+**Method, to save time next time.**
+- The panel only decodes its session cookie, so a stub API and an
+  unsigned cookie are enough to render any page locally with made-up
+  data. The stub lives outside the repo.
+- To test a text classifier, pull the texts, not the customers: one
+  JSON line per report with addresses and emails masked in SQL, then
+  import the pure `.ts` file by URL under Node's type stripping and
+  count what stays unmatched.
+- Two deploys the same evening (19:31Z and 19:50Z), each about 20 s
+  without a backend; all eight exits and the relay were back within a
+  minute both times.
