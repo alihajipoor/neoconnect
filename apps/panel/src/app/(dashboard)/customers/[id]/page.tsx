@@ -11,6 +11,8 @@ import { OverviewView } from "./overview-view";
 import { ConnectionsView } from "./connections-view";
 import { UsageView } from "./usage-view";
 import { HistoryView } from "./history-view";
+import { DiagnosticsView } from "./diagnostics-view";
+import { parseReference } from "./diagnostics-format";
 import { parseAttemptFilters, parseDays, parseHours, parseView } from "./insight-format";
 import { ViewTabs } from "./view-parts";
 
@@ -30,7 +32,8 @@ export default async function CustomerDetailPage({
   params: Promise<{ id: string }>;
   // view picks one of four views, and only that view's data is read.
   // take/skip page whichever list the view has: invoices on the overview,
-  // the log on Connections, events on History. days and hours are the
+  // the log on Connections, events on History, bundles on Diagnostics
+  // (whose ref opens one bundle). days and hours are the
   // report and usage windows; the rest are the log's filters.
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
@@ -105,6 +108,9 @@ export default async function CustomerDetailPage({
       )}
       {view === "usage" && <UsageView customerId={id} hours={hours} />}
       {view === "history" && <HistoryView customerId={id} {...pageWindow(paging, 50, 200)} />}
+      {view === "diagnostics" && (
+        <DiagnosticsView customerId={id} reference={parseReference(one("ref"))} {...pageWindow(paging, 20, 50)} />
+      )}
     </div>
   );
 }

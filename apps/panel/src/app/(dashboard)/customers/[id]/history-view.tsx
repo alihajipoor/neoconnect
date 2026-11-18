@@ -1,5 +1,6 @@
 import Link from "next/link";
 import {
+  ArrowRight,
   BadgeCheck,
   CreditCard,
   FileText,
@@ -22,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { historyLabel } from "./insight-labels";
 import { dayHeading, groupByUtcDay, utcClock } from "./insight-layout";
 import { Muted, Section, When, orNull } from "./view-parts";
+import { diagnosticsHref, referenceFromLink } from "./diagnostics-format";
 
 const ICONS: Record<CustomerHistoryEventType, LucideIcon> = {
   ACCOUNT_CREATED: UserPlus,
@@ -71,6 +73,7 @@ export async function HistoryView({ customerId, take, skip }: { customerId: stri
                     key={`${event.at}-${event.type}-${index}`}
                     event={event}
                     last={index === group.items.length - 1}
+                    customerId={customerId}
                   />
                 ))}
               </ol>
@@ -85,7 +88,7 @@ export async function HistoryView({ customerId, take, skip }: { customerId: stri
   );
 }
 
-function HistoryItem({ event, last }: { event: CustomerHistoryEvent; last: boolean }) {
+function HistoryItem({ event, last, customerId }: { event: CustomerHistoryEvent; last: boolean; customerId: string }) {
   const Icon = ICONS[event.type] ?? ShieldCheck;
   const staff = event.type === "STAFF_ACTION";
   return (
@@ -131,7 +134,30 @@ function HistoryItem({ event, last }: { event: CustomerHistoryEvent; last: boole
           </span>
           <When at={event.at} />
         </p>
+        {event.type === "DIAGNOSTICS_SENT" && <DiagnosticsLink event={event} customerId={customerId} />}
       </div>
     </li>
+  );
+}
+
+/** The reference the customer quotes, and a link that opens the bundle. */
+function DiagnosticsLink({ event, customerId }: { event: CustomerHistoryEvent; customerId: string }) {
+  const reference = referenceFromLink(event.link);
+  const href = event.link?.startsWith("/") ? event.link : diagnosticsHref(customerId, reference);
+  return (
+    <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+      {reference && (
+        <span className="text-muted-foreground">
+          Reference <span className="font-mono text-foreground">{reference}</span>
+        </span>
+      )}
+      <Link
+        href={href}
+        className="inline-flex min-h-8 items-center gap-1 font-medium text-foreground/80 underline-offset-2 hover:text-foreground hover:underline max-lg:min-h-10"
+      >
+        Open the bundle
+        <ArrowRight className="size-3.5" aria-hidden="true" />
+      </Link>
+    </p>
   );
 }
