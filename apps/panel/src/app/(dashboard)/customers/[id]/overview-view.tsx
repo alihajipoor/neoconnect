@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { CheckCircle2, Mail, Users } from "lucide-react";
+import { ArrowRight, CheckCircle2, Mail, Users } from "lucide-react";
 import { apiFetch, apiFetchList } from "@/lib/api";
 import type {
   ClientAttemptOutcome,
@@ -18,17 +18,17 @@ import { duration } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { Pager } from "@/components/dashboard/pager";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SubscriptionsPanel } from "./subscriptions-panel";
 import { MoveAddressCard } from "./move-address-card";
-import { RightNowCard } from "./right-now-card";
+import { RightNow } from "./right-now-card";
 import { DevicesCard } from "./devices-card";
-import { Muted, NetworkLabel, Section, When, orNull } from "./view-parts";
-import { pageParams } from "./insight-format";
+import { FoldedText, Muted, NetworkLabel, Section, StatTile, Tiles, When, orNull } from "./view-parts";
+import { customerHref, pageParams } from "./insight-format";
+import { findingFilters } from "./insight-layout";
 
-/** The first view: who this is, what stands out, whether they are on
- * now, and the account's subscriptions, devices and invoices -- the
- * sections the page has always had, plus the insight's observations. */
+/** The first view: what stands out, whether they are on now, and the
+ * account's subscriptions, devices and invoices -- the sections the page
+ * has always had, plus the insight's observations. */
 export async function OverviewView({
   customer,
   canSupport,
@@ -63,7 +63,21 @@ export async function OverviewView({
 
   return (
     <>
-      <div className="grid gap-4 md:grid-cols-3">
+      <FindingsCard insight={insight} customerId={id} days={days} />
+
+      {/* "Why can't they connect" is most of why this page is opened, and
+          whether they are on right now is the first half of the answer;
+          the window's counts are the second, in the same card. */}
+      <Section title="Right now">
+        <RightNow now={activity?.now ?? null} />
+        <div className="mt-2 flex items-baseline gap-2 border-t border-white/8 pt-4">
+          <h3 className="text-sm font-semibold">At a glance</h3>
+          <span className="text-sm text-muted-foreground">last {windowText(days)}</span>
+        </div>
+        <AtAGlance insight={insight} customerId={id} days={days} />
+      </Section>
+
+      <div className="grid grid-cols-3 gap-3">
         <Fact icon={<Mail className="size-4" />} label="Telegram" value={customer.telegramId ?? "—"} />
         <Fact icon={<Users className="size-4" />} label="Referral code" value={customer.referralCode ?? "—"} mono />
         <Fact
@@ -72,14 +86,6 @@ export async function OverviewView({
           value={customer.emailVerifiedAt ? new Date(customer.emailVerifiedAt).toLocaleDateString() : "Never"}
         />
       </div>
-
-      <FindingsCard insight={insight} days={days} />
-
-      {/* "Why can't they connect" is most of why this page is opened, and
-          whether they are on right now is the first half of the answer. */}
-      <RightNowCard now={activity?.now ?? null} />
-
-      <AtAGlance insight={insight} days={days} />
 
       <SubscriptionsPanel
         customerId={id}
@@ -96,43 +102,31 @@ export async function OverviewView({
 
       {customer.recoveryCodeSetAt && <MoveAddressCard customerId={id} />}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">
-            Invoices
-            {invoices.total > 0 && (
-              <span className="ml-2 text-sm font-normal text-muted-foreground tabular-nums">
-                {invoices.total.toLocaleString()}
-              </span>
-            )}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          {invoices.items.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Nothing billed yet.</p>
-          ) : (
-            <div className="flex flex-col gap-1.5">
-              {invoices.items.map((invoice) => (
-                <div
-                  key={invoice.id}
-                  className="flex items-center justify-between gap-3 rounded-lg border border-white/8 bg-card/40 px-3 py-2"
-                >
-                  <span className="font-mono text-xs">{invoice.invoiceNumber}</span>
-                  <span className="text-sm">${invoice.amountUsd}</span>
-                  <Badge variant={invoice.status === "PAID" ? "outline" : "default"}>{invoice.status}</Badge>
-                </div>
-              ))}
-            </div>
-          )}
-          <Pager
-            total={invoices.total}
-            take={invoiceTake}
-            skip={invoiceSkip}
-            basePath={`/customers/${id}`}
-            params={pageParams({ days })}
-          />
-        </CardContent>
-      </Card>
+      <Section title="Invoices" note={invoices.total > 0 ? invoices.total.toLocaleString() : undefined}>
+        {invoices.items.length === 0 ? (
+          <Muted>Nothing billed yet.</Muted>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {invoices.items.map((invoice) => (
+              <div
+                key={invoice.id}
+                className="flex items-center justify-between gap-3 rounded-lg border border-white/8 bg-card/40 px-3 py-2"
+              >
+                <span className="min-w-0 truncate font-mono text-xs">{invoice.invoiceNumber}</span>
+                <span className="ml-auto text-sm tabular-nums">${invoice.amountUsd}</span>
+                <Badge variant={invoice.status === "PAID" ? "outline" : "default"}>{invoice.status}</Badge>
+              </div>
+            ))}
+          </div>
+        )}
+        <Pager
+          total={invoices.total}
+          take={invoiceTake}
+          skip={invoiceSkip}
+          basePath={`/customers/${id}`}
+          params={pageParams({ days })}
+        />
+      </Section>
     </>
   );
 }
@@ -145,8 +139,17 @@ const SEVERITY: Record<InsightFinding["severity"], { label: string; className: s
 const SEVERITY_ORDER = { problem: 0, warning: 1, info: 2 } as const;
 
 /** The insight's observations. Each is a count and what it was counted
- * from, never a guessed cause -- the backend words them that way. */
-function FindingsCard({ insight, days }: { insight: CustomerInsight | null; days: number }) {
+ * from, never a guessed cause -- the backend words them that way. Where
+ * one is about reports, it links to the log filtered to those reports. */
+function FindingsCard({
+  insight,
+  customerId,
+  days,
+}: {
+  insight: CustomerInsight | null;
+  customerId: string;
+  days: number;
+}) {
   if (insight === null) {
     return (
       <Section title="What we see">
@@ -155,22 +158,51 @@ function FindingsCard({ insight, days }: { insight: CustomerInsight | null; days
     );
   }
   const findings = [...insight.findings].sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
+  const problems = findings.filter((f) => f.severity === "problem").length;
+  const warnings = findings.filter((f) => f.severity === "warning").length;
   return (
-    <Section title="What we see" note={`last ${windowText(days)}`}>
+    <Section
+      title="What we see"
+      note={`last ${windowText(days)}`}
+      aside={
+        <>
+          {problems > 0 && (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-0.5 font-medium text-red-300 tabular-nums">
+              {problems} {problems === 1 ? "problem" : "problems"}
+            </span>
+          )}
+          {warnings > 0 && (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/5 px-2 py-0.5 font-medium text-amber-300 tabular-nums">
+              {warnings} {warnings === 1 ? "warning" : "warnings"}
+            </span>
+          )}
+        </>
+      }
+    >
       {findings.length === 0 ? (
         <Muted>Nothing stands out in the last {windowText(days)}.</Muted>
       ) : (
         <ul className="flex flex-col gap-2">
           {findings.map((finding, index) => {
             const tone = SEVERITY[finding.severity] ?? SEVERITY.info;
+            const filters = findingFilters(finding);
             return (
               <li key={`${finding.code}-${index}`} className={cn("rounded-lg border px-3.5 py-2.5", tone.className)}>
-                <p className="flex items-center gap-2 text-sm font-medium">
-                  <span className={cn("size-2 shrink-0 rounded-full", tone.dot)} aria-hidden="true" />
+                <p className="flex items-start gap-2 text-sm font-medium">
+                  <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", tone.dot)} aria-hidden="true" />
                   <span className="sr-only">{tone.label}: </span>
                   {finding.title}
                 </p>
-                <p className="mt-0.5 pl-4 text-xs text-muted-foreground">{finding.detail}</p>
+                <p className="mt-0.5 pl-4 text-xs text-muted-foreground [overflow-wrap:anywhere]">{finding.detail}</p>
+                {filters && (
+                  <Link
+                    href={customerHref(customerId, { view: "connections", days, ...filters })}
+                    className="-mb-1.5 ml-4 inline-flex min-h-8 items-center gap-1 text-xs font-medium text-foreground/80 underline-offset-2 hover:text-foreground hover:underline max-lg:min-h-10"
+                  >
+                    Show the reports
+                    <ArrowRight className="size-3.5" aria-hidden="true" />
+                  </Link>
+                )}
               </li>
             );
           })}
@@ -180,13 +212,9 @@ function FindingsCard({ insight, days }: { insight: CustomerInsight | null; days
   );
 }
 
-function AtAGlance({ insight, days }: { insight: CustomerInsight | null; days: number }) {
+function AtAGlance({ insight, customerId, days }: { insight: CustomerInsight | null; customerId: string; days: number }) {
   if (insight === null) {
-    return (
-      <Section title="At a glance">
-        <Muted>Could not load this customer&apos;s reports.</Muted>
-      </Section>
-    );
+    return <Muted>Could not load this customer&apos;s reports.</Muted>;
   }
   const { connect, sessions, apps } = insight;
   const failureOutcome = connect.lastFailure
@@ -194,73 +222,78 @@ function AtAGlance({ insight, days }: { insight: CustomerInsight | null; days: n
     : null;
 
   return (
-    <Section title="At a glance" note={`last ${windowText(days)}`}>
-      <div className="grid gap-x-6 gap-y-4 md:grid-cols-2">
-        <Item label="Connection attempts">
-          {connect.tried === 0 ? (
-            <span className="text-muted-foreground">None reported</span>
-          ) : (
-            <span className="tabular-nums">
-              {connect.succeeded} of {connect.tried} succeeded
-            </span>
-          )}
-        </Item>
+    <Tiles>
+      <StatTile
+        label="Connection attempts"
+        value={connect.tried === 0 ? <span className="text-muted-foreground">None reported</span> : `${connect.succeeded} of ${connect.tried}`}
+        sub={connect.tried === 0 ? undefined : "succeeded"}
+        tone={connect.tried > 0 && connect.succeeded === 0 ? "problem" : "neutral"}
+        bar={connect.tried > 0 ? { part: connect.succeeded, whole: connect.tried } : undefined}
+      />
 
-        <Item label="Sessions the apps reported">
-          {sessions.count === 0 ? (
-            <span className="text-muted-foreground">None reported</span>
-          ) : (
-            <span>
-              {sessions.count} {sessions.count === 1 ? "session" : "sessions"}, longest {duration(sessions.longestSeconds)}
-              <span className="ml-1.5 text-xs text-muted-foreground">{duration(sessions.totalSeconds)} in all</span>
-            </span>
-          )}
-        </Item>
+      <StatTile
+        label="Sessions the apps reported"
+        value={sessions.count === 0 ? <span className="text-muted-foreground">None reported</span> : sessions.count}
+        sub={
+          sessions.count === 0
+            ? undefined
+            : `longest ${duration(sessions.longestSeconds)}, ${duration(sessions.totalSeconds)} in all`
+        }
+      />
 
-        <Item label="Last success">
-          {connect.lastSuccess ? (
-            <span className="flex flex-wrap items-baseline gap-x-1.5">
-              <When at={connect.lastSuccess.at} />
-              <span className="text-muted-foreground">on</span>
-              <span>{connect.lastSuccess.server ?? "unknown server"}</span>
-              <span className="text-muted-foreground">{protocolLabel(connect.lastSuccess.protocol)}</span>
-              <span className="text-xs">
-                <NetworkLabel network={connect.lastSuccess.network} />
+      <StatTile
+        label="Last success"
+        value={
+          connect.lastSuccess ? (
+            <When at={connect.lastSuccess.at} />
+          ) : (
+            <span className="text-base text-muted-foreground">None in the last {windowText(days)}</span>
+          )
+        }
+        sub={
+          connect.lastSuccess && (
+            <span className="flex flex-col gap-0.5">
+              <span>
+                <span className="text-foreground/90">{connect.lastSuccess.server ?? "unknown server"}</span>{" "}
+                {protocolLabel(connect.lastSuccess.protocol)}
               </span>
-              <span className="text-xs text-muted-foreground">
+              <NetworkLabel network={connect.lastSuccess.network} />
+              <span>
                 {connect.lastSuccess.platform} {connect.lastSuccess.appVersion}
               </span>
             </span>
-          ) : (
-            <span className="text-muted-foreground">None in the last {windowText(days)}</span>
-          )}
-        </Item>
+          )
+        }
+      />
 
-        <Item label="Last failure">
-          {connect.lastFailure ? (
-            <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
-              <When at={connect.lastFailure.at} />
-              <span>{failureOutcome}</span>
+      <StatTile
+        label="Last failure"
+        value={
+          connect.lastFailure ? (
+            <When at={connect.lastFailure.at} />
+          ) : (
+            <span className="text-base text-muted-foreground">None in the last {windowText(days)}</span>
+          )
+        }
+        sub={
+          connect.lastFailure && (
+            <span className="flex flex-col gap-0.5">
+              <span className="text-foreground/90">{failureOutcome}</span>
               {connect.lastFailure.reason && (
-                <span
-                  className="max-w-full truncate font-mono text-xs text-muted-foreground"
-                  title={connect.lastFailure.reason}
-                >
-                  {connect.lastFailure.reason}
-                </span>
+                <FoldedText text={connect.lastFailure.reason} className="font-mono" />
               )}
             </span>
-          ) : (
-            <span className="text-muted-foreground">None in the last {windowText(days)}</span>
-          )}
-        </Item>
-      </div>
+          )
+        }
+      />
 
-      <Item label="Apps">
-        {apps.length === 0 ? (
-          <span className="text-muted-foreground">No app has reported</span>
-        ) : (
-          <ul className="flex flex-col gap-1">
+      <StatTile
+        wide
+        label="Apps"
+        value={apps.length === 0 ? <span className="text-base text-muted-foreground">No app has reported</span> : null}
+      >
+        {apps.length > 0 && (
+          <ul className="flex flex-col gap-1.5 text-sm">
             {apps.map((app) => (
               <li key={`${app.platform}-${app.appVersion}`} className="flex flex-wrap items-baseline gap-x-2">
                 <span className="font-medium">{app.platform}</span>
@@ -271,12 +304,19 @@ function AtAGlance({ insight, days }: { insight: CustomerInsight | null; days: n
                 {app.behind === true && app.latestVersion && (
                   <span className="text-xs text-amber-300">update available: {app.latestVersion}</span>
                 )}
+                <Link
+                  href={customerHref(customerId, { view: "connections", days, platform: app.platform })}
+                  className="ml-auto inline-flex min-h-8 items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline max-lg:min-h-10"
+                >
+                  Reports
+                  <ArrowRight className="size-3.5" aria-hidden="true" />
+                </Link>
               </li>
             ))}
           </ul>
         )}
-      </Item>
-    </Section>
+      </StatTile>
+    </Tiles>
   );
 }
 
@@ -328,22 +368,15 @@ function VouchersCard({ vouchers }: { vouchers: InsightVoucher[] }) {
   );
 }
 
-function Item({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="min-w-0 text-sm">
-      <p className="mb-0.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">{label}</p>
-      {children}
-    </div>
-  );
-}
-
 function Fact({ icon, label, value, mono }: { icon: React.ReactNode; label: string; value: string; mono?: boolean }) {
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-white/8 bg-card/40 px-3.5 py-3">
-      <span className="text-muted-foreground">{icon}</span>
+    <div className="flex min-w-0 items-center gap-3 rounded-lg border border-white/8 bg-card/40 px-3.5 py-3 max-sm:px-3 max-sm:py-2.5">
+      <span className="text-muted-foreground max-sm:hidden">{icon}</span>
       <div className="min-w-0">
-        <p className="text-[11px] tracking-wide text-muted-foreground uppercase">{label}</p>
-        <p className={`truncate text-sm ${mono ? "font-mono" : ""}`}>{value}</p>
+        <p className="text-[11px] leading-tight tracking-wide text-muted-foreground uppercase">{label}</p>
+        <p className={cn("truncate text-sm", mono && "font-mono")} title={value}>
+          {value}
+        </p>
       </div>
     </div>
   );
