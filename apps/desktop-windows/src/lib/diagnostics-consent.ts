@@ -1,34 +1,38 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
+/** Whether the fuller diagnostics may be sent yet.
+ *
+ * Two rules, one place:
+ *
+ * - Desktop (Windows, Linux, the macOS shell): yes, from the first run.
+ *   The published privacy page describes everything these reports hold,
+ *   no store rule asks a desktop app for an in-app acceptance, and the
+ *   desktop's connection reports have always gone without one. A one-time
+ *   notice with an OK gate was built first, as a reviewer's precaution;
+ *   the owner chose on 2026-11-19 to have no card at all, because anyone
+ *   who ignored it sent none of the details support needs.
+ * - Phones: only after the prominent disclosure has been accepted
+ *   (apps/mobile ProminentDisclosure, version 2 and later). The stores
+ *   require that screen before sign-in, and the phone app sets it as the
+ *   source here. Until then a report goes exactly as it did before the
+ *   feature: no `details`, no rung `ms` (attempts.ts), no service check
+ *   reported or run by itself (service-check.ts), no end-of-session
+ *   report. Fails closed: a source that throws is "not yet".
+ *
+ * A bundle the customer sends from the Support screen is not held by
+ * this on any platform: they see exactly what it carries before they
+ * press Send. */
 
-/** Whether the customer has been told, in the app, what the fuller
- * diagnostics carry (docs/client-diagnostics.md, Rollout 2): the device
- * and its network settings, rung times, the service check.
- *
- * Until they have, every report goes as it did before that change -- no
- * `details`, no rung `ms` (attempts.ts) -- and no service check is
- * reported or run by itself (service-check.ts). A bundle the customer
- * sends from the Support screen is not held by this: they see exactly
- * what it carries before they press Send.
- *
- * Fails closed: a store that cannot be read is "not told".
- *
- * On a phone the notice is the prominent disclosure every customer accepts
- * before the app opens (apps/mobile ProminentDisclosure, version 2 and
- * later), which the phone app sets as the source here. On Windows and
- * Linux it is the desktop notice below (`DiagnosticsNotice` on the
- * Dashboard). */
+const DESKTOP: () => Promise<boolean> = () => Promise.resolve(true);
 
-let source: () => Promise<boolean> = hasAcceptedDesktopNotice;
+let source: () => Promise<boolean> = DESKTOP;
 let known = false;
 
-/** Where the answer comes from: the phone app's disclosure, in its place. */
+/** Where the answer comes from on a phone: its accepted disclosure. */
 export function setDiagnosticsConsentSource(read: () => Promise<boolean>): void {
   source = read;
   known = false;
 }
 
-/** Never rejects. Once true, true for the run: an acceptance is not taken
- * back. */
+/** Whether the new details may go. Once yes it stays yes for the run. */
 export async function diagnosticsAllowed(): Promise<boolean> {
   if (known) return true;
   try {
@@ -39,50 +43,8 @@ export async function diagnosticsAllowed(): Promise<boolean> {
   return known;
 }
 
-/* ------------------------------------------------------------------ *
- * The desktop notice's acceptance, in a file of its own: it is about the
- * app, not an account, so it survives a sign-out.
- * ------------------------------------------------------------------ */
-
-const STORE_FILE = "diagnostics-notice.json";
-const KEY = "acceptedVersion";
-
-/** Bumped when what the notice describes gains a new kind of data. */
-export const DESKTOP_NOTICE_VERSION = 1;
-
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(STORE_FILE, { autoSave: false }).catch((err) => {
-    storePromise = null;
-    throw err;
-  });
-  return storePromise;
-}
-
-export async function hasAcceptedDesktopNotice(): Promise<boolean> {
-  try {
-    const accepted = await (await getStore()).get<number>(KEY);
-    return typeof accepted === "number" && accepted >= DESKTOP_NOTICE_VERSION;
-  } catch {
-    return false;
-  }
-}
-
-/** Recorded, and in force for this run whether or not the write lands (a
- * failed write shows the notice again next start, the safe direction). */
-export async function acceptDesktopNotice(): Promise<void> {
-  if (source === hasAcceptedDesktopNotice) known = true;
-  try {
-    const store = await getStore();
-    await store.set(KEY, DESKTOP_NOTICE_VERSION);
-    await store.save();
-  } catch {
-    // Shown again next start.
-  }
-}
-
+/** Tests only: start again from the desktop rule, or from a given source. */
 export function resetDiagnosticsConsentForTests(read?: () => Promise<boolean>): void {
-  source = read ?? hasAcceptedDesktopNotice;
+  source = read ?? DESKTOP;
   known = false;
-  storePromise = null;
 }

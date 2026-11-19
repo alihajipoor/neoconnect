@@ -98,10 +98,12 @@ describe("the exit check a connect report carries", () => {
 });
 
 describe("the in-app notice", () => {
-  it("is on the desktop Dashboard until accepted, and the phone app reads its own disclosure", () => {
+  it("is not on the desktop at all, and the phone app reads its own disclosure", () => {
+    // The owner's choice, 2026-11-19: no card on desktop; the privacy page covers it.
     const app = source("../App.tsx");
-    expect(app).toContain("<DiagnosticsNotice");
-    expect(app).toContain("void acceptDesktopNotice();");
+    expect(app).not.toContain("DiagnosticsNotice");
+    expect(app).not.toContain("diagnostics-consent");
+    expect(source("./diagnostics-consent.ts")).toContain("let source: () => Promise<boolean> = DESKTOP;");
     expect(source("../../../mobile/src/App.tsx")).toContain("setDiagnosticsConsentSource(hasAcceptedDisclosure);");
   });
 

@@ -363,19 +363,23 @@ imports: `report-details.ts` (the `details` object), `attempts.ts` (the
 report queue), `service-check.ts`, `diagnostics-bundle.ts`,
 `diagnostics-consent.ts`, and the Support screen (`screens/Support.tsx`).
 
-- **Nothing new until the customer has been told in the app** (Rollout
-  2, `diagnostics-consent.ts`). Until then every report goes exactly as
-  it did before this change -- no `details`, no rung `ms` -- and no
-  SERVICE_CHECK is run by itself or sent. On a phone the notice is the
+- **On phones, nothing new until the disclosure is accepted; on desktop,
+  from the first run** (Rollout 2, `diagnostics-consent.ts`). On a phone,
+  until then every report goes exactly as it did before this change -- no
+  `details`, no rung `ms` -- and no SERVICE_CHECK is run by itself or
+  sent. On a phone the notice is the
   prominent disclosure, now **version 2** (`DISCLOSURE_VERSION`), whose
   "connection diagnostics" item names the new data; everyone who accepted
   version 1 is shown it again before anything new is sent, and a wiring
   test fails whenever the disclosure's words change without a decision
-  about the version. On Windows and Linux it is a notice on the Dashboard
-  (`DiagnosticsNotice`, beside the update notice, in its own store file
-  `diagnostics-notice.json`, which survives a sign-out); it does not stand
-  in front of the app, so a sign-in on a fresh install carries no details.
-  A diagnostics bundle is not held by it: the customer sees exactly what
+  about the version. The desktop apps (Windows, Linux, the macOS shell) have no in-app
+  notice and no gate: the published privacy page describes all of it, no
+  store rule asks a desktop app for an acceptance, and the desktop's
+  reports have always gone without one. A one-time Dashboard notice with
+  an OK gate was built first as a reviewer's precaution; the owner chose
+  on 2026-11-19 to have no card at all, since anyone who ignored it sent
+  none of the details support needs.
+  A diagnostics bundle is not held by any of this: the customer sees exactly what
   it carries before pressing Send.
 
 - **Details on every CONNECT, SIGN_IN, REGISTER and SESSION report**:
@@ -424,7 +428,7 @@ report queue), `service-check.ts`, `diagnostics-bundle.ts`,
   first: the emulator showed 187 s for 181 s on screen and 92 s for 83 s.
   This report goes even when the network could not be attested (every
   other SESSION report is held back then: it is per-network evidence,
-  and this one is about one customer's session); before the in-app notice
+  and this one is about one customer's session); on a phone, before the disclosure
   is accepted it is not sent at all, since its reason line alone says how
   long the session ran. A stopped pass ends
   it as `disconnected`. From the live tracker (`session-report.ts`), never

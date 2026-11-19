@@ -42,14 +42,9 @@ function sentBodies(): Record<string, unknown>[] {
 
 const refused: ApiResult<void> = { ok: false, error: "Request failed (400)", status: 400 };
 
-/** The desktop notice, accepted (diagnostics-consent.ts). */
-function acceptNotice() {
-  files.set("diagnostics-notice.json", new Map<string, unknown>([["acceptedVersion", 1]]));
-}
 
 beforeEach(async () => {
   for (const data of files.values()) data.clear();
-  acceptNotice();
   invoke.mockReset();
   invoke.mockImplementation(async (cmd) => {
     if (cmd === "build_platform") return "windows";
@@ -84,9 +79,11 @@ describe("a report's details", () => {
   });
 });
 
-describe("before the customer has been told in the app", () => {
-  beforeEach(() => {
-    files.get("diagnostics-notice.json")?.clear();
+describe("on a phone, before the disclosure has been accepted", () => {
+  beforeEach(async () => {
+    // The phone app sets its disclosure as the source; the desktop has none
+    // and sends from the first run (diagnostics-consent.ts).
+    (await import("./diagnostics-consent")).setDiagnosticsConsentSource(async () => false);
   });
 
   it("a report goes as it always did: no details, no rung times", async () => {
@@ -106,8 +103,8 @@ describe("before the customer has been told in the app", () => {
     expect(publicRequest).not.toHaveBeenCalled();
   });
 
-  it("an earlier notice version is not this one", async () => {
-    files.set("diagnostics-notice.json", new Map<string, unknown>([["acceptedVersion", 0]]));
+  it("a source that throws is not a yes", async () => {
+    (await import("./diagnostics-consent")).setDiagnosticsConsentSource(() => Promise.reject(new Error("no store")));
     await attempts.reportAttempt({ kind: "CONNECT", outcome: "SUCCESS" });
     expect(sentBodies()[0]).not.toHaveProperty("details");
   });
