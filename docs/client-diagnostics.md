@@ -392,7 +392,9 @@ report queue), `service-check.ts`, `diagnostics-bundle.ts`,
   the mode (`full`, `custom`, `gaming`) and the resolvers the app sets
   inside the tunnel, set afresh when a rung lands (proven or not), and on
   Windows `splitTunnel`, `ipv6Blocked` and `dnsUnprotected` from the
-  service's status, merged into that landing's. Put away on a disconnect,
+  service's status (`tunnelFlags`): first from the status the landing
+  rung's own checks already read, so the CONNECT report and the first
+  automatic SERVICE_CHECK carry them, then from every health poll. Put away on a disconnect,
   a drop, a teardown (a stopped pass, the device limit) and when a connect
   pass begins, so nothing of an older session is reported as a later
   one's; a failed CONNECT landed nothing and carries none. Read when the
@@ -471,7 +473,20 @@ report queue), `service-check.ts`, `diagnostics-bundle.ts`,
 `dataSaver`, `metered` or `otherVpn` (table above); `tunnel.dns` is
 `1.1.1.1` for the Xray family and IKEv2 (the service's `TUN_DNS` and
 `IKEV2_DNS`), a WireGuard credential's own `dns`, and left out for
-OpenVPN, whose resolvers the server pushes.
+OpenVPN, whose resolvers the server pushes. The three tunnel flags are
+known when a rung lands: the IPv6 block and the DNS rule are installed
+by the connect, and Custom mode's redirect is read after its probe. They
+are left out of a landing whose status read failed, and never taken
+from a status the service answered without its engine state (no
+`sessionSecs`: its fallback while busy, which says `false` for what it
+cannot read); a later poll adds them. `dnsUnprotected` can turn true
+later in a session (a DNS pin found missing), and only the polls see
+that. The diagnostics text counts as other VPNs only adapters that are
+none of ours: Xray's, the WireGuard tunnel's, OpenVPN's and the IKEv2
+connection's (`DIAGNOSED_ADAPTERS` in the service's `repair.rs`), and
+lists the routes on all four as ours. 0.9.65 read the repair's
+two-adapter purge list there, so our own WireGuard tunnel was counted as
+another VPN and its routes went unlisted.
 
 **Linux** (`apps/desktop-linux`) runs the same TypeScript and registers
 both native commands: `probe_service` is the shared `service_probe.rs`,
