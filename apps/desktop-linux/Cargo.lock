@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "neoxify-helper"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64",
  "blake2",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "neoxify-linux-wire"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -249,14 +249,14 @@ dependencies = [
 
 [[package]]
 name = "neoxify-netguard"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "neoxify-tunnel"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "libc",
  "neoconnect-ipc",

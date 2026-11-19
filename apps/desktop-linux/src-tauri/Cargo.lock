@@ -2369,7 +2369,7 @@ dependencies = [
 
 [[package]]
 name = "neoxify-desktop-linux"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2406,7 +2406,7 @@ dependencies = [
 
 [[package]]
 name = "neoxify-linux-wire"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",

@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "neoconnect-desktop"
-version = "0.9.66"
+version = "0.9.67"
 dependencies = [
  "base64 0.22.1",
  "bytes",
