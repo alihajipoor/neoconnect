@@ -30,13 +30,18 @@ import type {
 export const getMe = (trace?: EndpointTrace) => apiRequest<Customer>("/customer/me", { relay: "background" }, trace);
 export const getSubscriptions = (trace?: EndpointTrace) =>
   apiRequest<Subscription[]>("/customer/subscriptions", { relay: "background" }, trace);
-export const getProtocolUsers = (trace?: EndpointTrace) =>
-  apiRequest<ProtocolUser[]>("/customer/protocol-users", { relay: "background" }, trace);
-/** `getProtocolUsers` for a caller holding the previous list: offers the
- * server that list's tag, so an unchanged list costs a 304 with no body
- * instead of ~100 KB (the config refresh, connection-config.ts). The same
- * routes; the names are offered the tag, the doors and the relay are asked
- * as `getProtocolUsers` asks them (`RevalidateOptions`). */
+/** The credentials, offering the server the tag of the list held, so an
+ * unchanged list costs a 304 with no body instead of ~100 KB: for the config
+ * refresh and a screen's load (connection-config.ts), the only two callers.
+ * With no tag it is the plain request, and the answer brings its tag. The
+ * routes `apiRequest` takes with `{ relay: "background" }`; the names are
+ * offered the tag, the doors and the relay are asked unconditionally
+ * (`RevalidateOptions`).
+ *
+ * There is deliberately no other request for them. The loads used one that
+ * did not hand back the answer's tag, and saved the list without it, which
+ * threw away the tag the refresh had kept: the refresh then had nothing to
+ * offer. */
 export const revalidateProtocolUsers = (etag: string | null, trace?: EndpointTrace) =>
   apiRequestRevalidated<ProtocolUser[]>("/customer/protocol-users", etag, {
     lastResort: { relay: "background" },

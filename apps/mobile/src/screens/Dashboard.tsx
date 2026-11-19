@@ -31,7 +31,6 @@ import { createSessionTracker } from "@shared/lib/session-report";
 import {
   getAvailableRoutes,
   getMe,
-  getProtocolUsers,
   getSubscriptions,
 } from "@shared/lib/customer";
 import { logout } from "@shared/lib/auth";
@@ -131,7 +130,7 @@ import {
   loadSnapshot,
   saveSnapshot,
 } from "@shared/lib/credential-cache";
-import { onLateConfig, refreshConnectionConfig } from "@shared/lib/connection-config";
+import { loadProtocolUsers, onLateConfig, refreshConnectionConfig } from "@shared/lib/connection-config";
 import { useRefreshOnResume } from "@shared/lib/resume";
 import { swapView } from "@shared/lib/view-transition";
 import { rearmCheckPop } from "@shared/lib/check-pop";
@@ -1110,10 +1109,13 @@ export function Dashboard({
             );
           })();
         }, STILL_TRYING_AFTER_MS);
+    // The credentials with the tag of the list cached for this session, and
+    // back with the answer's tag: on a 304 the cached list is the answer
+    // (`loadProtocolUsers`), as on Windows.
     const [meResult, subsResult, usersResult] = await Promise.all([
       getMe(requests.trace("me")),
       getSubscriptions(requests.trace("subscriptions")),
-      getProtocolUsers(requests.trace("protocol-users")),
+      loadProtocolUsers(requests.trace("protocol-users")),
     ]).finally(() => {
       settled = true;
       clearTimeout(waiting);
@@ -1292,13 +1294,16 @@ export function Dashboard({
     // an empty one in its place. Not by a load after a later one has
     // written (`maySaveSnapshot`): this one's, landing after it, would put
     // the older answer back. A later load that fell back to the cache
-    // writes nothing, and does not keep this one from writing.
+    // writes nothing, and does not keep this one from writing. With the
+    // server's tag for the credentials, when the answer had one, as on
+    // Windows (`loadProtocolUsers`).
     if (maySaveSnapshot(snapshotWriterRef.current, load)) {
       snapshotWriterRef.current = load;
       void saveSnapshot(
         {
           subscription: sub,
           protocolUsers: usersResult.data,
+          ...(usersResult.etag ? { protocolUsersEtag: usersResult.etag } : {}),
           routes: currentRoutes,
           askedAt,
         },

@@ -421,7 +421,8 @@ describe("the credentials' tag", () => {
     expect(await updateSnapshotProtocolUsers([other])).toBe("written");
     expect((await loadSnapshot())!.protocolUsersEtag).toBeUndefined();
 
-    // A load's write, which brings no tag, drops it too.
+    // A whole snapshot written without one -- a load answered through a
+    // door or the relay, which carry no tag -- drops it too.
     await updateSnapshotProtocolUsers([credential], undefined, undefined, 'W/"pu-1"');
     await saveSnapshot({ subscription: plan, protocolUsers: [other], routes: [] });
     expect((await loadSnapshot())!.protocolUsersEtag).toBeUndefined();

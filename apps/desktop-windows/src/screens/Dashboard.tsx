@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, t
 import { invoke } from "@tauri-apps/api/core";
 import { Gamepad2, Globe, Repeat, Shield, Sparkles } from "lucide-react";
 import { describesTunnel, displayedProtocol, displayedRoute, displayedRouteId, heldListLook, showsAutomatic } from "../lib/displayed-route";
-import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
+import { getAvailableRoutes, getMe, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
 import { customerProtocolLabel } from "../lib/protocol-labels";
@@ -99,7 +99,7 @@ import {
   type ShownRoutes,
 } from "../lib/credential-cache";
 import { sessionGeneration } from "../lib/session-end";
-import { onLateConfig, refreshConnectionConfig } from "../lib/connection-config";
+import { loadProtocolUsers, onLateConfig, refreshConnectionConfig } from "../lib/connection-config";
 import { useRefreshOnResume } from "../lib/resume";
 import { swapView } from "../lib/view-transition";
 import { rearmCheckPop } from "../lib/check-pop";
@@ -2008,10 +2008,13 @@ export function Dashboard({
             );
           })();
         }, STILL_TRYING_AFTER_MS);
+    // The credentials with the tag of the list cached for this session, and
+    // back with the answer's tag: on a 304 the cached list is the answer
+    // (`loadProtocolUsers`).
     const [meResult, subsResult, usersResult] = await Promise.all([
       getMe(requests.trace("me")),
       getSubscriptions(requests.trace("subscriptions")),
-      getProtocolUsers(requests.trace("protocol-users")),
+      loadProtocolUsers(requests.trace("protocol-users")),
     ]).finally(() => {
       settled = true;
       clearTimeout(waiting);
@@ -2221,12 +2224,16 @@ export function Dashboard({
     // later one has written (`maySaveSnapshot`): this one's, landing after
     // it, would put the older answer back. A later load that fell back to
     // the cache writes nothing, and does not keep this one from writing.
+    // With the server's tag for the credentials, when the answer had one:
+    // written without it, the tag the next refresh and load offer back was
+    // gone after every load (`loadProtocolUsers`).
     if (maySaveSnapshot(snapshotWriterRef.current, load)) {
       snapshotWriterRef.current = load;
       void saveSnapshot(
         {
           subscription: sub,
           protocolUsers: usersResult.data,
+          ...(usersResult.etag ? { protocolUsersEtag: usersResult.etag } : {}),
           routes: currentRoutes,
           askedAt,
         },

@@ -39,10 +39,11 @@ export interface ConnectionSnapshot {
   subscription: Subscription | null;
   protocolUsers: ProtocolUser[];
   /** The server's ETag for exactly `protocolUsers`, when they came from an
-   * answer that carried one (the refresh in connection-config.ts). Offered
-   * back as `If-None-Match`, so an unchanged list costs a 304 instead of the
-   * whole list. It stands for those credentials and no others: every write
-   * of new credentials drops it unless it brings their own, and only a write
+   * answer that carried one (the refresh and a screen's load, both in
+   * connection-config.ts). Offered back as `If-None-Match`, so an unchanged
+   * list costs a 304 instead of the whole list. It stands for those
+   * credentials and no others: every write of new credentials drops it
+   * unless it brings their own, and only a write
    * that keeps the credentials keeps it (`updateSnapshotRoutes`). Absent from
    * a cache written before it existed, which then asks as it always did. */
   protocolUsersEtag?: string;
@@ -165,16 +166,7 @@ export async function loadSnapshot(): Promise<ConnectionSnapshot | null> {
   try {
     const store = await getStore();
     const stored = await store.get<ConnectionSnapshot>(KEY);
-    const usable =
-      !!stored &&
-      stored.version === VERSION &&
-      Array.isArray(stored.protocolUsers) &&
-      stored.protocolUsers.length > 0 &&
-      // A credential with no connection block cannot build a tunnel, and
-      // one that got that far would fail with a missing-field error rather
-      // than an honest "no saved servers".
-      stored.protocolUsers.every((u) => u && u.connection && u.protocol);
-    if (!usable) {
+    if (!usable(stored)) {
       // The store was read and holds no list: no doors either. Not when
       // it could not be read at all (the catch below), which says nothing.
       forgetDoors();
@@ -193,6 +185,42 @@ export async function loadSnapshot(): Promise<ConnectionSnapshot | null> {
         : {}),
       routes: Array.isArray(stored.routes) ? stored.routes.map(withoutNetworkTag) : [],
     };
+  } catch {
+    return null;
+  }
+}
+
+/** Whether what the store holds is a snapshot the app can use: this
+ * version, with a list of credentials that can each build a tunnel. */
+function usable(stored: ConnectionSnapshot | null | undefined): stored is ConnectionSnapshot {
+  return (
+    !!stored &&
+    stored.version === VERSION &&
+    Array.isArray(stored.protocolUsers) &&
+    stored.protocolUsers.length > 0 &&
+    // A credential with no connection block cannot build a tunnel, and
+    // one that got that far would fail with a missing-field error rather
+    // than an honest "no saved servers".
+    stored.protocolUsers.every((u) => u && u.connection && u.protocol)
+  );
+}
+
+/** The cached credentials and the server's tag for exactly them, or null
+ * when the cache does not hold both: what a screen's load offers back
+ * (`loadProtocolUsers` in connection-config.ts), and on a 304 takes as the
+ * server's answer.
+ *
+ * Only the store is read. `loadSnapshot` also sets the doors in hand from
+ * what it finds, and a load asking this before its request goes out must
+ * leave them as they were: the snapshot can be mid-write by an earlier load
+ * at that moment. The same test of a usable snapshot, so a list the offline
+ * start would refuse is never one a 304 hands to the screen. */
+export async function cachedCredentialsWithTag(): Promise<{ protocolUsers: ProtocolUser[]; etag: string } | null> {
+  try {
+    const store = await getStore();
+    const stored = await store.get<ConnectionSnapshot>(KEY);
+    if (!usable(stored) || typeof stored.protocolUsersEtag !== "string" || stored.protocolUsersEtag === "") return null;
+    return { protocolUsers: stored.protocolUsers, etag: stored.protocolUsersEtag };
   } catch {
     return null;
   }

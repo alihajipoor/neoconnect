@@ -32,7 +32,7 @@ describe("the Windows dashboard's load", () => {
     expect(load).toContain('const requests = traceRequests("dashboard load", () => connectionStateRef.current);');
     expect(load).toContain('getMe(requests.trace("me")),');
     expect(load).toContain('getSubscriptions(requests.trace("subscriptions")),');
-    expect(load).toContain('getProtocolUsers(requests.trace("protocol-users")),');
+    expect(load).toContain('loadProtocolUsers(requests.trace("protocol-users")),');
     expect(load).toMatch(
       /const unanswered = requests\.settle\(\{\s*me: meResult,\s*subscriptions: subsResult,\s*"protocol-users": usersResult,?\s*\}\);/,
     );

@@ -1,8 +1,14 @@
 import type { RequestFailure } from "./api";
 import { reportAttempt, type AttemptReport } from "./attempts";
 import { connectStarting, pathChangingIn, probeAddendum } from "./control-plane-probe";
-import { newTrace, renderTrace } from "./endpoint-trace";
-import { isSnapshotStale, loadSnapshot, SNAPSHOT_TTL_MS, updateSnapshotProtocolUsers } from "./credential-cache";
+import { newTrace, renderTrace, type EndpointTrace } from "./endpoint-trace";
+import {
+  cachedCredentialsWithTag,
+  isSnapshotStale,
+  loadSnapshot,
+  SNAPSHOT_TTL_MS,
+  updateSnapshotProtocolUsers,
+} from "./credential-cache";
 import { revalidateProtocolUsers } from "./customer";
 import type { ResumeTrigger } from "./resume";
 import { sessionGeneration } from "./session-end";
@@ -403,8 +409,9 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
   // here: a 304 then says that list is still the server's answer, where a
   // tag for some other list would vouch for credentials nobody is about to
   // dial. Without one -- nothing cached, a cache from an older build, a list
-  // written by a load, which carries no tag -- the question is asked as it
-  // always was, and its answer brings a tag for next time.
+  // a load had through a door or the relay, which carries no tag -- the
+  // question is asked as it always was, and its answer brings a tag for next
+  // time. A load keeps the tag of its own answer (`loadProtocolUsers`).
   const stored = snapshot !== undefined ? snapshot : await loadSnapshot();
   const validator =
     stored?.protocolUsersEtag && sameList(stored.protocolUsers, held) ? stored.protocolUsersEtag : null;
@@ -534,4 +541,41 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
   );
 
   return { protocolUsers: held, source: "stale", ageMs, drift: [], sessionExpired: false };
+}
+
+/** A screen's load's request for the credentials, with the server's tag for
+ * what it answers, which the screen saves beside the list
+ * (`protocolUsersEtag`).
+ *
+ * The load used to ask with no tag and save its answer with none, and that
+ * dropped the tag the refresh above had saved. Loads come far more often
+ * than refreshes -- the start, a return to the main page, a server switch,
+ * the retries on a cached snapshot -- so the refresh almost never had a tag
+ * to offer: in 43 minutes of ordinary use on the test machine the server
+ * answered 47 of these requests and not one with a 304.
+ *
+ * So it offers the tag of the list cached for this session, and on a 304
+ * that cached list is the answer, exactly as a 200 carrying it would be.
+ * With nothing cached, or a cache with no tag, it asks as it always did,
+ * and keeps the tag of the answer.
+ *
+ * Whose the cache is: this session's. A sign-out moves the session
+ * generation before it clears the cache (`endCustomerSession`), so a list
+ * read across that moment is not offered; and the server mixes the customer
+ * and the device's session into the tag, so a tag from any other session is
+ * never answered with a 304. Only the addresses by name are offered it; the
+ * doors and the relay are asked unconditionally, and what they answer
+ * carries no tag (`apiRequestRevalidated`). */
+export async function loadProtocolUsers(trace?: EndpointTrace): Promise<Fetched> {
+  const sessionAtStart = sessionGeneration();
+  const cached = await cachedCredentialsWithTag();
+  const held = cached !== null && sessionGeneration() === sessionAtStart ? cached : null;
+  const answer = await revalidateProtocolUsers(held?.etag ?? null, trace);
+  if (!answer.ok) return answer;
+  if (!answer.notModified) return { ok: true, data: answer.data, etag: answer.etag };
+  // Only ever the answer to a tag that was sent, so `held` is there. Were it
+  // not, the 304 would stand for no list at all, and is read as a plain
+  // request reads one: a failure with its status.
+  if (held === null) return { ok: false, error: "Request failed (304)", status: 304 };
+  return { ok: true, data: held.protocolUsers, etag: answer.etag };
 }
