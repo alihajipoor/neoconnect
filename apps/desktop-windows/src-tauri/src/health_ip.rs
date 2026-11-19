@@ -154,6 +154,11 @@ fn ipv4_client(timeout: Duration) -> Result<reqwest::Client, String> {
         // A redirect would hand the reading to a different endpoint than
         // the one it is recorded against. Its status is the answer.
         .redirect(reqwest::redirect::Policy::none())
+        // The data check counts the bytes that crossed the wire. The HTTP
+        // plugin's `gzip` feature turns reqwest's decompression on for every
+        // client in the build, and this one would then ask for gzip and
+        // count what it inflated to.
+        .no_gzip()
         .timeout(timeout)
         .user_agent(USER_AGENT)
         .build()
@@ -768,6 +773,100 @@ mod tests {
             write_body(&mut stream);
             Some(request_line)
         })
+    }
+
+    /// `serve_once`, handing back the request line and headers, lowercased.
+    fn serve_capturing(
+        listener: std::net::TcpListener,
+        response: Vec<u8>,
+    ) -> std::thread::JoinHandle<Option<Vec<String>>> {
+        use std::io::{BufRead, BufReader, Write};
+        std::thread::spawn(move || {
+            listener.set_nonblocking(false).ok()?;
+            let (stream, _) = listener.accept().ok()?;
+            let mut reader = BufReader::new(stream.try_clone().ok()?);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).ok()? <= 2 {
+                    break;
+                }
+                lines.push(line.trim_end().to_ascii_lowercase());
+            }
+            let mut stream = stream;
+            stream.write_all(&response).ok()?;
+            Some(lines)
+        })
+    }
+
+    /// The webview's `fetch` (tauri-plugin-http) builds a default reqwest
+    /// client for each request. With the plugin's `gzip` feature, which every
+    /// app's Cargo.toml turns on, that client asks for gzip and hands the page
+    /// the inflated body with no `Content-Encoding` left on it, so nothing
+    /// inflates it a second time. Without the feature the header was never
+    /// sent, and the ~100 KB credential list came uncompressed.
+    #[test]
+    fn the_webview_fetch_asks_for_gzip_and_reads_it_inflated() {
+        use std::io::Write;
+        let body = br#"[{"id":"pu-1","protocol":"XRAY_VLESS_REALITY"}]"#;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(body).unwrap();
+        let gzipped = encoder.finish().unwrap();
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            gzipped.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&gzipped);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = serve_capturing(listener, response);
+        let (encoding, text) = tauri::async_runtime::block_on(async move {
+            let response = reqwest::ClientBuilder::new()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap()
+                .get(format!("http://127.0.0.1:{port}/api/customer/protocol-users"))
+                .send()
+                .await
+                .unwrap();
+            let encoding = response.headers().get(reqwest::header::CONTENT_ENCODING).cloned();
+            (encoding, response.text().await.unwrap())
+        });
+        let lines = server.join().unwrap().unwrap();
+
+        assert!(
+            lines.iter().any(|l| l.starts_with("accept-encoding:") && l.contains("gzip")),
+            "asked without gzip: {lines:?}"
+        );
+        assert_eq!(text.as_bytes(), body);
+        assert!(encoding.is_none(), "inflated, but still marked gzip");
+    }
+
+    /// The egress check's own client does not ask for compression: what it
+    /// counts is what crossed the wire (`ipv4_client`).
+    #[test]
+    fn the_egress_check_asks_for_no_compression() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = serve_capturing(
+            listener,
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                .to_vec(),
+        );
+        let status = tauri::async_runtime::block_on(async move {
+            ipv4_client(Duration::from_secs(3))
+                .unwrap()
+                .get(format!("http://127.0.0.1:{port}/api/health/bulk"))
+                .send()
+                .await
+                .map(|r| r.status().as_u16())
+        });
+        let lines = server.join().unwrap().unwrap();
+
+        assert_eq!(status.ok(), Some(200));
+        assert!(!lines.iter().any(|l| l.starts_with("accept-encoding:")), "{lines:?}");
     }
 
     const STREAM_HEADERS: &str =

@@ -23,7 +23,14 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-store = "2"
-tauri-plugin-http = "2"
+# `gzip`: the webview's fetch asks for, and inflates, compressed answers.
+# Without it the credential list crossed the wire at ~100 KB instead of
+# ~37 KB, and on lines that let the first bytes through and then crawl,
+# most of the refreshes that got a 200 never finished reading the body.
+# It turns on reqwest's own decompression for every client in this build:
+# the door and relay clients opt out (`no_gzip`) and inflate by hand, under
+# their size limit, and the egress check opts out to count wire bytes.
+tauri-plugin-http = { version = "2", features = ["gzip"] }
 tauri-plugin-deep-link = "2"
 # Background update checks. Windows only for now -- the plugin is
 # desktop-wide, but this crate only ever builds for Windows.

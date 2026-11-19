@@ -174,6 +174,10 @@ async fn download_to(app: &tauri::AppHandle, url: &reqwest::Url, partial: &Path)
         .redirect(redirect_policy())
         .https_only(true)
         .connect_timeout(Duration::from_secs(20))
+        // The package's own bytes, as published: the HTTP plugin's `gzip`
+        // feature turns reqwest's decompression on for every client in the
+        // build, and this one is not meant to have it.
+        .no_gzip()
         .build()
         .map_err(|e| format!("Could not start the download: {e}"))?;
     let mut response = tokio::time::timeout(STALL_LIMIT, client.get(url.clone()).send())
