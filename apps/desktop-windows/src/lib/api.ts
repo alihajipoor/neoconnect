@@ -175,6 +175,22 @@ function noteAnswer(base: string, response: Response, answer: BackendAnswer): vo
   if (servesBackend(response) || bodilessSuccess(response)) announceBackendAnswer(answer);
 }
 
+/** The backend answered a revalidation with a 304 that carries the tag we
+ * sent. Only the backend mints those tags, so the address reaches it --
+ * but Express drops `Content-Type` on a 304, so `servesBackend` cannot see
+ * that, and relay mode and doors-first stayed on for up to their next
+ * probe (about three minutes) while the names already worked. Noted here
+ * the way `noteAnswer` notes the backend's JSON. */
+function noteBackendByTag(response: Response): void {
+  if (typeof response !== "object" || response === null) return;
+  const base = answeredBy.get(response);
+  if (!base) return;
+  servedBackend.add(base);
+  notBackend.delete(base);
+  noteNormalRouteAnswered();
+  noteNameAnswered();
+}
+
 // Who is told, and what: backend-answer.ts, where the answers heard
 // outside this file are announced too. Exported from here as well, where
 // the screens have always found it.
@@ -2960,7 +2976,9 @@ async function revalidatedDirect<T>(
   if (res.status === 304 && validator) {
     // The server re-sends the tag on a 304; falling back to the one we
     // sent keeps the next revalidation conditional if it does not.
-    return { ok: true, notModified: true, etag: readEtag(res) ?? validator };
+    const tag = readEtag(res);
+    if (tag === validator) noteBackendByTag(res);
+    return { ok: true, notModified: true, etag: tag ?? validator };
   }
 
   const foreign = foreignResponse(res);

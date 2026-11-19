@@ -28,8 +28,9 @@ tauri-plugin-store = "2"
 # ~37 KB, and on lines that let the first bytes through and then crawl,
 # most of the refreshes that got a 200 never finished reading the body.
 # It turns on reqwest's own decompression for every client in this build:
-# the door and relay clients opt out (`no_gzip`) and inflate by hand, under
-# their size limit, and the egress check opts out to count wire bytes.
+# the door and relay clients opt out (`no_gzip`; the relay inflates by hand
+# under its size limit, the door never asks for compression), and the
+# egress check opts out to count wire bytes.
 tauri-plugin-http = { version = "2", features = ["gzip"] }
 tauri-plugin-deep-link = "2"
 # Background update checks. Windows only for now -- the plugin is
