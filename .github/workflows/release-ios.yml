@@ -1,0 +1,281 @@
+name: Release (iOS)
+
+# Builds the signed App Store IPA on a GitHub macOS runner and uploads it
+# to App Store Connect, where it appears in TestFlight once Apple has
+# processed it. So an iPhone release no longer needs the owner's Mac.
+#
+# Upload only. Nothing here submits for App Review, adds testers or
+# touches the store listing -- those stay deliberate steps in App Store
+# Connect. See docs/ios-ci-release.md for the one-time setup and for what
+# is and is not proven.
+#
+# Signing without a certificate on the runner and without copying one off
+# the Mac: Tauri archives unsigned, scripts/build-ios.sh stamps the
+# entitlements on with a placeholder signature, and the export signs with
+# the team's cloud-managed distribution certificate, creating or
+# refreshing the App Store profiles as it goes. All of that is done by
+# Xcode itself through an App Store Connect API key, which must be an
+# Admin team key -- the only kind Apple lets use cloud signing.
+#
+# Inert until its four secrets exist. Without them the first job says
+# which are missing and the run ends green, having built nothing; the
+# macOS job does not even start.
+#
+# No tag trigger on purpose: `ios-v*` is reserved, and the App Store's
+# own numbers (version record and build number) are not the mobile app's
+# 0.2.x, so they are typed in for each run rather than read from a tag.
+on:
+  workflow_dispatch:
+    inputs:
+      marketing_version:
+        description: "App Store version record, e.g. 1.0.4"
+        required: true
+        type: string
+      build_number:
+        description: "Build number, above every build already uploaded, e.g. 25"
+        required: true
+        type: string
+      ref:
+        description: "Branch, tag or commit to build (empty: the branch this is run from)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Two uploads racing each other would each check the same highest build
+# number and one would be refused after an hour of building.
+concurrency:
+  group: release-ios
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # bash with pipefail, rather than the default `bash -e`, so a failure
+    # inside a pipe (altool | tee) fails the step.
+    shell: bash
+
+jobs:
+  # Everything that can refuse a release cheaply, on Linux, before a
+  # macOS runner is spent on it.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.secrets.outputs.ready }}
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: Check the signing secrets are set
+        id: secrets
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=""
+          for name in ASC_API_KEY_ID ASC_API_ISSUER_ID ASC_API_KEY_P8 APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "Repository secrets not set:$missing"
+            echo "Nothing was built or uploaded. docs/ios-ci-release.md says how to add them."
+            echo "::notice title=iOS release did not run::Secrets not set:$missing. Nothing was built or uploaded."
+            {
+              echo "### iOS release did not run"
+              echo "Repository secrets not set:$missing."
+              echo "Nothing was built or uploaded. See docs/ios-ci-release.md."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "all four secrets are set"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.secrets.outputs.ready == 'true'
+        with:
+          ref: ${{ inputs.ref }}
+
+      # The macOS job builds this exact commit, not whatever the branch
+      # points at by the time it starts.
+      - name: Record the commit
+        id: commit
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "building $(git rev-parse HEAD), mobile $(node -p "require('./apps/mobile/src-tauri/tauri.conf.json').version")"
+
+      # Apple's format for both: one to three period-separated integers.
+      # Read from the environment, never pasted into the script, so an
+      # input cannot become a command.
+      - name: Check the version numbers
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          MARKETING_VERSION: ${{ inputs.marketing_version }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          for value in "$MARKETING_VERSION" "$BUILD_NUMBER"; do
+            if ! [[ "$value" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+              echo "\"$value\" is not 1-3 period-separated integers (e.g. 1.0.4, 25)." >&2
+              exit 1
+            fi
+          done
+          echo "version $MARKETING_VERSION ($BUILD_NUMBER)"
+
+      - uses: actions/setup-node@v4
+        if: steps.secrets.outputs.ready == 'true'
+        with:
+          node-version: 20
+
+      # Asked of App Store Connect with the same key the upload will use,
+      # which also proves the key and its ids before the long job starts.
+      - name: Check the build number is above every uploaded build
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          WANT_BUILD: ${{ inputs.build_number }}
+        run: node apps/mobile/scripts/asc-check-build-number.mjs
+
+  release:
+    needs: gate
+    if: needs.gate.outputs.ready == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+      NEOXIFY_IOS_MARKETING_VERSION: ${{ inputs.marketing_version }}
+      NEOXIFY_IOS_BUILD_NUMBER: ${{ inputs.build_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      # Pinned, where ci-ios.yml takes the image's default: that default
+      # is 26.6 today (macos-26-arm64), and Tauri does not build with
+      # Xcode 27. A release should not change compiler because the image
+      # did.
+      - name: Use Xcode 26.6
+        run: |
+          xcode=/Applications/Xcode_26.6.app
+          if [ ! -d "$xcode" ]; then
+            echo "$xcode is not on this runner image. Present:" >&2
+            ls -d /Applications/Xcode*.app >&2 || true
+            exit 1
+          fi
+          sudo xcode-select -s "$xcode/Contents/Developer"
+          xcodebuild -version
+
+      # From here to the project generation, the same toolchains and
+      # engine build as ci-ios.yml.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # The device, which is all the App Store takes.
+          targets: aarch64-apple-ios
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: apps/mobile/plugins/vpn/xray/go.sum
+
+      - name: Refuse a silent toolchain switch
+        run: echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+
+      # The script applies the xray-core patches and refuses a framework
+      # that does not record them.
+      - name: Build the Xray engine for iOS
+        working-directory: apps/mobile
+        run: bash scripts/build-xray-xcframework.sh
+
+      - name: Generate the Xcode project
+        if: ${{ hashFiles('apps/mobile/src-tauri/gen/apple/**') == '' }}
+        working-directory: apps/mobile
+        run: pnpm tauri ios init --ci
+
+      # The key goes to a file only because xcodebuild and altool read it
+      # from one. Mode 600 in the runner's temp directory, deleted by the
+      # last step whatever happens. Its lines are masked as well as the
+      # secret itself, so no tool's output can print a fragment of it.
+      - name: Write the App Store Connect key
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          while IFS= read -r line; do
+            line="${line%$'\r'}"
+            case "$line" in
+              ""|-----*) ;;
+              *) echo "::add-mask::$line" ;;
+            esac
+          done <<< "$ASC_API_KEY_P8"
+          umask 077
+          dir="$RUNNER_TEMP/asc-key"
+          mkdir -p "$dir"
+          chmod 700 "$dir"
+          printf '%s\n' "$ASC_API_KEY_P8" | tr -d '\r' > "$dir/AuthKey_$ASC_API_KEY_ID.p8"
+          chmod 600 "$dir/AuthKey_$ASC_API_KEY_ID.p8"
+          echo "ASC_KEY_DIR=$dir" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY_PATH=$dir/AuthKey_$ASC_API_KEY_ID.p8" >> "$GITHUB_ENV"
+
+      # Through the wrapper, which is the only supported way to build the
+      # iOS app: it regenerates the project with the extension, checks the
+      # privacy manifests, applies the icon, sets VITE_DISTRIBUTION=store,
+      # requires the endpoint seed, archives, signs and exports, reads the
+      # numbers, signatures and entitlements back out of the IPA, and
+      # checks the web bundle carries no checkout or voucher path
+      # (guideline 3.1.1). APPLE_API_* are the names Tauri reads the key
+      # under; NEOXIFY_IOS_SIGNING=cloud is the mode for a machine with no
+      # certificate.
+      - name: Build, sign and export the IPA
+        working-directory: apps/mobile
+        env:
+          NEOXIFY_IOS_SIGNING: cloud
+          APPLE_API_KEY: ${{ secrets.ASC_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.ASC_API_ISSUER_ID }}
+        run: pnpm ios:build
+
+      # altool, as the Mac upload does. It finds the key by name,
+      # AuthKey_<id>.p8, in API_PRIVATE_KEYS_DIR or one of its fixed
+      # directories, so both point at the temp copy. Its exit status is not
+      # taken alone as success: the log has to say so too.
+      - name: Upload to App Store Connect
+        working-directory: apps/mobile/src-tauri/gen/apple/build/arm64
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+        run: |
+          mkdir -p ~/.appstoreconnect
+          if [ ! -e ~/.appstoreconnect/private_keys ]; then
+            ln -s "$ASC_KEY_DIR" ~/.appstoreconnect/private_keys
+          fi
+          API_PRIVATE_KEYS_DIR="$ASC_KEY_DIR" xcrun altool --upload-app -f Neoxify.ipa -t ios \
+            --apiKey "$ASC_API_KEY_ID" --apiIssuer "$ASC_API_ISSUER_ID" 2>&1 | tee "$RUNNER_TEMP/altool.log"
+          if ! grep -qiE "UPLOAD SUCCEEDED|No errors uploading" "$RUNNER_TEMP/altool.log"; then
+            echo "altool exited 0 but its log does not report a successful upload." >&2
+            exit 1
+          fi
+
+      - name: Summary
+        run: |
+          mobile=$(node -p "require('./apps/mobile/src-tauri/tauri.conf.json').version")
+          {
+            echo "### iOS $NEOXIFY_IOS_MARKETING_VERSION ($NEOXIFY_IOS_BUILD_NUMBER) uploaded"
+            echo "Mobile $mobile, commit $(git rev-parse --short HEAD)."
+            echo "Apple processes it before it appears in TestFlight. It has not been submitted for review."
+            echo "Record the upload in docs/journal/log.md."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the App Store Connect key
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/asc-key"
+          if [ -L ~/.appstoreconnect/private_keys ]; then rm ~/.appstoreconnect/private_keys; fi
