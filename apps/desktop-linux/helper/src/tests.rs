@@ -1381,13 +1381,13 @@ async fn the_linux_requests_are_told_apart_and_answered() {
     let d = start("linux", World::default()).await;
     let diag = d.ask_json(r#"{"type":"linuxDiagnostics"}"#).await;
     assert_eq!(diag["status"], "linuxDiagnostics", "{diag}");
-    assert_eq!(diag["diagnostics"]["helperVersion"], "0.2.0");
+    assert_eq!(diag["diagnostics"]["helperVersion"], crate::VERSION);
     assert_eq!(diag["diagnostics"]["ourLinks"].as_array().unwrap().len(), 3);
     assert!(diag["diagnostics"]["recentLog"].is_array());
 
     let support = d.ask_json(r#"{"type":"updateSupport"}"#).await;
     assert_eq!(support["status"], "updateSupport", "{support}");
-    assert_eq!(support["version"], "0.2.0");
+    assert_eq!(support["version"], crate::VERSION);
     assert!(support["kind"].is_null(), "a test binary claimed to be the installed helper: {support}");
     assert!(support["reason"].as_str().is_some_and(|r| !r.is_empty()));
 
