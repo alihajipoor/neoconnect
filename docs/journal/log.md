@@ -10782,3 +10782,70 @@ production, not the fixtures, moved four things:
 - Two deploys the same evening (19:31Z and 19:50Z), each about 20 s
   without a backend; all eight exits and the relay were back within a
   minute both times.
+
+## 2026-11-19 — The apps say what they ran on, test a fixed list of services, and send diagnostics on request
+
+**Why.** The customer page (entry above) showed everything the server
+already had. The owner then asked for the rest: the device, which DNS,
+which addresses, so a bad connection can be diagnosed and the service
+improved. Reference: `docs/client-diagnostics.md`.
+
+**The boundary.** Device and network settings (the device's DNS servers
+included), our own servers and API with timings, and a test of a fixed
+list of well-known services chosen by the server, with the address each
+name resolved to. Not the sites a customer visits: the server drops any
+service result whose key and host are not on its own list, and the
+privacy page (live before any app release) says so in both languages.
+
+**What shipped.**
+- Server and panel, live 2026-11-18 21:07Z: optional `details` on
+  `POST /client-attempts`, per-try time, a `SERVICE_CHECK` kind,
+  `GET /customer/service-checks/targets`, `POST /customer/diagnostics`,
+  device facts per device, a Service checks card, a Diagnostics tab and a
+  fleet page `/service-checks`. Migration `20261118_client_diagnostics`.
+- Android 0.2.43 (released 2026-11-19) and Windows 0.9.65: the fuller
+  reports, the service test after connecting (once a day per server), a
+  second SESSION report when a session ends, and on the Support screen a
+  connection test and "send diagnostics" with a reference code. Phones
+  ask through the disclosure screen first (version 2); the desktop has no
+  notice, by the owner's choice, because the privacy page covers it.
+- Linux has the same code and both native commands; iOS has the code.
+
+**Proven, on real execution against the live backend.**
+- Android emulator, three runs: every report kind arrived with the right
+  device, network and DNS facts (the network under the VPN, not the VPN),
+  the automatic service test ran through the tunnel (9 of 9), the bundle's
+  reference matched the server's row, five of five end-of-session reports
+  arrived, nothing off the fixed list was stored.
+- Windows test machine, one run on the build of 3f1b9006: installed over
+  the old build, connected (exit country matched), the automatic test and
+  the manual one stored 9 of 9 through the tunnel, the bundle's text held
+  no computer name, user name, path or adapter name, and the reported
+  model, build, memory, adapter type and DNS matched the guest's own.
+
+**Found by running it, and fixed before release.** A phone that never
+opened its Private DNS setting reported "unknown" (Android's default is
+Automatic); one session ended with no report because SESSION reports
+were held back without an attested network; the Windows-only details
+card showed on phones (the phone app never sets a desktop platform);
+free memory was read once per run.
+
+**Not proven.**
+- iOS: compiled in CI only. Nothing has run on an iPhone, and no build
+  was submitted (1.0.3 was still in review).
+- Linux: first compiled in CI; never run on a Linux machine.
+- Any service failing, a restricted network, mobile data, a real phone,
+  the Xray and OpenVPN paths on Windows.
+- Known and left for the next batch: on Windows the first rows of a
+  session lack three tunnel flags, and the diagnostics text counts our
+  own WireGuard adapter as "another VPN".
+
+**What cost the time, so it is not repeated.** Three review-and-fix
+rounds where one would have done; three emulator runs instead of one
+with the fixes batched; a consent card on the desktop that nobody asked
+for, built and then removed; and a test machine that was found locked
+only at the end. Its local password had expired after 42 days, its auto
+sign-in still held the original one, and the account could set its own
+password back to that one through the guest tools
+(`NetUserChangePassword`), which is what brought it back without anyone
+at the keyboard. Check the rigs first.
