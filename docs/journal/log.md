@@ -10849,3 +10849,32 @@ sign-in still held the original one, and the account could set its own
 password back to that one through the guest tools
 (`NetUserChangePassword`), which is what brought it back without anyone
 at the keyboard. Check the rigs first.
+
+## 2026-11-19 (later) — Windows 0.9.66 and Linux 0.2.1
+
+**Windows 0.9.66.** The two gaps the 0.9.65 proof found are fixed and
+proven in the test machine on the build of 74e64e31: the connect report
+and the first service check now carry the tunnel flags (splitTunnel,
+ipv6Blocked, dnsUnprotected), and with our own WireGuard tunnel up the
+diagnostics text says "other VPNs up: none" and lists our routes under
+our adapter (the service had checked only the two adapters a repair
+removes, not WireGuard's).
+
+**Linux 0.2.1.** Carries the fuller diagnostics. The test machine found
+that only the app crate had been bumped: the helper still said 0.2.0,
+and it checks an in-app update against its own version, so an update
+from 0.2.0 would have ended as failed. All Linux crates now say 0.2.1
+and the helper's tests read the crate's version. After the release the
+API offers 0.2.1 to a 0.2.0 client.
+
+**Not proven on Linux:** connecting, the service check, send-diagnostics
+and the bundle text. The app in the Linux test machine was signed out
+(its test account's sessions were revoked when that account's password
+was rotated on 11-18), and nobody may type a password into the live
+service from a test tool. What was proven there: the 0.2.1 package
+installs and verifies, and device_facts reports the model, Ubuntu
+version, free memory, network type, IPv4/IPv6 and resolvers correctly.
+The rest is the same code proven on Windows and Android.
+
+**iOS** is still to submit: the Mac was not reachable on the home
+network.
