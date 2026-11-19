@@ -10878,3 +10878,45 @@ The rest is the same code proven on Windows and Android.
 
 **iOS** is still to submit: the Mac was not reachable on the home
 network.
+
+## 2026-11-19 (evening) — The apps stop downloading their whole server list for nothing
+
+**Why.** A customer on a home line and on mobile data "struggled". His
+connects all worked; what failed was the app talking to us before it
+connected. Of 189 such misses in 48 h on two big networks, 87 got a 200 in
+under a second but the body never finished arriving within the 6 s budget:
+the background refresh downloaded the whole credential list, about 100 KB
+of JSON, uncompressed, and on lines that let the first bytes through and
+then crawl it did not arrive. Almost every refresh found nothing changed.
+
+**What changed.**
+- The apps ask for compressed answers (`tauri-plugin-http`'s `gzip`);
+  the list arrives at about 42 KB. The data check, the door and relay
+  clients and the Linux update download opt out, so their byte counts and
+  signature checks are unchanged.
+- `GET /customer/protocol-users` answers 304 to a matching
+  `If-None-Match` (tag per customer and device session; deployed first,
+  on its own, 2026-11-19).
+- The background refresh and the screens' loads offer the held list's
+  tag and keep the answer's; a 304 keeps the held list. A 304 carrying our
+  tag also counts as the backend answering, so relay mode and doors-first
+  end as they do on a 200.
+
+**How it was released (the owner's new rule: nothing may break what was
+built before).** A read-only review of every caller across the four apps,
+then the standing regression checklist (`vm\regression-checklist.md`,
+outside the repo) on the exact build, in the Windows test machine, against
+the live backend. The first run passed everything except the change
+itself: no 304 ever happened, because every screen load wrote the list
+without its tag. Fixed; the second run passed every item, with 14 304s and
+the 42 KB answer seen in the server logs.
+
+**Released:** Windows 0.9.67 and Linux 0.2.2. **Held:** Android 0.2.44 (no
+emulator run: its test app is signed out and test tools may not type a
+password into the live service; the owner decides), iPhone 1.0.4 (the
+build was started on the Mac and the Mac was switched off before it
+finished).
+
+**Not proven:** a restricted network itself; Linux beyond the shared code;
+the 79 misses where no address answered at all (blocked addresses) are
+untouched by this and need new addresses.
