@@ -456,6 +456,36 @@ export function currentTunnel(): TunnelDetails | undefined {
   return cleanTunnel(tunnelFacts);
 }
 
+/** What the Windows service's status says of the live tunnel
+ * (connection-evidence.ts `VpnStatus`), as the reports name it: whether
+ * Custom mode is intercepting, whether IPv6 is blocked, whether the DNS
+ * rule failed. Taken by the connect ladder from the status its own checks
+ * read, so the connect report and the first service check carry it, and
+ * again by every health poll. Nothing from a status with no tunnel, nor
+ * from one answered without the engine state -- the service's fallback
+ * while its thread is busy, which says `false` for what it cannot read and
+ * carries no `sessionSecs`. */
+export function tunnelFlags(
+  status:
+    | {
+        connected?: boolean;
+        splitTunnelActive?: boolean;
+        ipv6Blocked?: boolean;
+        tunnelDnsUnprotected?: boolean;
+        sessionSecs?: number;
+      }
+    | null
+    | undefined,
+  customModeSupported: boolean,
+): TunnelDetails {
+  if (!status?.connected || typeof status.sessionSecs !== "number") return {};
+  return {
+    splitTunnel: customModeSupported && Boolean(status.splitTunnelActive),
+    ipv6Blocked: Boolean(status.ipv6Blocked),
+    dnsUnprotected: status.tunnelDnsUnprotected ?? false,
+  };
+}
+
 /** The resolvers this app sets inside the tunnel for `protocol`, where it
  * is one address the app itself chooses: Xray's TUN resolver (both apps'
  * `TUN_DNS`), the Windows IKEv2 one (`IKEV2_DNS` in the service), and a

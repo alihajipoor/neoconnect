@@ -261,6 +261,37 @@ describe("what a connect measured", () => {
     expect(rd.currentTunnel()).toBeUndefined();
   });
 
+  it("reads the Windows service's flags only from a status that knows them", () => {
+    const status = { connected: true, splitTunnelActive: true, ipv6Blocked: true, tunnelDnsUnprotected: true, sessionSecs: 3 };
+    expect(rd.tunnelFlags(status, true)).toEqual({ splitTunnel: true, ipv6Blocked: true, dnsUnprotected: true });
+    // WireGuard: no block or DNS rule of ours, and no Custom mode where it is not offered.
+    expect(rd.tunnelFlags({ connected: true, splitTunnelActive: true, sessionSecs: 0 }, false)).toEqual({
+      splitTunnel: false,
+      ipv6Blocked: false,
+      dnsUnprotected: false,
+    });
+    // The service's fallback while its thread is busy says `false` for what
+    // it cannot read, and carries no session time: nothing is taken from it.
+    expect(rd.tunnelFlags({ connected: true, ipv6Blocked: false }, true)).toEqual({});
+    expect(rd.tunnelFlags({ connected: false, sessionSecs: 5 }, true)).toEqual({});
+    expect(rd.tunnelFlags(null, true)).toEqual({});
+  });
+
+  it("puts the flags a landing knows on the connect report and the first service check", async () => {
+    invoke.mockRejectedValue("missing");
+    // As the ladder lands: the flags from its own status read, before any poll.
+    const flags = rd.tunnelFlags({ connected: true, ipv6Blocked: true, sessionSecs: 4 }, true);
+    rd.landTunnel({ mode: "full", dns: ["1.1.1.1"], ...flags });
+    const tunnel = { mode: "full", dns: ["1.1.1.1"], splitTunnel: false, ipv6Blocked: true, dnsUnprotected: false };
+    expect((await rd.collectDetails("CONNECT", undefined, "SUCCESS"))?.tunnel).toEqual(tunnel);
+    expect((await rd.collectDetails("SERVICE_CHECK", { via: "tunnel" }, "SUCCESS"))?.tunnel).toEqual(tunnel);
+    // A landing whose status read failed carries none, and the poll adds them later.
+    rd.landTunnel({ mode: "full", ...rd.tunnelFlags(null, true) });
+    expect(rd.currentTunnel()).toEqual({ mode: "full" });
+    rd.noteTunnel(rd.tunnelFlags({ connected: true, sessionSecs: 15 }, true));
+    expect(rd.currentTunnel()).toEqual({ mode: "full", splitTunnel: false, ipv6Blocked: false, dnsUnprotected: false });
+  });
+
   it("takes the tunnel as it was when the report was made, not after a teardown", async () => {
     invoke.mockResolvedValue(FACTS);
     rd.landTunnel({ mode: "full" });

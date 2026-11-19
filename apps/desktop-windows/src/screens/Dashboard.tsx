@@ -106,7 +106,7 @@ import { rearmCheckPop } from "../lib/check-pop";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, timedRungs, type Dial } from "../lib/attempts";
-import { noteTunnel, tunnelResolvers } from "../lib/report-details";
+import { noteTunnel, tunnelFlags, tunnelResolvers } from "../lib/report-details";
 import { noteLanding, noteTunnelGone, runScheduledServiceCheck } from "../lib/service-check";
 import {
   checkDataMoves,
@@ -2544,7 +2544,7 @@ export function Dashboard({
       setConfinedAround(status.ipv4Confined === true);
       setUnconfinedKey(unconfinedLine(status));
       // The tunnel's settings, for the reports' details (report-details.ts).
-      noteTunnel({ splitTunnel: customMode, ipv6Blocked: Boolean(status.ipv6Blocked), dnsUnprotected: status.tunnelDnsUnprotected ?? false });
+      noteTunnel(tunnelFlags(status, supportsCustomMode()));
       const fromStatus = stateFromStatus(status);
 
       if (fromStatus === "disconnected") {
@@ -4324,6 +4324,11 @@ export function Dashboard({
           // What the data check measured, remembered with the attempt so
           // the next connect here can prefer the faster server.
           let measured: DataVerdict | null = null;
+          // The service's status as this rung's own checks last read it, for
+          // the tunnel's flags on the reports that go before the first health
+          // poll -- the connect's and the first service check's (`tunnelFlags`).
+          // Only reads already made: nothing is awaited for it.
+          let landedStatus: VpnStatus | null = null;
           // The endpoint it measured through, for the speed sample once the
           // rung has landed (`sampleDownload`).
           let sampleBase: string | undefined;
@@ -4349,7 +4354,10 @@ export function Dashboard({
             // of a Custom-mode session -- seen on a Windows 11 guest
             // with only curl.exe selected.
             await serviceStatus()
-              .then((status) => setSplitTunnelActive(Boolean(status.splitTunnelActive)))
+              .then((status) => {
+                landedStatus = status;
+                setSplitTunnelActive(Boolean(status.splitTunnelActive));
+              })
               .catch(() => undefined);
 
             if (carried) {
@@ -4384,6 +4392,7 @@ export function Dashboard({
               // moves on: with another candidate sitting untried, moving
               // on beats settling for a tunnel nothing has vouched for.
               const status = await invoke<VpnStatus>("vpn_status").catch(() => null);
+              if (status) landedStatus = status;
               const tunnelProven = status !== null && handshakeEvidence(status) === "proves";
               verdict = tunnelProven ? "unverified" : "degraded";
               if (tunnelProven) {
@@ -4399,6 +4408,7 @@ export function Dashboard({
             // alone counted against the network (`setConfinedAround`).
             const confinedBefore = await serviceStatus()
               .then((status) => {
+                landedStatus = status;
                 setConfinedAround(status.ipv4Confined === true);
                 setIpv4NotConfined(warnsUnconfined(status, Boolean(status.splitTunnelActive)));
                 setUnconfinedKey(unconfinedLine(status));
@@ -4420,6 +4430,7 @@ export function Dashboard({
             // (`egressWorthAnotherLook`).
             const after = await serviceStatus().catch(() => null);
             if (after) {
+              landedStatus = after;
               setConfinedAround(after.ipv4Confined === true);
               setIpv4NotConfined(warnsUnconfined(after, Boolean(after.splitTunnelActive)));
               setUnconfinedKey(unconfinedLine(after));
@@ -4652,6 +4663,7 @@ export function Dashboard({
               {
                 mode: appModeRef.current === "gaming" ? "gaming" : customMode ? "custom" : "full",
                 dns: tunnelResolvers(candidate.protocol, candidate.credentials, desktopPlatform()),
+                ...tunnelFlags(landedStatus, supportsCustomMode()),
               },
             );
             void sampleDownload(sampleBase).then((sample) => {

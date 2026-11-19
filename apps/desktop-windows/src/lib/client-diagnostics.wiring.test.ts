@@ -118,6 +118,20 @@ describe("Windows' automatic check", () => {
   });
 });
 
+describe("Windows' tunnel flags", () => {
+  it("land with the rung, from the status its own checks read, before the connect report", () => {
+    const landing = windowsPass.indexOf("noteLanding(");
+    const report = windowsPass.indexOf('kind: "CONNECT",', landing);
+    expect(windowsPass.slice(landing, report)).toContain("...tunnelFlags(landedStatus, supportsCustomMode()),");
+    // Taken from the four reads the rung already makes, nothing awaited for it.
+    expect(windowsPass.split("landedStatus = ").length - 1).toBe(4);
+  });
+
+  it("are refreshed by each health poll through the same reading", () => {
+    expect(windows).toContain("noteTunnel(tunnelFlags(status, supportsCustomMode()));");
+  });
+});
+
 describe("the new strings", () => {
   const keys = Object.keys(DICTIONARIES.en).filter((k) => k.startsWith("check.") || k.startsWith("send.") || k.startsWith("notice.diag"));
 
