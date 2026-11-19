@@ -73,6 +73,18 @@ const team = process.env.APPLE_DEVELOPMENT_TEAM
 // project.yml, because build-ios.sh runs the script on every build and
 // rewrites that file. An edit made there by hand survives exactly until
 // the next build, which is an expensive way to lose a release.
+//
+// NEOXIFY_IOS_SIGNING=cloud is the other store build, the one
+// .github/workflows/release-ios.yml makes on a machine that holds no
+// certificate and no profile at all. It adds nothing to the targets: the
+// archive is built unsigned and Xcode signs at export, minting the
+// profiles and using Apple's cloud-held distribution certificate through
+// an App Store Connect API key. Only the export options differ (below).
+const signingMode = process.env.NEOXIFY_IOS_SIGNING || "";
+if (signingMode && signingMode !== "appstore" && signingMode !== "cloud") {
+  console.error(`add-tunnel-extension: NEOXIFY_IOS_SIGNING=${signingMode} is neither appstore nor cloud`);
+  process.exit(1);
+}
 const signing = (profile) =>
   process.env.NEOXIFY_IOS_SIGNING === "appstore"
     ? `\n        CODE_SIGN_STYLE: Manual` +
@@ -464,12 +476,29 @@ if (STORE_NUMBERS) {
 // `destination: export` writes the IPA and nothing else -- uploading
 // stays a separate, deliberate step. manageAppVersionAndBuildNumber is
 // off so Xcode does not renumber what the store-numbers phase set.
-if (process.env.NEOXIFY_IOS_SIGNING === "appstore") {
+//
+// The cloud build gets the same file with automatic signing and no
+// profile names: Xcode creates or refreshes the two App Store profiles
+// itself (scripts/build-ios.sh passes it the API key) and signs with the
+// team's cloud-managed distribution certificate. These are the keys
+// Tauri's own export writes for an API-key build.
+if (signingMode) {
   const teamId = process.env.APPLE_DEVELOPMENT_TEAM;
   if (!teamId) {
-    console.error("add-tunnel-extension: NEOXIFY_IOS_SIGNING=appstore needs APPLE_DEVELOPMENT_TEAM");
+    console.error(`add-tunnel-extension: NEOXIFY_IOS_SIGNING=${signingMode} needs APPLE_DEVELOPMENT_TEAM`);
     process.exit(1);
   }
+  const signingKeys =
+    signingMode === "cloud"
+      ? `	<key>signingStyle</key><string>automatic</string>\n`
+      : `	<key>signingStyle</key><string>manual</string>
+	<key>signingCertificate</key><string>Apple Distribution</string>
+	<key>provisioningProfiles</key>
+	<dict>
+		<key>${tauriConf.identifier}</key><string>${APP_STORE_PROFILE}</string>
+		<key>${TUNNEL_BUNDLE_ID}</key><string>${TUNNEL_STORE_PROFILE}</string>
+	</dict>
+`;
   writeFileSync(
     join(apple, "ExportOptions-appstore.plist"),
     `<?xml version="1.0" encoding="UTF-8"?>
@@ -479,20 +508,13 @@ if (process.env.NEOXIFY_IOS_SIGNING === "appstore") {
 	<key>method</key><string>app-store-connect</string>
 	<key>destination</key><string>export</string>
 	<key>teamID</key><string>${teamId}</string>
-	<key>signingStyle</key><string>manual</string>
-	<key>signingCertificate</key><string>Apple Distribution</string>
-	<key>provisioningProfiles</key>
-	<dict>
-		<key>${tauriConf.identifier}</key><string>${APP_STORE_PROFILE}</string>
-		<key>${TUNNEL_BUNDLE_ID}</key><string>${TUNNEL_STORE_PROFILE}</string>
-	</dict>
-	<key>manageAppVersionAndBuildNumber</key><false/>
+${signingKeys}	<key>manageAppVersionAndBuildNumber</key><false/>
 	<key>uploadSymbols</key><true/>
 </dict>
 </plist>
 `,
   );
-  console.log("add-tunnel-extension: wrote ExportOptions-appstore.plist");
+  console.log(`add-tunnel-extension: wrote ExportOptions-appstore.plist (${signingMode} signing)`);
 }
 
 if (STORE_NUMBERS) {
