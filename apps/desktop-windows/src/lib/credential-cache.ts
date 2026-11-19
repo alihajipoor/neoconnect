@@ -38,6 +38,14 @@ export interface ConnectionSnapshot {
   askedAt?: number;
   subscription: Subscription | null;
   protocolUsers: ProtocolUser[];
+  /** The server's ETag for exactly `protocolUsers`, when they came from an
+   * answer that carried one (the refresh in connection-config.ts). Offered
+   * back as `If-None-Match`, so an unchanged list costs a 304 instead of the
+   * whole list. It stands for those credentials and no others: every write
+   * of new credentials drops it unless it brings their own, and only a write
+   * that keeps the credentials keeps it (`updateSnapshotRoutes`). Absent from
+   * a cache written before it existed, which then asks as it always did. */
+  protocolUsersEtag?: string;
   routes: RouteOption[];
 }
 
@@ -180,6 +188,9 @@ export async function loadSnapshot(): Promise<ConnectionSnapshot | null> {
       askedAt: typeof stored.askedAt === "number" ? stored.askedAt : savedAt,
       subscription: stored.subscription ?? null,
       protocolUsers: stored.protocolUsers,
+      ...(typeof stored.protocolUsersEtag === "string" && stored.protocolUsersEtag !== ""
+        ? { protocolUsersEtag: stored.protocolUsersEtag }
+        : {}),
       routes: Array.isArray(stored.routes) ? stored.routes.map(withoutNetworkTag) : [],
     };
   } catch {
@@ -247,11 +258,16 @@ function withoutNetworkTag(route: RouteOption): RouteOption {
  * as superseded. And compared with what is in hand as well as what is on
  * disk (`noteCredentialsShown`): a newer answer's write is not awaited by
  * whoever adopts it, and an older late answer read the snapshot before
- * that write had landed, passed, and was put on screen over the newer one. */
+ * that write had landed, passed, and was put on screen over the newer one.
+ *
+ * `etag` is the server's tag for exactly these credentials, kept beside
+ * them (`protocolUsersEtag`); without one, the tag of whatever was there
+ * before goes, since it does not stand for these. */
 export async function updateSnapshotProtocolUsers(
   protocolUsers: ProtocolUser[],
   stillCurrent?: () => boolean,
   askedAt?: number,
+  etag?: string | null,
 ): Promise<"written" | "superseded" | "skipped"> {
   if (protocolUsers.length === 0) return "skipped";
   // Before anything is awaited, so whatever happens meanwhile is ordered
@@ -267,6 +283,7 @@ export async function updateSnapshotProtocolUsers(
     {
       subscription: existing.subscription,
       protocolUsers,
+      ...(etag ? { protocolUsersEtag: etag } : {}),
       routes: existing.routes,
       ...(askedAt !== undefined ? { askedAt } : {}),
     },
@@ -442,6 +459,8 @@ export async function updateSnapshotRoutes(
     {
       subscription: existing.subscription,
       protocolUsers: existing.protocolUsers,
+      // The same credentials, so their tag still stands for them.
+      ...(existing.protocolUsersEtag ? { protocolUsersEtag: existing.protocolUsersEtag } : {}),
       routes,
       savedAt: existing.savedAt,
       ...(existing.askedAt !== undefined ? { askedAt: existing.askedAt } : {}),

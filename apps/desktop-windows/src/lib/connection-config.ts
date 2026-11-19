@@ -1,9 +1,9 @@
-import type { ApiResult } from "./api";
+import type { RequestFailure } from "./api";
 import { reportAttempt, type AttemptReport } from "./attempts";
 import { connectStarting, pathChangingIn, probeAddendum } from "./control-plane-probe";
 import { newTrace, renderTrace } from "./endpoint-trace";
 import { isSnapshotStale, loadSnapshot, SNAPSHOT_TTL_MS, updateSnapshotProtocolUsers } from "./credential-cache";
-import { getProtocolUsers } from "./customer";
+import { revalidateProtocolUsers } from "./customer";
 import type { ResumeTrigger } from "./resume";
 import { sessionGeneration } from "./session-end";
 import type { ProtocolUser } from "./types";
@@ -299,6 +299,20 @@ export function onLateConfig(listener: (protocolUsers: ProtocolUser[]) => void):
   };
 }
 
+/** The refresh's answer: the credentials, and the server's tag for them.
+ *
+ * On a 304 the server's answer is the list held, which the tag offered
+ * stands for, so `data` is that list, confirmed just now. Everything after
+ * reads it as an answer carrying that list -- written to the cache with a
+ * fresh time, no drift -- because that is what it is. */
+type Fetched = RequestFailure | { ok: true; data: ProtocolUser[]; etag: string | null };
+
+/** Whether two credential lists are the same, value for value. Both came
+ * out of JSON (the wire or the cache), so key order is the wire's. */
+function sameList(a: ProtocolUser[], b: ProtocolUser[]): boolean {
+  return a === b || (a.length === b.length && JSON.stringify(a) === JSON.stringify(b));
+}
+
 /** What `keepLateAnswer` needs to know about the refresh it outlives. */
 interface LateAnswerContext {
   held: ProtocolUser[];
@@ -327,7 +341,7 @@ interface LateAnswerContext {
  * is, and says it was late: the connect it was asked for has already
  * dialled the old values, which is the first thing to know if that
  * connect failed. */
-function keepLateAnswer(request: Promise<ApiResult<ProtocolUser[]>>, context: LateAnswerContext): void {
+function keepLateAnswer(request: Promise<Fetched>, context: LateAnswerContext): void {
   const { held, askedAt, budgetMs, trigger, stillCurrent, onLateAnswer } = context;
   void request.then(
     async (late) => {
@@ -336,7 +350,7 @@ function keepLateAnswer(request: Promise<ApiResult<ProtocolUser[]>>, context: La
       // Not over credentials asked for since it was: they are newer
       // (`updateSnapshotProtocolUsers`), whether written yet or only on a
       // screen.
-      if ((await updateSnapshotProtocolUsers(fresh, stillCurrent, askedAt)) === "superseded") return;
+      if ((await updateSnapshotProtocolUsers(fresh, stillCurrent, askedAt, late.etag)) === "superseded") return;
       // Asked again: the cache write may have been the last thing to
       // happen before a sign-out.
       if (!stillCurrent()) return;
@@ -372,8 +386,8 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
   // Connect -- must not run across it.
   if (trigger === "connect") connectStarting();
 
-  const savedAt =
-    options.heldSavedAt !== undefined ? options.heldSavedAt : ((await loadSnapshot())?.savedAt ?? null);
+  const snapshot = options.heldSavedAt !== undefined ? undefined : await loadSnapshot();
+  const savedAt = options.heldSavedAt !== undefined ? options.heldSavedAt : (snapshot?.savedAt ?? null);
   const ageMs = typeof savedAt === "number" && savedAt > 0 && savedAt <= now ? now - savedAt : null;
 
   if (!force && !isSnapshotStale({ savedAt: savedAt ?? 0 }, now)) {
@@ -382,6 +396,18 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
     // paying for a request they do not need.
     return { protocolUsers: held, source: "fresh", ageMs, drift: [], sessionExpired: false };
   }
+
+  // The tag the server is offered, so an unchanged list -- nearly every
+  // refresh -- costs a 304 with no body rather than ~100 KB, on lines where
+  // the body is what does not arrive in time. Only the tag of the list held
+  // here: a 304 then says that list is still the server's answer, where a
+  // tag for some other list would vouch for credentials nobody is about to
+  // dial. Without one -- nothing cached, a cache from an older build, a list
+  // written by a load, which carries no tag -- the question is asked as it
+  // always was, and its answer brings a tag for next time.
+  const stored = snapshot !== undefined ? snapshot : await loadSnapshot();
+  const validator =
+    stored?.protocolUsersEtag && sameList(stored.protocolUsers, held) ? stored.protocolUsersEtag : null;
 
   const trace = newTrace();
   // Whether the app was backgrounded while this ran -- on iOS that
@@ -393,7 +419,10 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
   const sessionAtStart = sessionGeneration();
   const stillCurrent = () => sessionGeneration() === sessionAtStart;
   const askedAt = Date.now();
-  const request = getProtocolUsers(trace);
+  const request = revalidateProtocolUsers(validator, trace).then((answer): Fetched => {
+    if (!answer.ok) return answer;
+    return { ok: true, data: answer.notModified ? held : answer.data, etag: answer.etag };
+  });
   const outcome = await withBudget(request, budgetMs);
   const elapsedMs = Date.now() - askedAt;
   // Read now, at the moment the wait ended, because the request carries
@@ -411,8 +440,10 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
     // Written before returning so the values that were just dialled are
     // also the ones an offline start would come back to. With when they
     // were asked for, which orders a late answer to an earlier refresh
-    // against them, from the moment this is called.
-    void updateSnapshotProtocolUsers(fresh, stillCurrent, askedAt);
+    // against them, from the moment this is called. With their tag; on a
+    // 304 that rewrites the same list, which is what restarts its
+    // freshness horizon.
+    void updateSnapshotProtocolUsers(fresh, stillCurrent, askedAt, answered.etag);
     if (drift.length > 0) {
       // Worth a line even though nothing failed. A server whose
       // parameters moved is the single most likely explanation for a

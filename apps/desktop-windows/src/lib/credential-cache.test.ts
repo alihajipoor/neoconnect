@@ -397,6 +397,37 @@ describe("the server list's own answer, written into the snapshot", () => {
   });
 });
 
+/** The server's tag for the cached credentials (`protocolUsersEtag`) is
+ * offered back by the config refresh, and a 304 to it says the list held
+ * is current. So it may only ever sit beside the list it was minted for. */
+describe("the credentials' tag", () => {
+  const plan = { id: "sub-1", planId: "plan-1", status: "ACTIVE" } as Subscription;
+  const germany = { id: "route-1", name: "Germany" } as RouteOption;
+  const other = { ...credential, id: "pu-2" } as ProtocolUser;
+
+  it("is kept with the credentials it came with, and through a route list", async () => {
+    await saveSnapshot({ subscription: plan, protocolUsers: [credential], routes: [] });
+    expect(await updateSnapshotProtocolUsers([credential], undefined, undefined, 'W/"pu-1"')).toBe("written");
+    expect((await loadSnapshot())!.protocolUsersEtag).toBe('W/"pu-1"');
+
+    // Same credentials: the tag still stands for them.
+    expect(await updateSnapshotRoutes(plan, [germany])).toBe("written");
+    expect((await loadSnapshot())!.protocolUsersEtag).toBe('W/"pu-1"');
+  });
+
+  it("goes when credentials are written without one", async () => {
+    await saveSnapshot({ subscription: plan, protocolUsers: [credential], routes: [] });
+    await updateSnapshotProtocolUsers([credential], undefined, undefined, 'W/"pu-1"');
+    expect(await updateSnapshotProtocolUsers([other])).toBe("written");
+    expect((await loadSnapshot())!.protocolUsersEtag).toBeUndefined();
+
+    // A load's write, which brings no tag, drops it too.
+    await updateSnapshotProtocolUsers([credential], undefined, undefined, 'W/"pu-1"');
+    await saveSnapshot({ subscription: plan, protocolUsers: [other], routes: [] });
+    expect((await loadSnapshot())!.protocolUsersEtag).toBeUndefined();
+  });
+});
+
 /** A server's door to the API travels on its credential
  * (`connection.door`), and the cache is what keeps it across a restart:
  * on a network where no name answers, the cached list is the only place a

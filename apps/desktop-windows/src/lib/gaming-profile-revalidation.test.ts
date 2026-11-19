@@ -66,7 +66,8 @@ vi.mock("./session", () => ({
 
 // After the mocks: the cache under test is module-level state created at
 // import time, so importing earlier would bind the real transport.
-const { getGamingProfile, clearGamingProfileCache } = await import("./customer");
+const { getGamingProfile, clearGamingProfileCache, revalidateProtocolUsers } = await import("./customer");
+const { newTrace, renderTrace } = await import("./endpoint-trace");
 
 /** The exact shape the server mints: weak, `gaming-` prefixed, 27
  * characters of base64url. Reproduced literally because the server
@@ -301,5 +302,38 @@ describe("gaming profile revalidation", () => {
     replies.push({ kind: "respond", status: 200, body: CHANGED, etag: TAG });
     await expect(getGamingProfile()).resolves.toEqual({ ok: true, data: CHANGED });
     expect(calls[1].headers["If-None-Match"]).toBeUndefined();
+  });
+});
+
+/** The config refresh's request (`revalidateProtocolUsers`), through the
+ * same transport: what `connection-config.ts` is handed for a 304 and a
+ * 200, and that a 304 is in the trace as an answer -- the failure report
+ * reads the trace, and a 304 there as anything else would send an
+ * operator after an outage that never happened. */
+describe("protocol-users revalidation", () => {
+  const PU_TAG = 'W/"pu-abcdefghijklmnopqrstuvwxy12"';
+  const LIST = [{ id: "pu-1", routeId: "route-1", protocol: "XRAY_VLESS_REALITY" }];
+
+  it("offers the tag byte for byte and reads a 304 as unchanged, traced as an answer", async () => {
+    replies.push({ kind: "respond", status: 304, etag: PU_TAG });
+    const trace = newTrace();
+
+    await expect(revalidateProtocolUsers(PU_TAG, trace)).resolves.toEqual({ ok: true, notModified: true, etag: PU_TAG });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(`${BASE}/customer/protocol-users`);
+    expect(calls[0].headers["If-None-Match"]).toBe(PU_TAG);
+    expect(renderTrace(trace)).toMatch(/^req: connect\.neoxify\.site=h304@\d+$/);
+  });
+
+  it("hands back a 200's body with its tag, and asks unconditionally with no tag held", async () => {
+    replies.push({ kind: "respond", status: 200, body: LIST, etag: PU_TAG });
+
+    await expect(revalidateProtocolUsers(null)).resolves.toEqual({
+      ok: true,
+      notModified: false,
+      data: LIST,
+      etag: PU_TAG,
+    });
+    expect(calls[0].headers["If-None-Match"]).toBeUndefined();
   });
 });

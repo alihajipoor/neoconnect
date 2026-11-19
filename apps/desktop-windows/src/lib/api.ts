@@ -2858,6 +2858,27 @@ export type Revalidated<T> =
   | { ok: true; notModified: false; data: T; etag: string | null }
   | RequestFailure;
 
+/** A conditional answer as the `data` of an `ApiResult`, so it can travel
+ * the routes `withLastResort` walks, which speak `ApiResult`. */
+type Conditional<T> = { notModified: true; etag: string | null } | { notModified: false; data: T; etag: string | null };
+
+/** Which routes a conditional request takes, and what it records. */
+export interface RevalidateOptions {
+  /** Take the routes `apiRequest` takes with `{ relay }` -- the addresses by
+   * name, then the servers' doors, then the relay of last resort when
+   * `relay` asks for it -- rather than the names alone.
+   *
+   * Only the names are offered the validator. An answer through a door or
+   * the relay is read by `relayResult`, which takes a 304 for a failure,
+   * so those legs ask unconditionally, exactly as `apiRequest` does, and
+   * their answer is the whole body with no tag: the next request then asks
+   * unconditionally too. */
+  lastResort?: { relay?: RelayUse };
+  /** Which addresses were tried, as `apiRequest`'s `trace`. A 304 is an
+   * answer there like any other (`h304`), not a failure. */
+  trace?: EndpointTrace;
+}
+
 /** Authenticated GET that offers the server a validator, so an unchanged
  * answer costs a 304 with no body instead of the whole payload.
  *
@@ -2870,12 +2891,61 @@ export type Revalidated<T> =
  * `If-None-Match` header with `===` against the tag it minted, so any
  * reshaping here silently turns every revalidation back into a full
  * download -- which would still be *correct*, and would therefore never
- * show up as a failure anywhere. */
-export async function apiRequestRevalidated<T>(path: string, etag: string | null): Promise<Revalidated<T>> {
+ * show up as a failure anywhere.
+ *
+ * Over the addresses by name alone unless `options.lastResort` says
+ * otherwise (`RevalidateOptions`). */
+export async function apiRequestRevalidated<T>(
+  path: string,
+  etag: string | null,
+  options: RevalidateOptions = {},
+): Promise<Revalidated<T>> {
   const validator = etag && etag.length > 0 ? etag : null;
+  const { lastResort, trace } = options;
+  if (!lastResort) return await revalidatedDirect<T>(path, validator, trace);
+
+  const traced = trace ?? newTrace();
+  const unconditional = (leg: RelayLeg<T>): RelayLeg<Conditional<T>> => ({
+    ...leg,
+    result:
+      leg.result && leg.result.ok
+        ? { ok: true, data: { notModified: false, data: leg.result.data, etag: null } }
+        : leg.result,
+  });
+  const relay = lastResort.relay;
+  const result = await withLastResort<Conditional<T>>(
+    traced,
+    async (asked): Promise<ApiResult<Conditional<T>>> => {
+      const answer = await revalidatedDirect<T>(path, validator, asked);
+      if (!answer.ok) return answer;
+      return {
+        ok: true,
+        data: answer.notModified
+          ? { notModified: true, etag: answer.etag }
+          : { notModified: false, data: answer.data, etag: answer.etag },
+      };
+    },
+    async () => unconditional(await authenticatedOver<T>(doorCarrier(traced), path, {})),
+    relay === undefined
+      ? null
+      : async (normal) => unconditional(await authenticatedOver<T>(relayCarrier(relay, normal), path, {})),
+  );
+  if (!result.ok) return result;
+  const answer = result.data;
+  return answer.notModified
+    ? { ok: true, notModified: true, etag: answer.etag }
+    : { ok: true, notModified: false, data: answer.data, etag: answer.etag };
+}
+
+/** `apiRequestRevalidated` over the addresses by name. */
+async function revalidatedDirect<T>(
+  path: string,
+  validator: string | null,
+  trace?: EndpointTrace,
+): Promise<Revalidated<T>> {
   const init: RequestInit | undefined = validator ? { headers: { "If-None-Match": validator } } : undefined;
 
-  const attempt = await authenticatedAttempt(path, init);
+  const attempt = await authenticatedAttempt(path, init, trace);
   if (!attempt.answered) return attempt.failure;
   const res = attempt.res;
 

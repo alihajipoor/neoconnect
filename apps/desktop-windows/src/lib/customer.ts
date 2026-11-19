@@ -32,6 +32,16 @@ export const getSubscriptions = (trace?: EndpointTrace) =>
   apiRequest<Subscription[]>("/customer/subscriptions", { relay: "background" }, trace);
 export const getProtocolUsers = (trace?: EndpointTrace) =>
   apiRequest<ProtocolUser[]>("/customer/protocol-users", { relay: "background" }, trace);
+/** `getProtocolUsers` for a caller holding the previous list: offers the
+ * server that list's tag, so an unchanged list costs a 304 with no body
+ * instead of ~100 KB (the config refresh, connection-config.ts). The same
+ * routes; the names are offered the tag, the doors and the relay are asked
+ * as `getProtocolUsers` asks them (`RevalidateOptions`). */
+export const revalidateProtocolUsers = (etag: string | null, trace?: EndpointTrace) =>
+  apiRequestRevalidated<ProtocolUser[]>("/customer/protocol-users", etag, {
+    lastResort: { relay: "background" },
+    trace,
+  });
 export const getAppLinks = () => apiRequest<AppLinks>("/customer/links");
 
 export const getPlans = () => apiRequest<SubscriptionPlan[]>("/customer/plans", { relay: "background" });

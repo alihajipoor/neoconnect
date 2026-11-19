@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ApiResult } from "./api";
+import type { ApiResult, Revalidated } from "./api";
 import { beginAttempt, settleAttempt, type EndpointTrace } from "./endpoint-trace";
 import type { ProtocolUser } from "./types";
 
@@ -32,9 +32,18 @@ vi.mock("@tauri-apps/plugin-store", () => ({
 }));
 
 /** The one API call the refresh makes. Handed the trace the refresh
- * passes down, so a test can record on it what the real request would. */
-const fetchUsers = vi.fn<(trace?: EndpointTrace) => Promise<ApiResult<ProtocolUser[]>>>();
-vi.mock("./customer", () => ({ getProtocolUsers: (trace?: EndpointTrace) => fetchUsers(trace) }));
+ * passes down, so a test can record on it what the real request would,
+ * and the tag it offered the server. A plain `{ ok, data }` stands for a
+ * 200 that carried no tag; the revalidation tests answer in the
+ * conditional shape themselves. */
+const fetchUsers =
+  vi.fn<(trace?: EndpointTrace, etag?: string | null) => Promise<ApiResult<ProtocolUser[]> | Revalidated<ProtocolUser[]>>>();
+vi.mock("./customer", () => ({
+  revalidateProtocolUsers: async (etag: string | null, trace?: EndpointTrace) => {
+    const answer = await fetchUsers(trace, etag);
+    return answer.ok && !("notModified" in answer) ? { ...answer, notModified: false, etag: null } : answer;
+  },
+}));
 
 /** Telemetry, spied on rather than sent. Whether a stale connect is
  * *visible* is half of what this change is for, so it is asserted rather
@@ -511,6 +520,151 @@ describe("refreshConnectionConfig", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect((await loadSnapshot())!.protocolUsers).toEqual([theirs]);
+  });
+});
+
+/** Revalidation: an unchanged list costs a 304 with no body.
+ *
+ * The refresh's list is ~100 KB for a normal account and almost never
+ * changes, and on restricted lines it is the body that does not arrive in
+ * time: of 189 failed refreshes in 48 h on two networks (2026-11-19), 87
+ * had their 200 in hand and ran out of budget reading it. So the refresh
+ * offers the tag of the list it holds, and a 304 means "still that". */
+describe("refreshConnectionConfig revalidation", () => {
+  const TAG = 'W/"pu-held"';
+
+  /** A held list on disk with its tag, past the horizon. */
+  async function seedWithTag(users: ProtocolUser[], etag: string) {
+    await seedCache(users, Date.now() - SNAPSHOT_TTL_MS - 1);
+    const data = fileOf("connection-cache.json");
+    data.set("snapshot", { ...(data.get("snapshot") as object), protocolUsersEtag: etag });
+  }
+
+  it("offers the server the tag of the list it holds", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedWithTag(held, TAG);
+    fetchUsers.mockResolvedValue({ ok: true, notModified: true, etag: TAG });
+
+    await refreshConnectionConfig({ held });
+
+    expect(fetchUsers).toHaveBeenCalledTimes(1);
+    expect(fetchUsers.mock.calls[0][1]).toBe(TAG);
+  });
+
+  it("keeps the held credentials on a 304, as a successful refresh that found nothing changed", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedWithTag(held, TAG);
+    const savedBefore = (await loadSnapshot())!.savedAt;
+    fetchUsers.mockResolvedValue({ ok: true, notModified: true, etag: TAG });
+
+    const result = await refreshConnectionConfig({ held });
+
+    expect(result.source).toBe("network");
+    expect(result.protocolUsers).toBe(held);
+    expect(result.drift).toEqual([]);
+    expect(result.sessionExpired).toBe(false);
+    // An answer, not a failure: nothing is reported as unreachable.
+    expect(reportAttempt).not.toHaveBeenCalled();
+    // Confirmed current, so the freshness horizon starts again from now,
+    // with the same list and the same tag.
+    await vi.waitFor(async () => {
+      const after = (await loadSnapshot())!;
+      expect(after.savedAt).toBeGreaterThan(savedBefore);
+      expect(after.protocolUsers).toEqual(held);
+      expect(after.protocolUsersEtag).toBe(TAG);
+    });
+    // And the next connect inside the horizon asks nothing.
+    fetchUsers.mockClear();
+    expect((await refreshConnectionConfig({ held })).source).toBe("fresh");
+    expect(fetchUsers).not.toHaveBeenCalled();
+  });
+
+  it("replaces the list and its tag on a 200", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedWithTag(held, TAG);
+    const moved = [reality("www.samsung.com")];
+    fetchUsers.mockResolvedValue({ ok: true, notModified: false, data: moved, etag: 'W/"pu-moved"' });
+
+    const result = await refreshConnectionConfig({ held });
+
+    expect(result.source).toBe("network");
+    expect(result.protocolUsers).toEqual(moved);
+    expect(result.drift).toHaveLength(1);
+    await vi.waitFor(async () => {
+      const after = (await loadSnapshot())!;
+      expect(after.protocolUsers).toEqual(moved);
+      expect(after.protocolUsersEtag).toBe('W/"pu-moved"');
+    });
+  });
+
+  it("drops the old tag when a 200 brings none", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedWithTag(held, TAG);
+    fetchUsers.mockResolvedValue({ ok: true, data: [reality("www.samsung.com")] });
+
+    await refreshConnectionConfig({ held });
+
+    await vi.waitFor(async () => {
+      const after = (await loadSnapshot())!;
+      expect(String(after.protocolUsers[0].connection.publicParams.serverName)).toBe("www.samsung.com");
+      expect(after.protocolUsersEtag).toBeUndefined();
+    });
+  });
+
+  it("asks without a tag when nothing is cached", async () => {
+    const held = [reality("cloudflare.com")];
+    fetchUsers.mockResolvedValue({ ok: true, notModified: false, data: held, etag: TAG });
+
+    const result = await refreshConnectionConfig({ held });
+
+    expect(fetchUsers.mock.calls[0][1]).toBeNull();
+    expect(result.source).toBe("network");
+  });
+
+  it("asks without a tag when the cache has none", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockResolvedValue({ ok: true, notModified: false, data: held, etag: TAG });
+
+    await refreshConnectionConfig({ held });
+
+    expect(fetchUsers.mock.calls[0][1]).toBeNull();
+    // The answer's tag is kept for the next refresh.
+    await vi.waitFor(async () => expect((await loadSnapshot())!.protocolUsersEtag).toBe(TAG));
+  });
+
+  /** The tag stands for the list on disk. Held here is something else --
+   * a list a screen put up that the cache does not hold -- so a 304 would
+   * vouch for credentials nobody is about to dial: it asks unconditionally. */
+  it("asks without a tag when what it holds is not the list the tag is for", async () => {
+    await seedWithTag([reality("cloudflare.com")], TAG);
+    const held = [reality("www.apple.com")];
+    fetchUsers.mockResolvedValue({ ok: true, notModified: false, data: held, etag: 'W/"pu-apple"' });
+
+    await refreshConnectionConfig({ held });
+
+    expect(fetchUsers.mock.calls[0][1]).toBeNull();
+  });
+
+  /** A 304 that comes in after the budget is kept as a 200 with the same
+   * list would be: the cache's horizon starts again, and the screen is
+   * told what it already holds. */
+  it("keeps a late 304", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedWithTag(held, TAG);
+    const savedBefore = (await loadSnapshot())!.savedAt;
+    let answer: (value: Revalidated<ProtocolUser[]>) => void = () => undefined;
+    fetchUsers.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    const onLateAnswer = vi.fn();
+
+    const result = await refreshConnectionConfig({ held, budgetMs: 30, onLateAnswer });
+    expect(result.source).toBe("stale");
+    answer({ ok: true, notModified: true, etag: TAG });
+
+    await vi.waitFor(() => expect(onLateAnswer).toHaveBeenCalledWith(held));
+    const after = (await loadSnapshot())!;
+    expect(after.savedAt).toBeGreaterThan(savedBefore);
+    expect(after.protocolUsersEtag).toBe(TAG);
   });
 });
 
