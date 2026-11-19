@@ -142,10 +142,44 @@ export class CustomerController {
 
   @AllowUnverified()
   @Get("protocol-users")
-  protocolUsers(@CurrentCustomer() customer: AuthenticatedCustomer) {
+  async protocolUsers(
+    @CurrentCustomer() customer: AuthenticatedCustomer,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     // This device's own credentials when the token names a session --
     // see listForDevice and docs/per-device-credentials.md.
-    return this.protocolUsersService.listForDevice(customer.sub, customer.sid);
+    const users = await this.protocolUsersService.listForDevice(customer.sub, customer.sid);
+
+    // Revalidation, as `gaming-profile` does it, for the apps' background
+    // config refresh: ~100 KB of JSON for a normal account, almost always
+    // unchanged, and on restricted lines the body is the part that does not
+    // arrive (2026-11-19: of 189 failed refreshes in 48 h on two networks,
+    // 87 had a 200 in hand and ran out of time reading it). An app holding
+    // the previous answer offers its tag and gets a 304 with no body.
+    //
+    // Unlike the gaming catalogue, building this answer is not the cost --
+    // the transfer is -- so the tag is a hash of the exact body this caller
+    // would get, which follows every field without a list of them to keep.
+    // The customer and the device session are mixed in too: the answer is
+    // per device (its own credentials), and one device's tag must never
+    // validate another's answer even where the two bodies happen to match.
+    //
+    // A caller that sends no validator -- every app before this -- gets the
+    // 200 and the body it always got, with an ETag it ignores.
+    const identity = `${customer.sub}:${customer.sid ?? ""}:${JSON.stringify(users)}`;
+    const etag = `W/"pu-${createHash("sha256").update(identity).digest("base64url").slice(0, 27)}"`;
+
+    // Private: the tag and the body are one customer's credentials.
+    res.setHeader("Cache-Control", "private, no-cache, must-revalidate");
+    res.setHeader("ETag", etag);
+
+    if (req.headers["if-none-match"] === etag) {
+      res.status(HttpStatus.NOT_MODIFIED);
+      return undefined;
+    }
+
+    return users;
   }
 
   @Get("plans")
