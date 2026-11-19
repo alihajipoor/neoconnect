@@ -547,15 +547,22 @@ pub fn looks_like_vpn(description: &str) -> bool {
 /// neither was the problem, and neither should have been named.
 ///
 /// `ours` is excluded by friendly name, since our own tunnel is up by
-/// the time anything asks this.
+/// the time anything asks this. It has to name every adapter a session of
+/// ours brings up -- WireGuard's above all, whose driver reads "WireGuard
+/// Tunnel" like anyone else's (`engines::OUR_ADAPTER_NAMES`).
 pub fn other_vpns_up(ours: &[&str]) -> io::Result<Vec<String>> {
-    Ok(list()?
+    Ok(vpns_up_among(list()?, ours))
+}
+
+/// [`other_vpns_up`] over a given adapter list.
+fn vpns_up_among(adapters: Vec<Adapter>, ours: &[&str]) -> Vec<String> {
+    adapters
         .into_iter()
         .filter(|a| a.is_up && a.ipv4.is_some())
         .filter(|a| !ours.iter().any(|o| a.name.eq_ignore_ascii_case(o)))
         .filter(|a| looks_like_vpn(&a.description))
         .map(|a| a.name)
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -593,6 +600,35 @@ mod vpn_detection_tests {
         ] {
             assert!(!looks_like_vpn(d), "{d} must NOT be treated as a rival VPN");
         }
+    }
+
+    fn up(name: &str, description: &str) -> Adapter {
+        Adapter {
+            index: 7,
+            name: name.to_string(),
+            gateway: None,
+            ipv4: Some(Ipv4Addr::new(10, 7, 0, 2)),
+            ipv4_prefix: Some(32),
+            ipv4_all: vec![Ipv4Addr::new(10, 7, 0, 2)],
+            is_up: true,
+            dhcp_server: None,
+            description: description.to_string(),
+        }
+    }
+
+    /// Our own WireGuard tunnel's adapter has a WireGuard driver like any
+    /// other; only its name says it is ours. Named in `ours`, it is never
+    /// another VPN -- in any letter case -- while a stranger's beside it is.
+    #[test]
+    fn our_own_wireguard_adapter_is_not_another_vpn() {
+        let machine = vec![
+            up("neoconnect", "WireGuard Tunnel"),
+            up("Office", "WireGuard Tunnel #2"),
+            up("Wi-Fi", "802.11n USB Wireless LAN Card"),
+        ];
+        assert_eq!(vpns_up_among(machine.clone(), &["neoconnect0", "NEOCONNECT"]), vec!["Office".to_string()]);
+        // The fault: a list without WireGuard's name counted our tunnel.
+        assert_eq!(vpns_up_among(machine, &["neoconnect0"]), vec!["neoconnect".to_string(), "Office".to_string()]);
     }
 }
 

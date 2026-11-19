@@ -710,14 +710,14 @@ pub(crate) fn diagnostics(engines: &mut Engines) -> Diagnostics {
     let exe_dir = engines.exe_dir.clone();
     Diagnostics {
         service_version: env!("CARGO_PKG_VERSION").to_string(),
-        our_adapters: janitor::OUR_ADAPTERS
+        our_adapters: DIAGNOSED_ADAPTERS
             .iter()
             .map(|name| neoconnect_ipc::AdapterPresence {
                 name: (*name).to_string(),
                 present: matches!(adapters::find_by_name(name), Ok(Some(_))),
             })
             .collect(),
-        other_vpns_up: adapters::other_vpns_up(&janitor::OUR_ADAPTERS).unwrap_or_default(),
+        other_vpns_up: adapters::other_vpns_up(&DIAGNOSED_ADAPTERS).unwrap_or_default(),
         our_routes: our_routes_named(),
         nrpt_rules: dns::rule_count(),
         split_tunnel_firewall_rule: split_tunnel_rule_present().unwrap_or(false),
@@ -730,6 +730,14 @@ pub(crate) fn diagnostics(engines: &mut Engines) -> Diagnostics {
         cleanup_log_tail: crate::cleanup_log::tail(40),
     }
 }
+
+/// The adapters the diagnostics call ours: every one a session of ours
+/// brings up -- Xray's, the WireGuard tunnel service's, OpenVPN's and the
+/// IKEv2 connection's (`OUR_ADAPTER_NAMES`, the list the connect path's own
+/// rival check uses). Not the janitor's, which holds only the two whose
+/// routes a repair purges: read through that one, our own WireGuard tunnel
+/// was listed as another VPN and its routes as none of ours.
+const DIAGNOSED_ADAPTERS: [&str; 4] = super::OUR_ADAPTER_NAMES;
 
 /// How many IPv4 routes sit on each of our adapters, right now.
 fn our_route_counts() -> Vec<(&'static str, usize)> {
@@ -745,10 +753,11 @@ fn our_route_counts() -> Vec<(&'static str, usize)> {
         .collect()
 }
 
-/// The same routes, as `adapter: destination/prefix`, for diagnostics.
+/// The routes on every adapter of ours, as `adapter: destination/prefix`,
+/// for diagnostics.
 fn our_routes_named() -> Vec<String> {
     let mut out = Vec::new();
-    for name in janitor::OUR_ADAPTERS {
+    for name in DIAGNOSED_ADAPTERS {
         let Ok(Some(adapter)) = adapters::find_by_name(name) else {
             continue;
         };
@@ -1040,6 +1049,29 @@ mod tests {
             "the shared worst case ({}s) no longer covers what this pass can cost ({worst}s)",
             neoconnect_ipc::REPAIR_WORST_CASE.as_secs()
         );
+    }
+
+    /// The diagnostics call every adapter of ours ours: with our WireGuard
+    /// tunnel up, the text said "other VPNs up: 1" and "routes on our
+    /// adapters: none" (the Windows guest, desktop 0.9.65), because they read
+    /// the janitor's two-name purge list. The purge itself stays on that list.
+    #[test]
+    fn the_diagnostics_count_every_adapter_of_ours_as_ours() {
+        for name in [super::super::xray::ADAPTER_NAME, wireguard::TUNNEL_NAME, super::super::openvpn::ADAPTER_NAME, ikev2::ENTRY_NAME] {
+            assert!(DIAGNOSED_ADAPTERS.contains(&name), "{name} is not one of the diagnostics' own adapters");
+        }
+        let source = include_str!("repair.rs");
+        let body_of = |signature: &str| {
+            let start = source.find(signature).unwrap();
+            &source[start..start + source[start..].find("\n}\n").unwrap()]
+        };
+        for body in [body_of("pub(crate) fn diagnostics("), body_of("fn our_routes_named() -> Vec<String> {")] {
+            assert!(!body.contains("janitor::OUR_ADAPTERS"), "the diagnostics read the purge list again");
+        }
+        assert!(body_of("pub(crate) fn diagnostics(").contains("our_adapters: DIAGNOSED_ADAPTERS"));
+        assert!(body_of("pub(crate) fn diagnostics(").contains("adapters::other_vpns_up(&DIAGNOSED_ADAPTERS)"));
+        assert!(body_of("fn our_routes_named() -> Vec<String> {").contains("for name in DIAGNOSED_ADAPTERS {"));
+        assert_eq!(janitor::OUR_ADAPTERS.len(), 2, "the purge list changed: decide whether WireGuard's routes are a repair's");
     }
 
     /// The survey counts what is on the machine before `status()` can

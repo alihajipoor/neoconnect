@@ -422,15 +422,17 @@ pub struct Diagnostics {
     /// the updater, and a mismatch between them has explained more than
     /// one report.
     pub service_version: String,
-    /// Our two adapters, by the fixed names this product gives them, and
+    /// Our adapters -- Xray's, the WireGuard tunnel's, OpenVPN's and the
+    /// IKEv2 connection's -- by the fixed names this product gives them, and
     /// whether each is present. Deliberately not the machine's adapter
     /// list -- a customer's Wi-Fi network name is theirs, not ours.
     pub our_adapters: Vec<AdapterPresence>,
     /// Other VPN clients' adapters that are up right now, by friendly
-    /// name. The same list the connect path already shows the customer,
-    /// and a common cause of "the VPN broke my network".
+    /// name: never one of `our_adapters`. The same list the connect path
+    /// already shows the customer, and a common cause of "the VPN broke my
+    /// network".
     pub other_vpns_up: Vec<String>,
-    /// IPv4 routes sitting on our adapters, as `destination/prefix`.
+    /// IPv4 routes sitting on our adapters, as `adapter: destination/prefix`.
     /// Destinations only; no gateways, which can name the customer's own
     /// LAN.
     pub our_routes: Vec<String>,
