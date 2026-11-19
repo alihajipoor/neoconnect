@@ -362,7 +362,13 @@ const en = {
   "settings.customOn": "On",
   "settings.customOff": "Off",
   "settings.customAddApp": "Add an app",
-  "settings.customNoApps": "No apps chosen yet, so nothing goes through the VPN. Add one to start.",
+  // With nothing chosen, Custom mode changes nothing: the whole computer
+  // goes through the VPN, as with it off (`isEffective`; the service's
+  // `wants_interception`, the Linux helper's `shape_of`). This once said
+  // nothing went through it, under an Overview that rightly said
+  // everything did.
+  "settings.customNoApps":
+    "No apps chosen yet, so everything on this computer goes through the VPN. Add an app to send only that app through it.",
   "settings.customRemove": "Remove",
   "settings.customApplies": "Applies from your next connection.",
   "settings.customFailOpen": "While the app switches servers, the apps you chose briefly use your normal connection instead of stalling.",
@@ -577,11 +583,11 @@ const en = {
   // Android picks from the installed-app list rather than a file
   // dialog, so these have no Windows counterpart.
   //
-  // customAllApps is not a translation of customNoApps -- it is the
-  // opposite fact. On Windows, on-with-nothing-chosen routes nothing;
-  // on Android an empty allow-list would route nothing at all, so the
-  // app falls back to a full tunnel instead. Same toggle state, opposite
-  // consequence, and telling somebody the wrong one is worse than saying
+  // customAllApps is the phone's own sentence for the same fact as
+  // customNoApps: with nothing chosen, every app goes through the VPN. On
+  // the desktops Custom mode then changes nothing; on Android an empty
+  // allow-list would route nothing at all, so the app falls back to a full
+  // tunnel instead. Telling somebody the wrong one is worse than saying
   // nothing.
   // Android only: this build carries one engine, and a customer who
   // picked another protocol deserves the reason rather than a silent
@@ -1894,7 +1900,8 @@ const fa: Record<TranslationKey, string> = {
   "settings.customOn": "روشن",
   "settings.customOff": "خاموش",
   "settings.customAddApp": "افزودن برنامه",
-  "settings.customNoApps": "هنوز برنامه‌ای انتخاب نکرده‌اید، پس چیزی از وی‌پی‌ان نمی‌گذرد. برای شروع یک برنامه اضافه کنید.",
+  "settings.customNoApps":
+    "هنوز برنامه‌ای انتخاب نکرده‌اید، پس همهٔ ترافیک این کامپیوتر از وی‌پی‌ان می‌گذرد. اگر می‌خواهید فقط یک برنامه از وی‌پی‌ان بگذرد، آن را اضافه کنید.",
   "settings.customRemove": "حذف",
   "settings.customApplies": "از اتصال بعدی اعمال می‌شود.",
   "settings.customFailOpen": "وقتی برنامه سرور را عوض می‌کند، برنامه‌های انتخابی شما برای چند لحظه از اینترنت معمولی استفاده می‌کنند تا قطع نشوند.",

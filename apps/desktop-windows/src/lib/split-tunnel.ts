@@ -361,9 +361,10 @@ export async function listRunningApps(): Promise<RunningApp[]> {
 /** Whether the setting will actually change how the next tunnel behaves.
  *
  * On with nothing chosen is a real state -- the customer flipped the
- * toggle and has not picked an app yet -- and it deliberately does
- * nothing rather than tunnelling everything. The UI has to say so, or
- * the toggle reads as broken. */
+ * toggle and has not picked an app yet -- and it deliberately changes
+ * nothing: the whole computer goes through the VPN, as with it off. The
+ * UI has to say so (`settings.customNoApps`), or the toggle reads as
+ * broken. */
 export function isEffective(settings: SplitTunnelSettings): boolean {
   return settings.enabled && settings.apps.length > 0;
 }

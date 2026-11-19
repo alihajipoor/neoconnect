@@ -639,8 +639,9 @@ export function CustomModeCard() {
 
           {settings.apps.length === 0 ? (
             <p className="rounded-md border border-[color-mix(in_oklab,var(--warn)_35%,transparent)] bg-[var(--warn-tint)] px-3 py-2 text-xs text-[var(--warn-ink)]">
-              {/* Says what is actually happening, which is opposite in
-                  the two directions: nothing routed, or everything. */}
+              {/* Says what is actually happening: with nothing chosen,
+                  everything goes through the VPN in either direction
+                  (`isEffective`). Each says it with its own next step. */}
               {settings.mode === "allExcept"
                 ? t("settings.customNoAppsExcept")
                 : t("settings.customNoApps")}
