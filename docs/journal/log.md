@@ -10957,3 +10957,38 @@ Android's tunnel code is unchanged since 0.2.43; what did change
 (compressed answers, the server list's tag) is shared code that passed the
 whole checklist on Windows 0.9.67, which has been live a day with every
 customer who tried connecting.
+
+## 2026-11-21 (later) — germany-3 and finland-4 replaced, and the signed lists v10 / v103
+
+Both servers were blocked from inside the country (germany-3 unreachable from both inside boxes;
+finland-4 unreachable from the relay box since about 00:00Z, held on the sign-in network since
+11-17). The owner supplied two new Hetzner boxes; each was replaced with one `fleet replace` run:
+**germany-4** for germany-3 and **finland-5** for finland-4. Both ran to "Checklist complete" in
+about half an hour each, stops included.
+
+**Before building:** the empty-box test from inside passed from the relay box on every port and
+was held from the sign-in box (germany-4 on 3 ports, finland-5 on 2 of 3). Most of the fleet reads
+the same on that network today; the owner chose to build. **Proven per server:** every Xray protocol
+exits on the server's own address with 256 KB both ways from outside and from the relay box,
+WireGuard, OpenVPN and IKEv2 dialled with issued credentials, a reboot test, then the customer
+plans. germany-4 now carries the relay hop (Turkey, Netherlands, UK); every exit behind it was
+re-proven through the relay after the move. germany-4's own relay routes waited for a free entry
+set (finland-4's retirement freed one), were added afterwards, proven through the relay (4 of 4,
+exit address matched) and put into Ultimate (28 -> 32 routes).
+
+**Signed lists:** the two retired servers' direct mirrors were swapped in place for the new ones
+(offline v10, server v103, signed on the Mac). Proven through all 13 ordinary entries with the
+apps' own store code, from both inside boxes (the two unblocked panel names and the relay-box doors
+serve the new lists; every other name is still poisoned inside, as before), and on the public copies.
+
+**Found and fixed in the tool** (main d8c7572b): the UDP reach check read tcpdump's file while it was
+still buffered, so arriving datagrams read as "nothing arrived" (`-l`); and an `--only` run compared
+the relay's Xray process with a start reading it never took, so a relay untouched since October read
+as restarted (now proven by its start time). **Still a gap:** adding relay routes later to a server
+already in customer plans stops at the canary step; the plan edit was done with the tool's own
+`nx-plan-edit.sh`. On finland-5, cloud-init raced the network card rename on the reboot test
+(Hetzner's metadata over IPv6 link-local did not answer): network fine, cloud-init disabled on the box.
+
+**Not proven yet:** real customers on germany-4 (none had tried it 90 minutes after the plan switch;
+finland-5 already carried a customer's traffic from a home network); the sign-in network's view of
+both servers beyond the empty-box test.
