@@ -157,7 +157,7 @@ const relay = (args, env = {}) => {
 describe("the relay box's Xray, as its API really prints", () => {
   it("a route rule is one rule, though it is printed as two lines that carry its tag", () => {
     const out = relay(["state", ID1, GONE]);
-    assert.match(out, /^xray pid 74478, restarts 0$/m);
+    assert.match(out, /^xray pid 74478, restarts 0, started (\d+|unknown)$/m);
     assert.match(out, /^route rules 2, route outbounds 2$/m);
     assert.match(out, new RegExp(`^${ID1} rules=1 outbounds=1$`, "m"));
   });

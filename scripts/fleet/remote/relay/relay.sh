@@ -40,7 +40,9 @@ CHAIN="ip neoxify_relay_chain output"
 W=/dev/shm/nxf
 verb=${1:-}
 shift || true
-xstate() { echo "xray pid $(systemctl show xray -p MainPID --value), restarts $(systemctl show xray -p NRestarts --value)"; }
+# "started" is Xray's start as epoch seconds: the only way to tell "never
+# restarted" in a run that took no start reading (an --only run).
+xstate() { echo "xray pid $(systemctl show xray -p MainPID --value), restarts $(systemctl show xray -p NRestarts --value), started $(date -d "$(systemctl show xray -p ActiveEnterTimestamp --value)" +%s 2>/dev/null || echo unknown)"; }
 # rule_count <rule listing> <tag pattern>: how many route rules carry
 # that tag. `xray api lsrules` prints a rule as two lines, "ruleTag" and
 # "tag", and both hold the route's tag: counted by line, the 28 rules of

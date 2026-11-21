@@ -65,6 +65,22 @@ relay_pid_same() {
   out="$(rscript relay relay/relay.sh state)" || return 1
   dry && return 0
   pid="$(sed -n 's/^xray pid \([0-9]*\),.*/\1/p' <<<"$out" | head -1)"
+  if ! state_has relay_pid; then
+    # No start reading: an --only run skips add.snapshot (germany-4's relay
+    # routes, 2026-11-21, stopped here on a healthy relay). The proof is then
+    # that Xray started before this run did. The margin absorbs clock drift
+    # between this PC and the relay box.
+    local started since
+    started="$(sed -n 's/^xray pid [0-9]*,.* started \([0-9]*\).*/\1/p' <<<"$out" | head -1)"
+    since="$(stat -c %Y "$RUN_DIR/argv" 2>/dev/null)"
+    if [[ "$started" =~ ^[0-9]+$ && "$since" =~ ^[0-9]+$ ]] && (( started < since - 300 )); then
+      say "relay box Xray: running since before this run started (no start reading in this run), never restarted"
+      return 0
+    fi
+    say "RELAY BOX XRAY: no start reading in this run, and its start time (${started:-unknown}) is not clearly before the run's."
+    say "It may have been restarted: check every relay route now."
+    return 1
+  fi
   if [[ "$pid" == "$(st relay_pid x)" ]]; then
     say "relay box Xray: same process as at the start (never restarted)"
   else
