@@ -10920,3 +10920,40 @@ finished).
 **Not proven:** a restricted network itself; Linux beyond the shared code;
 the 79 misses where no address answered at all (blocked addresses) are
 untouched by this and need new addresses.
+
+## 2026-11-21 — Android 0.2.44 and iPhone 1.0.4, and testing the exact Android build
+
+**iPhone 1.0.4 (build 24)** carries the same change as Windows 0.9.67:
+built on the Mac, uploaded, and submitted for App Review with release
+type manual. Purchases were not re-tested on this build; that code is
+unchanged since 1.0.3.
+
+**Android 0.2.44** was first tagged straight away, and a pushed
+`android-v*` tag publishes as soon as it builds. The owner then asked for
+it to be tested first, so the run was cancelled before its publish step;
+nothing reached customers.
+
+**How the exact build is tested now.** `release-android.yml` gained a
+build-only mode: run it by hand with an existing tag and it builds, signs
+and checks exactly what that tag ships, keeps the files as a workflow
+artifact and publishes nothing. That APK carries the release key, so it
+installs over the released version as a real upgrade. A debug build's
+throwaway key could do neither. Once it passes, those same files are
+published to the releases repository by hand, so what ships is what was
+tested, not a rebuild.
+
+**What was proven on the emulator** (release 0.2.43 installed first, then
+0.2.44 over it): the upgrade went in as an update and kept the app's
+data; the sign-in screen appeared in 13 s with no error and a live HTTPS
+connection to the service; Persian and English read correctly; Register
+and back work; two minutes in the background and back, same screen, no
+error; no crash or ANR in the logs. The public download link then served a
+file whose sha256 matches the tested one.
+
+**Not proven on Android:** anything that needs a signed-in account
+(connecting, switching, drop recovery, the Support screen, the server-side
+rows), because test tools may not type a password into the live service.
+Android's tunnel code is unchanged since 0.2.43; what did change
+(compressed answers, the server list's tag) is shared code that passed the
+whole checklist on Windows 0.9.67, which has been live a day with every
+customer who tried connecting.
