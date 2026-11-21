@@ -13,10 +13,25 @@ name: Release Android
 # rather than out of the tag. Same reasoning as the desktop path: the
 # filename is written by the build from the version compiled in, so it
 # cannot disagree with what the app reports about itself.
+#
+# Run by hand (workflow_dispatch) with an existing tag, it builds and signs
+# exactly what that tag would ship, runs every check below, and stops short
+# of publishing: the APK, the AAB and sha256sums.txt are kept as a workflow
+# artifact instead. That is the build the regression checklist is run on.
+# It carries the release signature, so it installs over the released
+# version as a real upgrade and keeps the sign-in -- a debug build's
+# throwaway key can do neither. Once it passes, those same files are
+# published to the releases repository by hand (gh release create), so
+# what ships is the very build that was tested, not a rebuild of it.
 on:
   push:
     tags:
       - "android-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing android-v* tag to build and sign without publishing"
+        required: true
 
 permissions:
   contents: write
@@ -24,8 +39,13 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      # The tag being built: the pushed one, or the one named by hand.
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -111,10 +131,10 @@ jobs:
       # so the pipeline refuses it instead.
       - name: Check the tag matches the app version
         run: |
-          tagged="${GITHUB_REF_NAME#android-v}"
+          tagged="${TAG#android-v}"
           built=$(node -p "require('./apps/mobile/src-tauri/tauri.conf.json').version")
           if [ "$tagged" != "$built" ]; then
-            echo "Tag $GITHUB_REF_NAME says $tagged but the app is built as $built." >&2
+            echo "Tag $TAG says $tagged but the app is built as $built." >&2
             echo "Bump package.json, src-tauri/Cargo.toml and src-tauri/tauri.conf.json, commit, then tag." >&2
             exit 1
           fi
@@ -220,7 +240,7 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#android-v}"
+          version="${TAG#android-v}"
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore.jks
           # Universal, so one download works on both architectures. The
           # per-ABI splits exist too, but a website download link cannot
@@ -272,7 +292,7 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#android-v}"
+          version="${TAG#android-v}"
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore.jks
           unsigned=$(find src-tauri/gen/android/app/build/outputs/bundle -name '*.aab' | head -1)
           if [ -z "$unsigned" ]; then
@@ -367,6 +387,7 @@ jobs:
       # customer reading the download page. The generated commit list is
       # still appended underneath.
       - name: Read the tag's message
+        if: github.event_name == 'push'
         id: tagmsg
         shell: bash
         run: |
@@ -385,6 +406,7 @@ jobs:
       # Android release was copied across by hand; 0.2.22 sat behind the
       # still-served 0.2.21 until it was.
       - name: Create GitHub Release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           repository: alihajipoor/neoxify-releases
@@ -402,3 +424,17 @@ jobs:
           # the release lands in, which holds binaries only, and the API
           # refuses the call with a 403. See the desktop workflow.
           generate_release_notes: false
+
+      # A run by hand publishes nothing: it keeps the signed, checked files
+      # for the regression checklist (see the top of this file).
+      - name: Keep the build for testing
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-${{ env.TAG }}
+          path: |
+            apps/mobile/Neoxify-*.apk
+            apps/mobile/Neoxify-*.aab
+            apps/mobile/sha256sums.txt
+          if-no-files-found: error
+          retention-days: 14
