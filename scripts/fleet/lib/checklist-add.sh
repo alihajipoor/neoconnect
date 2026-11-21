@@ -1234,6 +1234,11 @@ ok_add_temp_off() {
 }
 
 do_add_udp_reach() {
+  # tcpdump -l: the check reads the file while tcpdump is still running
+  # (about 10 s into its 15), and without line buffering its output sits in
+  # a 4 KB stdio buffer until it exits. Once the kept SSH connection made the
+  # send fast, every datagram that did arrive read as "NOTHING ARRIVED"
+  # (germany-4, 2026-11-21: reproduced on the box, 0 lines without -l, 2 with).
   local ports
   ports="$(q node-ports "name=$(nn)")" || return 1
   dry && ports=$'WIREGUARD/UDP|{wg_port}\nOPENVPN/UDP|{ovpn_port}'
@@ -1241,7 +1246,7 @@ do_add_udp_reach() {
   dry || state_set udp_ports "$ports"
   local filter
   filter="udp and ($(sed 's/[^ ][^ ]*/dst port &/g; s/ dst/ or dst/g' <<<"$ports"))"
-  rsh new "IF=\$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if(\$i==\"dev\") print \$(i+1)}' | head -1); mkdir -p $REMOTE_DIR; (timeout 15 tcpdump -ni \$IF -c 60 '$filter' > $REMOTE_DIR/udp.cap 2>/dev/null < /dev/null &) ; sleep 2; echo capture-started" || return 1
+  rsh new "IF=\$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if(\$i==\"dev\") print \$(i+1)}' | head -1); mkdir -p $REMOTE_DIR; (timeout 15 tcpdump -l -ni \$IF -c 60 '$filter' > $REMOTE_DIR/udp.cap 2>/dev/null < /dev/null &) ; sleep 2; echo capture-started" || return 1
   pscript nx-node-outside.sh "$(nn)" "$(need l1)" "$(need l2)" udp-send || return 1
   dry || sleep 6
 }
